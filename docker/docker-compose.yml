@@ -1,0 +1,14 @@
+# Alternative to deploy/install.sh:  echo "DOMAIN=chat.example.com" > .env && docker compose up -d
+services:
+  relay:
+    build: {context: .., dockerfile: docker/Dockerfile}
+    restart: unless-stopped
+    volumes: [relay-data:/data]
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment: [DOMAIN]
+    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro, caddy-data:/data, caddy-config:/config]
+    depends_on: [relay]
+volumes: {relay-data: {}, caddy-data: {}, caddy-config: {}}
