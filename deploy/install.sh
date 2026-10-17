@@ -1,7 +1,7 @@
 #!/bin/bash
 # Install (or repair) the A.F.R.A ♥ chat on an Ubuntu/Debian server, next to anything else running there.
 #   sudo bash deploy/install.sh chat.example.com      (or 203-0-113-5.sslip.io for IP 203.0.113.5)
-# Runs the relay as its own service on 127.0.0.1:8090 (memory-capped) and Caddy for HTTPS on ports 80/443.
+# Runs the chat server as its own service on 127.0.0.1:8090 (memory-capped) and Caddy for HTTPS on ports 80/443.
 set -euo pipefail
 DOMAIN="${1:?Give the address, e.g. sudo bash deploy/install.sh 203-0-113-5.sslip.io}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,20 +10,20 @@ PORT=8090
 
 echo "==> Python environment"
 sudo -u "$RUN_AS" python3 -m venv "$DIR/.venv"
-sudo -u "$RUN_AS" "$DIR/.venv/bin/pip" install -q --disable-pip-version-check -r "$DIR/relay/requirements.txt"
+sudo -u "$RUN_AS" "$DIR/.venv/bin/pip" install -q --disable-pip-version-check -r "$DIR/server/requirements.txt"
 sudo -u "$RUN_AS" mkdir -p "$DIR/data"
 
 echo "==> Relay service"
 cat > /etc/systemd/system/afra-relay.service <<UNIT
 [Unit]
-Description=A.F.R.A chat relay
+Description=A.F.R.A chat
 After=network-online.target
 
 [Service]
 User=$RUN_AS
-WorkingDirectory=$DIR/relay
-Environment=RELAY_DATA=$DIR/data WEB_DIR=$DIR/web PUSH_CONTACT=mailto:afra@$DOMAIN
-ExecStart=$DIR/.venv/bin/uvicorn relay:app --host 127.0.0.1 --port $PORT --proxy-headers --forwarded-allow-ips 127.0.0.1 --ws-max-size 131072
+WorkingDirectory=$DIR/server
+Environment=CHAT_DATA=$DIR/data WEB_DIR=$DIR/web PUSH_CONTACT=mailto:afra@$DOMAIN
+ExecStart=$DIR/.venv/bin/uvicorn server:app --host 127.0.0.1 --port $PORT --proxy-headers --forwarded-allow-ips 127.0.0.1 --ws-max-size 131072
 Restart=always
 RestartSec=3
 MemoryMax=300M
@@ -59,5 +59,12 @@ caddy validate --config /etc/caddy/Caddyfile >/dev/null
 systemctl enable --now caddy >/dev/null 2>&1
 systemctl reload caddy
 
+sleep 2
+CODE=$(sudo -u "$RUN_AS" CHAT_DATA="$DIR/data" "$DIR/.venv/bin/python" -c "
+import sqlite3; c = sqlite3.connect('$DIR/data/chat.db')
+users = c.execute('select count(*) from users').fetchone()[0]
+r = c.execute(\"select code from invites where admin=1 and used_by is null and kind='invite'\").fetchone()
+print(r[0] if r and not users else '')" 2>/dev/null || true)
 echo "==> Done: https://$DOMAIN"
+[ -n "$CODE" ] && echo "   Create the admin account with invite code: $CODE   (https://$DOMAIN/#invite=$CODE)"
 echo "   (ports 80 and 443 must be open in your cloud firewall, e.g. Lightsail > Networking)"

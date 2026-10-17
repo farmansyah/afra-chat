@@ -1,42 +1,46 @@
 # A.F.R.A ♥ chat
 
-A private chat for two, as an iPhone (and Android) Home Screen app with real push notifications. No App Store, no
-accounts, no third-party chat service: it runs on your own server, and every message is end-to-end encrypted, so even
-the server can't read them.
+A small private social chat on your own server, installable on iPhone and Android from the browser (no App Store),
+with real push notifications.
 
-- Text and emoji, 200+ ready-made love and encouragement notes in English and Indonesian (💌, with "Surprise me")
-- Photos, files and voice notes; replies, reactions (double-tap for ❤️), edit, delete, search
-- "typing…", online status, read ticks (✓ sent, ✓✓ read), unread badge on the app icon
-- Push notifications on iPhone (iOS 16.4+, app added to the Home Screen) and Android
-- Also built into [A.F.R.A](https://github.com/farmansyah/afra) on the computers (the ♥ → Messages), which keeps a
-  backup copy of every message in the shared library folder
+- **Accounts:** everyone chooses a username, a display name, a password and a profile photo. Stay logged in on each
+  device; log in on more devices (phone, laptop) with the same account.
+- **Invite only:** the admin makes invite codes (single use, optionally "make them an admin too"). Signing up with a
+  code also starts the chat with whoever invited you.
+- **Chats:** type someone's @username and talk right away, with no request to accept. One chat per person, plus
+  **Notes to self**. All chats are saved on the server, and each device keeps an offline copy.
+- **Messages:** text and emoji, 💌 200+ ready-made love and encouragement notes (English and Indonesian, "Surprise me"),
+  photos, files, voice notes, replies, reactions (double-tap for ❤️), edit, delete for everyone, search, "typing…",
+  online/last seen, read ticks (✓ sent, ✓✓ read), unread badges (also on the app icon).
+- **Notifications** show the sender's name and the message, and open that chat when tapped. They are encrypted for
+  the receiving phone (Web Push, RFC 8291), so Apple's and Google's push services can't read them.
+- **Admin:** people (see who's online, switch an account off, make admin, password-reset codes) and invites.
 
-## Use it on an iPhone
-1. Open the chat's address (e.g. `https://13-222-66-73.sslip.io`) in **Safari**. The partner link from
-   A.F.R.A (⋯ → *Add your iPhone*) fills in the pairing code for you.
-2. Tap **Share** ⬆ → **Add to Home Screen**, then open **A.F.R.A ♥** from its new icon.
-3. Enter the pairing code and your name, tap **Join ♥**, then **Turn on** notifications.
-
-Both of you use the same pairing code on every phone and computer. It is the key to your chat: keep it between you.
+## On an iPhone (iOS 16.4+)
+1. Open the invite link you received (or the chat's address) in **Safari**.
+2. Tap **Share** ⬆ → **Add to Home Screen**, then open **A.F.R.A ♥** from its icon.
+3. Create your account (the invite code is filled in from the link), then tap **Turn on** for notifications.
 
 ## Run the server
-Any small Ubuntu/Debian VPS works (the relay uses about 50 MB of memory). It runs next to other services.
+Any small Ubuntu/Debian VPS (it uses about 60 MB of memory) next to anything else:
 ```bash
 git clone https://github.com/farmansyah/afra-chat.git && cd afra-chat
 sudo bash deploy/install.sh 203-0-113-5.sslip.io     # your domain, or <your-ip-with-dashes>.sslip.io
 ```
-Open ports **80 and 443** in the cloud firewall (Lightsail: *Networking → IPv4 Firewall*). Caddy gets the HTTPS
-certificate by itself. Update later with `bash deploy/update.sh`. Docker instead: see `docker/`.
+It prints the **first admin invite code**. Open ports 80 and 443 in the cloud firewall (Lightsail: *Networking →
+IPv4 Firewall*); Caddy gets the HTTPS certificate by itself. Update later with `bash deploy/update.sh`.
+More invite codes from the command line: `.venv/bin/python server/server.py invite [--admin] [note]` (run in the
+project folder with `CHAT_DATA=data`). Docker instead: see `docker/`.
 
 ## How it works
-| Part | What it does |
+| Part | What |
 |---|---|
-| `web/` | The app (one HTML page, `chat.js`, a service worker for offline use and push, `templates.json` for the notes) |
-| `relay/relay.py` | FastAPI: a WebSocket per device for live delivery and catch-up, encrypted attachments, Web Push |
-| `deploy/` | Install/update on Ubuntu: a systemd service (memory-capped) behind Caddy |
+| `server/server.py` | FastAPI + SQLite: accounts (scrypt passwords, sessions), chats, files, one WebSocket per device for live updates, Web Push with VAPID and encrypted payloads, admin, daily database backups (14 kept) |
+| `web/` | The app: `app.js` (one file, no build step), `sw.js` (offline + notifications), `templates.json` (the love notes) |
+| `deploy/` | Install/update on Ubuntu: a memory-capped systemd service behind Caddy |
 
-**Encryption:** the pairing code goes through PBKDF2-SHA256 (200,000 rounds) to derive a room id, an access token and
-an AES-256-GCM key. Messages, attachments and "typing…" are encrypted on the device; the relay stores only scrambled
-data (deleted after 60 days) and sends push notifications without any message content.
+Messages are stored on your server (like WhatsApp Web or Telegram's cloud chats): that's what makes usernames,
+several devices per person, the admin and readable notifications possible. Everything travels over HTTPS, the
+database stays on your server, and backups live in `data/backups`.
 
 © 2026 danafarmansyah. All rights reserved. Crafted with ♥.
