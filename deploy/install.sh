@@ -1,9 +1,12 @@
 #!/bin/bash
 # Install (or repair) the A.F.R.A ♥ chat on an Ubuntu/Debian server, next to anything else running there.
 #   sudo bash deploy/install.sh chat.example.com      (or 203-0-113-5.sslip.io for IP 203.0.113.5)
+#   Several addresses for the same chat: sudo bash deploy/install.sh "chat.example.com 203-0-113-5.sslip.io"
 # Runs the chat server as its own service on 127.0.0.1:8090 (memory-capped) and Caddy for HTTPS on ports 80/443.
 set -euo pipefail
-DOMAIN="${1:?Give the address, e.g. sudo bash deploy/install.sh 203-0-113-5.sslip.io}"
+DOMAINS="${1:?Give the address, e.g. sudo bash deploy/install.sh 203-0-113-5.sslip.io}"
+DOMAIN="${DOMAINS%% *}"          # the main address (first one)
+SITES="$(echo $DOMAINS | sed 's/ /, /g')"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUN_AS="${SUDO_USER:-$(whoami)}"
 PORT=8090
@@ -45,7 +48,7 @@ if ! command -v caddy >/dev/null; then
 fi
 mkdir -p /etc/caddy/sites
 cat > /etc/caddy/sites/afra-chat.caddy <<SITE
-$DOMAIN {
+$SITES {
 	encode gzip
 	reverse_proxy 127.0.0.1:$PORT
 }
