@@ -14,6 +14,8 @@ import base64
 import csv
 import io
 import tempfile
+import zipfile
+from html import escape as hesc
 import hashlib
 import hmac
 import json
@@ -642,8 +644,8 @@ async def push_to(uids: list[int], payload: dict, skip_visible=True):
         rows = c.execute(f"SELECT * FROM pushes WHERE user_id IN ({','.join('?' * len(uids))})", uids).fetchall() if uids else []
     async with httpx.AsyncClient(timeout=15) as h:
         for r in rows:
-            live = SOCKETS.get(r["user_id"], {}).get(r["device"])
-            if skip_visible and live and live["visible"]:
+            devs = SOCKETS.get(r["user_id"], {})
+            if skip_visible and any(s_["visible"] for d, s_ in devs.items() if d == r["device"] or d.startswith(r["device"] + ".")):
                 continue  # that device has the app open and shows the message itself
             try:
                 sub = json.loads(r["sub"])
@@ -848,6 +850,186 @@ def export_chats(t: str = "", authorization: str = Header(None)):
     body = json.dumps({"exported": time.strftime("%Y-%m-%d %H:%M"), "users": users, "chats": chats}, ensure_ascii=False, indent=1)
     return Response(body, media_type="application/json",
                     headers={"Content-Disposition": f'attachment; filename="afra-chat-export-{time.strftime("%Y%m%d")}.json"'})
+
+
+# ---------------------------------------------------------------- admin: readable exports (ZIP: transcript .txt + .html, .json, files)
+def _names(c) -> dict:
+    return {r["id"]: r for r in c.execute("SELECT * FROM users")}
+
+
+def _chat_label(c, cv, users) -> str:
+    ids = [r[0] for r in c.execute("SELECT user_id FROM members WHERE conv_id=? ORDER BY user_id", (cv["id"],))]
+    if cv["kind"] == "self":
+        u = users.get(ids[0]) if ids else None
+        return f"Notes to self - @{u['username'] if u else '?'}"
+    return " & ".join("@" + (users[i]["username"] if i in users else "?") for i in ids)
+
+
+def _safe(name: str) -> str:
+    return re.sub(r"[^\w@.& -]+", "_", name).strip()[:80] or "chat"
+
+
+def _chat_bundle(c, cv, users, z: zipfile.ZipFile, folder: str, files_done: set):
+    """Write one chat into the ZIP: transcript.txt, transcript.html, chat.json and its files."""
+    label = _chat_label(c, cv, users)
+    msgs = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id", (cv["id"],)).fetchall()
+    by_id = {m["id"]: m for m in msgs}
+    when = lambda t: time.strftime("%Y-%m-%d %H:%M", time.localtime(t))
+    who = lambda uid: (users[uid]["name"] or users[uid]["username"]) if uid in users else "?"
+    txt, html, js = [f"{label}\nExported {when(time.time())}\n"], [], []
+    for m in msgs:
+        att = json.loads(m["attachment"]) if m["attachment"] else None
+        rx = {who(int(k)): v for k, v in json.loads(m["reactions"] or "{}").items()}
+        fpath = ""
+        if att and att.get("id") and (FILES / att["id"]).exists():
+            fpath = f"files/{att['id'][:8]}-{_safe(att.get('name') or 'file')}"
+            if (folder + fpath) not in files_done:
+                z.write(FILES / att["id"], folder + fpath)
+                files_done.add(folder + fpath)
+        reply = by_id.get(m["reply_to"]) if m["reply_to"] else None
+        line = f"[{when(m['created'])}] {who(m['sender'])}: "
+        if m["deleted"]:
+            line += "(deleted message)"
+        else:
+            if reply:
+                line += f"(replying to {who(reply['sender'])}: \"{(reply['text'] or '')[:60]}\") "
+            if att:
+                line += f"[{m['kind']}: {fpath or att.get('name', 'file')}] "
+            line += m["text"] or ""
+            if m["edited"]:
+                line += " (edited)"
+            if rx:
+                line += "   " + " ".join(f"{v} {k}" for k, v in rx.items())
+        txt.append(line)
+        body = "<i>deleted message</i>" if m["deleted"] else (
+            (f'<div class="q">{hesc(who(reply["sender"]))}: {hesc((reply["text"] or "")[:80])}</div>' if reply else "")
+            + (f'<img src="{hesc(fpath)}">' if att and m["kind"] == "image" and fpath else
+               f'<audio controls src="{hesc(fpath)}"></audio>' if att and m["kind"] == "voice" and fpath else
+               f'<a href="{hesc(fpath)}">📄 {hesc(att.get("name", "file"))}</a>' if att else "")
+            + (f"<div>{hesc(m['text'])}</div>" if m["text"] else "")
+            + (f'<div class="rx">{" ".join(hesc(v) for v in rx.values())}</div>' if rx else ""))
+        html.append(f'<div class="m"><div class="w">{hesc(who(m["sender"]))} · {when(m["created"])}{" · edited" if m["edited"] and not m["deleted"] else ""}</div><div class="b">{body}</div></div>')
+        js.append({"id": m["id"], "from": users[m["sender"]]["username"] if m["sender"] in users else None, "at": when(m["created"]),
+                   "kind": m["kind"], "text": m["text"], "reply_to": m["reply_to"], "attachment": att, "file": fpath or None,
+                   "reactions": rx, "edited": bool(m["edited"]), "deleted": bool(m["deleted"])})
+    page = f"""<!doctype html><meta charset="utf-8"><title>{hesc(label)}</title><style>
+body{{font:15px/1.45 -apple-system,Segoe UI,sans-serif;background:#f4f1ea;max-width:720px;margin:20px auto;padding:0 12px;color:#1d2433}}
+h1{{font:600 20px Georgia,serif}} .m{{margin:8px 0}} .w{{font-size:12px;color:#7a8194;margin:0 6px 2px}}
+.b{{background:#fff;border-radius:16px;padding:8px 12px;display:inline-block;max-width:85%;white-space:pre-wrap;box-shadow:0 1px 4px rgba(0,0,0,.06)}}
+.b img{{max-width:280px;border-radius:10px;display:block}} .q{{border-left:3px solid #1f4e79;padding-left:6px;color:#7a8194;font-size:13px}} .rx{{font-size:13px}}
+</style><h1>{hesc(label)}</h1><p style="color:#7a8194">{len(msgs)} messages · exported {when(time.time())}</p>{"".join(html)}"""
+    z.writestr(folder + "transcript.txt", "\n".join(txt))
+    z.writestr(folder + "transcript.html", page)
+    z.writestr(folder + "chat.json", json.dumps({"chat": label, "kind": cv["kind"], "messages": js}, ensure_ascii=False, indent=1))
+    return len(msgs)
+
+
+def _profile(u) -> dict:
+    return {k: u[k] for k in ("id", "username", "name", "is_admin", "disabled", "created", "last_seen", "avatar")}
+
+
+def _zip_response(build, filename: str) -> Response:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        build(z)
+    return Response(buf.getvalue(), media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/admin/chats")
+def admin_chats(authorization: str = Header(None)):
+    """Every chat (including each person's Notes to self), for picking one to download."""
+    admin(authorization)
+    with closing(db()) as c:
+        users = _names(c)
+        out = [{"id": cv["id"], "kind": cv["kind"], "label": _chat_label(c, cv, users), "last_at": cv["last_at"],
+                "messages": c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=?", (cv["id"],)).fetchone()[0]}
+               for cv in c.execute("SELECT * FROM convs ORDER BY kind, last_at DESC")]
+    return out
+
+
+@app.get("/api/admin/export/chat/{cid}")
+def export_one_chat(cid: int, t: str = "", authorization: str = Header(None)):
+    admin_q(t, authorization)
+    with closing(db()) as c:
+        cv = c.execute("SELECT * FROM convs WHERE id=?", (cid,)).fetchone()
+        if not cv:
+            raise HTTPException(404)
+        users = _names(c)
+        label = _chat_label(c, cv, users)
+        return _zip_response(lambda z: _chat_bundle(c, cv, users, z, "", set()), f"chat - {_safe(label)} - {time.strftime('%Y%m%d')}.zip")
+
+
+@app.get("/api/admin/export/user/{uid}")
+def export_person(uid: int, t: str = "", authorization: str = Header(None)):
+    """Everything about one person: profile, photo, every chat they're in (and their Notes to self) with files."""
+    admin_q(t, authorization)
+    with closing(db()) as c:
+        users = _names(c)
+        u = users.get(uid)
+        if not u:
+            raise HTTPException(404)
+
+        def build(z):
+            prof = _profile(u)
+            prof["devices_logged_in"] = c.execute("SELECT COUNT(*) FROM sessions WHERE user_id=?", (uid,)).fetchone()[0]
+            prof["messages_sent"] = c.execute("SELECT COUNT(*) FROM messages WHERE sender=? AND deleted=0", (uid,)).fetchone()[0]
+            z.writestr("profile.json", json.dumps(prof, ensure_ascii=False, indent=1))
+            if u["avatar"] and (FILES / u["avatar"]).exists():
+                z.write(FILES / u["avatar"], "profile-photo.jpg")
+            done = set()
+            for cv in c.execute("SELECT v.* FROM convs v JOIN members m ON m.conv_id=v.id WHERE m.user_id=? ORDER BY v.kind DESC, v.last_at DESC", (uid,)).fetchall():
+                _chat_bundle(c, cv, users, z, f"{_safe(_chat_label(c, cv, users))}/", done)
+            z.writestr("README.txt", f"A.F.R.A chat: everything about @{u['username']} ({u['name']}).\n"
+                       "profile.json - the account (no password). Each folder is one chat (\"Notes to self\" = their private notes):\n"
+                       "  transcript.html - open in a browser (photos shown)\n  transcript.txt - plain text\n  chat.json - all details\n  files/ - photos, voice notes, files\n")
+        return _zip_response(build, f"person - @{u['username']} - {time.strftime('%Y%m%d')}.zip")
+
+
+@app.get("/api/admin/export/notes")
+def export_notes(t: str = "", authorization: str = Header(None)):
+    """Everyone's Notes to self, one folder per person."""
+    admin_q(t, authorization)
+    with closing(db()) as c:
+        users = _names(c)
+
+        def build(z):
+            done = set()
+            for cv in c.execute("SELECT * FROM convs WHERE kind='self' ORDER BY id").fetchall():
+                _chat_bundle(c, cv, users, z, f"{_safe(_chat_label(c, cv, users))}/", done)
+        return _zip_response(build, f"notes to self - everyone - {time.strftime('%Y%m%d')}.zip")
+
+
+@app.get("/api/admin/export/everything")
+def export_everything(t: str = "", authorization: str = Header(None)):
+    """The complete database plus every chat as readable transcripts, with all photos and files."""
+    admin_q(t, authorization)
+    fd, name = tempfile.mkstemp(suffix=".db", dir=DATA)
+    os.close(fd)
+    tmp = Path(name)
+    src, dst = sqlite3.connect(DB), sqlite3.connect(tmp)
+    with dst:
+        src.backup(dst)
+    src.close(); dst.close()
+    try:
+        with closing(db()) as c:
+            users = _names(c)
+
+            def build(z):
+                z.write(tmp, "database/chat.db")
+                z.writestr("people.json", json.dumps([_profile(u) for u in users.values()], ensure_ascii=False, indent=1))
+                done = set()
+                for cv in c.execute("SELECT * FROM convs ORDER BY kind, id").fetchall():
+                    _chat_bundle(c, cv, users, z, f"chats/{_safe(_chat_label(c, cv, users))}/", done)
+                for u in users.values():
+                    if u["avatar"] and (FILES / u["avatar"]).exists():
+                        z.write(FILES / u["avatar"], f"profile-photos/@{u['username']}.jpg")
+                z.writestr("README.txt", "A.F.R.A chat: complete export.\n"
+                           "database/chat.db - the whole database (open with DB Browser for SQLite; passwords are hashed)\n"
+                           "people.json - everyone (no passwords)\nchats/ - every chat, including each person's Notes to self:\n"
+                           "  transcript.html (open in a browser), transcript.txt, chat.json, files/\nprofile-photos/ - everyone's photo\n")
+            return _zip_response(build, f"afra-chat - everything - {time.strftime('%Y%m%d-%H%M')}.zip")
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @app.get("/api/admin/backups/{name}")

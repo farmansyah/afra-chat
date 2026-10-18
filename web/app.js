@@ -12,6 +12,7 @@
   const store = { get(k, d) { try { const v = localStorage.getItem("afra_" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
                   set(k, v) { try { localStorage.setItem("afra_" + k, JSON.stringify(v)); } catch { } }, del(k) { try { localStorage.removeItem("afra_" + k); } catch { } } };
   const DEVICE = store.get("device") || (store.set("device", "d" + rid().slice(0, 10)), store.get("device"));
+  const TAB = DEVICE + "." + rid().slice(0, 5);  // each open copy (a tab, the copy inside A.F.R.A) has its own connection
   // ---- small delights: soft sounds (made on the fly, no files), emoji bursts, a big heart, a greeting
   let AC = null;
   function sound(kind) {
@@ -42,6 +43,31 @@
     return `${g[0]}${n ? ", " + esc(n) : ""} ${g[1]}`;
   }
   function toast(msg) { const t = document.createElement("div"); t.className = "toast"; t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 2800); }
+
+  // ------------------------------------------------------------------ bridge to A.F.R.A
+  // When A.F.R.A shows this chat (♥ → Messages), the two pages talk directly: unread count, new-message previews and
+  // "share in chat". No API key: the login in this chat is the permission, and only an A.F.R.A running on this computer
+  // or home network (localhost, *.localhost, 192.168.x.x, 10.x, 172.16–31.x) is answered.
+  const EMBED = window.parent !== window;
+  const PARENT = EMBED ? ((location.ancestorOrigins && location.ancestorOrigins[0]) || (document.referrer ? new URL(document.referrer).origin : "")) : "";
+  const trusted = (o) => { try { const h = new URL(o).hostname; return h === "localhost" || h === "127.0.0.1" || h === "[::1]" || h.endsWith(".localhost") || /^(10|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(h); } catch { return false; } };
+  const BRIDGE = EMBED && trusted(PARENT);
+  let SHOWN = !EMBED;  // inside A.F.R.A the chat may be loaded but hidden: then it must not mark messages as read
+  const isVisible = () => document.visibilityState === "visible" && SHOWN;
+  const toAfra = (msg) => { if (BRIDGE) parent.postMessage({ source: "afra-chat", ...msg }, PARENT); };
+  window.addEventListener("message", async (e) => {
+    if (!BRIDGE || e.origin !== PARENT || !e.data || e.data.source !== "afra") return;
+    const d = e.data;
+    if (d.type === "shown") { SHOWN = !!d.v; sendVis(); if (SHOWN && S.cur && conv(S.cur) && conv(S.cur).unread) markRead(S.cur); }
+    else if ((d.type === "compose" || d.type === "open") && S.me) {
+      let cid = S.cur;
+      if (d.username) { try { const c = await api("/api/convs", { body: { username: d.username } }); addConv(c); cid = c.id; } catch (x) { toast(x.message); } }
+      if (!cid) { const recent = S.convs.find((c) => c.kind === "direct") || S.convs[0]; cid = recent && recent.id; }
+      if (!cid) return;
+      if (cid !== S.cur) await openConv(cid);
+      if (d.type === "compose" && d.text) { const t = $("#txt"); if (t) { t.value = (t.value.trim() ? t.value.trim() + "\n" : "") + d.text; window.growComposer && window.growComposer(); t.focus(); toast("Ready to send: check it and tap ➤"); } }
+    } else if (d.type === "hello") toAfra({ type: "ready", me: S.me ? { username: S.me.username, name: S.me.name } : null, unread: S.convs.reduce((a, c) => a + (c.unread || 0), 0) });
+  });
 
   // ------------------------------------------------------------------ server
   let TOKEN = store.get("token", "");
@@ -108,7 +134,7 @@
   let WS = null, wsBackoff = 1000, lastSync = store.get("lastsync", 0);
   function connect() {
     if (!TOKEN) return;
-    const ws = WS = new WebSocket(`${location.origin.replace(/^http/, "ws")}/api/ws?token=${encodeURIComponent(TOKEN)}&device=${DEVICE}`);
+    const ws = WS = new WebSocket(`${location.origin.replace(/^http/, "ws")}/api/ws?token=${encodeURIComponent(TOKEN)}&device=${TAB}`);
     ws.onopen = async () => { wsBackoff = 1000; setLive(true); sendVis(); await resync(); flushOutbox(); };
     ws.onmessage = (e) => onEvent(JSON.parse(e.data));
     ws.onclose = (e) => {
@@ -118,7 +144,7 @@
     };
   }
   setInterval(() => { if (WS && WS.readyState === 1) WS.send('{"t":"ping"}'); }, 25000);
-  const sendVis = () => { if (WS && WS.readyState === 1) WS.send(JSON.stringify({ t: "vis", v: document.visibilityState === "visible" })); };
+  const sendVis = () => { if (WS && WS.readyState === 1) WS.send(JSON.stringify({ t: "vis", v: isVisible() })); };
   let LIVE = false, LOADED = false;
   function setLive(v) { LIVE = v; drawHeader(); drawList(); }
 
@@ -158,8 +184,9 @@
         c.last = e.msg; c.last_at = e.msg.created;
         if (e.msg.sender !== S.me.id) {
           delete S.typing[c.id];
-          if (S.cur === c.id && document.visibilityState === "visible") markRead(c.id); else c.unread = (c.unread || 0) + 1;
-          if (document.visibilityState === "visible") { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
+          if (S.cur === c.id && isVisible()) markRead(c.id); else c.unread = (c.unread || 0) + 1;
+          if (!isVisible()) toAfra({ type: "message", conv: c.id, from: title(c), text: preview(e.msg) });
+          if (isVisible()) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
         }
         S.convs.sort((a, b) => (b.last_at || 0) - (a.last_at || 0));
       } else if (c.last && c.last.id === e.msg.id) c.last = e.msg;
@@ -195,6 +222,7 @@
     const n = S.convs.reduce((a, c) => a + (c.unread || 0), 0);
     if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => { });
     document.title = (n ? `(${n}) ` : "") + "A.F.R.A ♥";
+    toAfra({ type: "unread", count: n });
   }
   let readTimer = null;
   function markRead(cid) {
@@ -632,11 +660,23 @@
           const card = (n, label) => `<div class="stat"><b>${n}</b><span>${label}</span></div>`;
           el.innerHTML = `<div class="stats">${card(st.users, "people")}${card(st.online, "online now")}${card(st.chats, "chats")}${card(st.messages, "messages")}${card(st.today, "in the last 24 h")}${card(st.push_devices, "phones with notifications")}${card(st.files, `files (${st.files_mb} MB)`)}${card(st.invites_open, "unused invites")}</div>
             <h4>Download the data</h4>
+            <a class="dl" href="${dl("/api/admin/export/everything")}" download><span>📦</span><span><b>Everything (.zip)</b><small>The complete database, every chat (and everyone's Notes to self) as readable transcripts, all photos, voice notes and files, and profile photos.</small></span></a>
+            <div class="dl pick"><span>👤</span><span style="flex:1"><b>One person (.zip)</b><small>Their profile and photo, every chat they're in, their Notes to self, with all files.</small>
+              <span class="row" style="margin-top:6px"><select id="dlUser" class="inp" style="flex:1;padding:8px"></select><a class="sbtn" id="dlUserGo" download>Download</a></span></span></div>
+            <div class="dl pick"><span>💬</span><span style="flex:1"><b>One chat (.zip)</b><small>Any chat or someone's Notes to self, as a transcript (.html to read, .txt) plus its files.</small>
+              <span class="row" style="margin-top:6px"><select id="dlChat" class="inp" style="flex:1;padding:8px"></select><a class="sbtn" id="dlChatGo" download>Download</a></span></span></div>
+            <a class="dl" href="${dl("/api/admin/export/notes")}" download><span>📝</span><span><b>Everyone's Notes to self (.zip)</b><small>One folder per person, with transcripts and files.</small></span></a>
             <a class="dl" href="${dl("/api/admin/export/users.csv")}" download><span>👥</span><span><b>People (spreadsheet)</b><small>Everyone with username, name, joined, last seen, messages sent. Opens in Excel, Numbers or Google Sheets. No passwords.</small></span></a>
             <a class="dl" href="${dl("/api/admin/export/chats.json")}" download><span>💬</span><span><b>All chats (JSON)</b><small>Every person, chat and message, readable. No passwords.</small></span></a>
             <a class="dl" href="${dl("/api/admin/export/db")}" download><span>🗄</span><span><b>Complete database (${st.db_mb} MB, .db)</b><small>Everything, for a full copy or a move. Open it with “DB Browser for SQLite”. Passwords inside are scrambled (hashed).</small></span></a>
             <h4>Automatic daily backups (on the server)</h4>
             ${st.backups.map((b) => `<a class="dl small" href="${dl("/api/admin/backups/" + encodeURIComponent(b.name))}" download><span>📦</span><span><b>${esc(b.name)}</b><small>${b.mb} MB · ${shortTime(b.at)}</small></span></a>`).join("") || `<div class="hint">The first one is made within a few hours.</div>`}`;
+          const [people, chats] = await Promise.all([api("/api/admin/users"), api("/api/admin/chats")]);
+          const us = $("#dlUser", el), cs = $("#dlChat", el);
+          us.innerHTML = people.map((u) => `<option value="${u.id}">${esc(u.name)} (@${esc(u.username)})</option>`).join("");
+          cs.innerHTML = chats.map((c) => `<option value="${c.id}">${esc(c.label)} · ${c.messages} msg</option>`).join("");
+          const sync = () => { $("#dlUserGo", el).href = dl(`/api/admin/export/user/${us.value}`); $("#dlChatGo", el).href = dl(`/api/admin/export/chat/${cs.value}`); };
+          us.onchange = cs.onchange = sync; sync();
         } else if (t === "inv") {
           const inv = await api("/api/admin/invites");
           el.innerHTML = `<div class="note">Make an invite code and send the link. They choose their own username and password, and their chat with you starts right away.</div>
@@ -755,13 +795,14 @@
     S.me = S.me || store.get("cache", {}).me || null;
     if (!S.me) { try { S.me = await api("/api/me"); } catch (e) { if (!TOKEN) return; return authScreen(); } }
     cacheLoad(); shell(); connect();
+    toAfra({ type: "ready", me: { username: S.me.username, name: S.me.name } });
     const want = +(new URLSearchParams(location.hash.slice(1)).get("c") || 0);
     if (want) setTimeout(() => conv(want) && openConv(want), 400);
     if ("Notification" in window && Notification.permission === "granted") enablePush(false);
   }
   document.addEventListener("visibilitychange", () => {
     sendVis();
-    if (document.visibilityState === "visible" && TOKEN && S.me) {
+    if (isVisible() && TOKEN && S.me) {
       if (!WS || WS.readyState > 1) connect(); else resync();
       if (S.cur && conv(S.cur) && conv(S.cur).unread) markRead(S.cur);
     }
