@@ -1,12 +1,16 @@
 /* A.F.R.A ♥: works offline (app shell) and shows notifications with the sender's name and message.
    The notification text arrives encrypted for this phone (Web Push, RFC 8291); only this phone can read it. */
-const CACHE = "afra-chat-v18";
-const SHELL = ["./", "index.html", "app.css?v=18", "alive.css?v=18", "theme.css?v=18", "app.js?v=18", "lines.js?v=18", "templates.json", "manifest.webmanifest", "icon-512.png"];
+const CACHE = "afra-chat-v19";
+const SHELL = ["./", "index.html", "app.css?v=19", "alive.css?v=19", "theme.css?v=19", "app.js?v=19", "lines.js?v=19", "templates.json", "manifest.webmanifest", "icon-512.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", (e) => {
   const u = new URL(e.request.url);
   if (e.request.method !== "GET" || u.origin !== location.origin || u.pathname.startsWith("/api/")) return;
+  if (/^\/(pets|vendor)\//.test(u.pathname)) {  // pet animations and the Lottie player: not in the shell, cached the first time Home needs them
+    e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => { if (r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); } return r; })));
+    return;
+  }
   e.respondWith(fetch(e.request).then((r) => { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return r; })
     .catch(() => caches.match(e.request).then((r) => r || caches.match("index.html"))));
 });
@@ -18,7 +22,7 @@ self.addEventListener("push", (e) => {
   e.waitUntil((async () => {
     await self.registration.showNotification(d.title || "A.F.R.A ♥", {
       body: d.body || "💌 New message", icon: iconUrl(d.icon), badge: "icon-512.png",
-      tag: "conv-" + (d.conv || 0), renotify: true, data: { conv: d.conv || 0 } });
+      tag: d.tag || ("conv-" + (d.conv || 0)), renotify: true, data: { conv: d.conv || 0 } });
     if (self.navigator && self.navigator.setAppBadge && d.badge !== undefined) { try { await self.navigator.setAppBadge(d.badge); } catch (err) { } }
   })());
 });

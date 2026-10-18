@@ -30,22 +30,7 @@
     st.setProperty("--accent", a); st.setProperty("--accent-press", a); st.setProperty("--mine", a); st.setProperty("--mine-ink", ink); st.setProperty("--on-accent", ink);
   }
   applyLook(store.get("look"));
-  function lookSheet() {
-    let l = { ...LOOK_DEFAULT, ...(store.get("look") || {}) };
-    const s = sheet(`<h3>Appearance</h3>
-      <div class="lookprev"><div class="msg mine"><div class="bub"><div class="txt">This is how your messages look ✨</div></div></div></div>
-      <h4>Text size</h4><div class="chips lookchips" data-k="size">${LOOK_SIZES.map((x) => `<button data-v="${x[0]}">${x[1]}</button>`).join("")}</div>
-      <h4>Font</h4><div class="chips lookchips" data-k="font">${LOOK_FONTS.map((x) => `<button data-v="${x[0]}" style="${x[2] ? "font-family:" + x[2] : ""}">${x[1]}</button>`).join("")}</div>
-      <h4>Accent colour</h4><div class="lookdots" data-k="accent">${LOOK_ACCENTS.map((c) => `<button data-v="${c}" aria-label="${c || "Default"}" style="background:${c || "#0095f6"}"></button>`).join("")}</div>
-      <div class="row" style="justify-content:center;margin-top:12px"><button class="sbtn" id="lreset">Reset</button></div>`);
-    const mark = () => $$("[data-k]", s).forEach((g) => $$("button", g).forEach((b) => b.classList.toggle("on", b.dataset.v === l[g.dataset.k])));
-    $$("[data-k] button", s).forEach((b) => b.onclick = () => {
-      l[b.parentNode.dataset.k] = b.dataset.v; store.set("look", l); applyLook(l); mark();
-      b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop");
-    });
-    $("#lreset", s).onclick = () => { l = { ...LOOK_DEFAULT }; store.del("look"); applyLook(l); mark(); };
-    mark();
-  }
+  function lookSheet() { const s = sheet(`<h3>Appearance</h3>${lookHTML()}`); lookBind(s); }
   // ---- small delights: soft sounds (made on the fly, no files), emoji bursts, a big heart, a greeting
   let AC = null;
   function sound(kind) {
@@ -318,7 +303,7 @@
     const n = S.convs.reduce((a, c) => a + (c.unread || 0), 0);
     if (navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => { });
     document.title = (n ? `(${n}) ` : "") + "A.F.R.A ♥";
-    toAfra({ type: "unread", count: n });
+    toAfra({ type: "unread", count: n }); tabBadges();
   }
   let readTimer = null;
   function markRead(cid) {
@@ -359,11 +344,11 @@
         <button class="fab" id="bNew" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 21l2.1-5.7A8.4 8.4 0 1 1 21 11.5z"/><path d="M12 8v7M8.5 11.5h7"/></svg></button>
       </section>
       <section class="pane-chat" id="chatPane"></section>`;
-    $("#bNew").onclick = newChat; $("#bHeart").onclick = heartNotes; $("#bAdmin").onclick = adminPage; $("#meAv").onclick = profileSheet;
+    $("#bNew").onclick = newChat; $("#bHeart").onclick = heartNotes; $("#bAdmin").onclick = adminPage; $("#meAv").onclick = () => setTab("settings");
     $("#lq").oninput = (e) => { S.filter = e.target.value.trim().toLowerCase(); drawList(); };
-    setView(S.view); drawAll(); drawBanner();
+    setView(S.view); drawAll(); drawBanner(); mountTabs();
   }
-  function setView(v) { if (S.view !== v) { app.classList.remove("slide"); void app.offsetWidth; app.classList.add("slide"); } S.view = v; app.dataset.view = v; }
+  function setView(v) { if (S.view !== v) { app.classList.remove("slide"); void app.offsetWidth; app.classList.add("slide"); } S.view = v; app.dataset.view = v; if (v === "list" && S.tab === "home" && H.drawn) homeDraw(); syncAnim(); }
   function drawAll() { if (!$("#convs")) return; $("#greet").innerHTML = greeting(); $("#meAv").innerHTML = avatar(S.me, "sm"); $("#bAdmin").hidden = !S.me.is_admin; drawList(); drawChatPane(); badge(); }
 
   // Pinned chats (up to 3). There is no per-user settings store on the server, so this is saved on this device.
@@ -1188,7 +1173,7 @@
   }
 
   // ------------------------------------------------------------------ Home: the pet you share (cosy scene, care buttons, daily quests)
-  const PET_SPECIES = [["cat", "🐱"], ["dog", "🐶"], ["bunny", "🐰"], ["bear", "🐻"], ["fox", "🦊"], ["penguin", "🐧"]];
+  const PET_SPECIES = [["cat", "🐱"], ["dog", "🐶"], ["bunny", "🐰"], ["bear", "🐻"], ["fox", "🦊"], ["penguin", "🐧"], ["panda", "🐼"]];
   const PET_ACTS = [["feed", "🍖", "Feed"], ["play", "🧸", "Play"], ["tend", "🛁", "Bathe"], ["sleep", "💤", "Tuck in"]];
   const PET_FLY = { feed: "🍖", play: "🧸", tend: "🫧", sleep: "🌙" };
   const petOf = (c) => (c && c.kind === "pet" && c.pet) || null;
@@ -1275,7 +1260,7 @@
     e.pet._t = Date.now(); c.pet = e.pet;
     const key = e.act + e.by, dup = e.by === S.me.id && e.act && petFxSeen[key] && Date.now() - petFxSeen[key] < 2500;
     if (S.cur === c.id) { if (e.act && e.by === S.me.id) petFxSeen[key] = Date.now(); drawHome(dup && e.fx !== "quest" ? null : { act: dup ? "" : e.act, by: e.by, fx: e.fx }); drawHeader(); }
-    cacheSave(); drawList();
+    cacheSave(); drawList(); homeSync(e);
   }
   setInterval(() => { const c = conv(S.cur), p = petOf(c); if (p && S.view === "chat" && $("#home")) { const b = $("#hacts"); if (b) $$("[data-act]", b).forEach((x) => { const s = petLeft(p, x.dataset.act); x.disabled = !!s; const sm = $("small", x); if (s) { if (sm) sm.textContent = petFmt(s); else x.insertAdjacentHTML("beforeend", `<small>${petFmt(s)}</small>`); } else if (sm) sm.remove(); }); } }, 1000);
   setInterval(() => { const c = conv(S.cur); if (petOf(c) && S.view === "chat") drawHome(); }, 60000);  // moods and day/night drift on their own
@@ -1295,9 +1280,9 @@
     $$("[data-pno]", log).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api(`/api/pets/invite/${b.dataset.pno}`, { body: { answer: "decline" } }); } catch (x) { toast(x.message); } });
     $$("[data-pgo]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); openConv(+b.dataset.pgo); });
   }
-  function acceptPet(mid) {
+  function acceptPet(mid, stay) {
     let sp = "cat";
-    const s = sheet(`<div class="petpick"><h3>Choose your pet 🐾</h3><div class="pp-sp">${PET_SPECIES.map(([k, e]) => `<button data-sp="${k}" class="${k === sp ? "on" : ""}">${e}</button>`).join("")}</div>
+    const s = sheet(`<div class="petpick"><h3>Choose your pet 🐾</h3><div class="pp-sp">${PET_SPECIES.filter(([k]) => LOT_CODE[k]).map(([k, e]) => `<button data-sp="${k}" class="${k === sp ? "on" : ""}">${e}</button>`).join("")}</div>
       <input id="ppName" maxlength="20" placeholder="Give it a name" autocomplete="off"><button class="pi-yes wide" id="ppGo">Welcome home</button></div>`);
     $$("[data-sp]", s).forEach((b) => b.onclick = () => { sp = b.dataset.sp; $$("[data-sp]", s).forEach((x) => x.classList.toggle("on", x === b)); burstAt(b, b.textContent, 4); });
     $("#ppName", s).focus();
@@ -1306,7 +1291,9 @@
       try {
         const r = await api(`/api/pets/invite/${mid}`, { body: { answer: "accept", species: sp, name } });
         s.remove(); if (r.conv && !conv(r.conv.id)) S.convs.unshift(r.conv);
-        cacheSave(); await openConv(r.conv.id); const pe = $("#hpet"); if (pe) { pe.classList.add("hop"); burstAt(pe, "💗", 10); }
+        cacheSave(); drawList();
+        if (stay) { H.cid = r.conv.id; H.data = null; H.pending = []; setTab("home"); setTimeout(() => burstAt($("#hmPet") || document.body, "💗", 10), 600); return; }
+        await openConv(r.conv.id); const pe = $("#hpet"); if (pe) { pe.classList.add("hop"); burstAt(pe, "💗", 10); }
       } catch (x) { toast(x.message); }
     };
   }
@@ -1326,6 +1313,7 @@
         <div class="iacts"><button data-i="rename"><i>✏️</i>Rename</button><button data-i="search"><i>🔍</i>Search</button>
           <button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button></div>
         ${themeRow(c)}
+        <div class="hm-credit" style="text-align:center;margin:6px 0">Animated emoji © Google, CC BY 4.0</div>
         <div class="chips tabs itabs"><button data-t="care" class="on">🔥 Care</button><button data-t="notes">📝 Lists</button><button data-t="rem">⏰ Reminders</button></div>
         <div id="ibody"></div>
       </div>`;
@@ -1926,7 +1914,7 @@
   async function adminPage() {
     const page = document.createElement("div"); page.className = "page";
     page.innerHTML = `<div class="top"><button class="icon" id="pBack">‹</button><h1>🛡 Admin</h1></div>
-      <div class="chips tabs"><button data-t="home" class="on">Overview</button><button data-t="users">People</button><button data-t="inv">Invites</button></div>
+      <div class="chips tabs"><button data-t="home" class="on">Overview</button><button data-t="users">People</button><button data-t="inv">Invites</button><button data-t="notify">📣 Notify</button></div>
       <div class="page-body" id="adm"></div>`;
     document.body.appendChild(page);
     const pclose = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
@@ -1961,6 +1949,8 @@
           cs.innerHTML = chats.map((c) => `<option value="${c.id}">${esc(c.label)} · ${c.messages} msg</option>`).join("");
           const sync = () => { $("#dlUserGo", el).href = dl(`/api/admin/export/user/${us.value}`); $("#dlChatGo", el).href = dl(`/api/admin/export/chat/${cs.value}`); };
           us.onchange = cs.onchange = sync; sync();
+        } else if (t === "notify") {
+          notifyForm(el);
         } else if (t === "inv") {
           const inv = await api("/api/admin/invites");
           el.innerHTML = `<div class="note">Make an invite code and send the link. They choose their own username and password, and their chat with you starts right away.</div>
@@ -2138,7 +2128,7 @@
     if (!expired) api("/api/logout", { body: {}, noLogout: true }).catch(() => { });
     TOKEN = ""; store.del("token"); store.del("cache"); store.del("outbox"); store.del("lastsync"); lastSync = 0;
     if (WS) { const w = WS; WS = null; w.close(); }
-    S.me = null; S.convs = []; S.msgs = {}; S.cur = null; $$("#pwgate").forEach((g) => g.remove());
+    unmountTabs(); S.me = null; S.convs = []; S.msgs = {}; S.cur = null; $$("#pwgate").forEach((g) => g.remove());
     authScreen("login"); if (expired) toast("Please log in again");
   }
 
@@ -2152,6 +2142,368 @@
     } catch { }
     api("/api/device", { body: d }).catch(() => { });
   }
+
+  // ------------------------------------------------------------------ v19: tab bar, Home (pet room), Settings, Notify everyone
+  const TABS = [["chats", "💬", "Chats"], ["home", "🏠", "Home"], ["settings", "⚙️", "Settings"]];
+  const LOT_CODE = { cat: "1f431", dog: "1f415", bunny: "1f407", bear: "1f43b", fox: "1f98a", penguin: "1f427", panda: "1f43c" };
+  const STAGE_SC = [1, .7, .6, .8, 1];
+  const H = { cid: 0, data: null, lot: null, bub: null, coins: null, drawn: 0, tod: "" };
+  S.tab = store.get("tab", "chats"); if (!TABS.some((t) => t[0] === S.tab)) S.tab = "chats";
+  const petConvs = () => S.convs.filter((c) => c.kind === "pet" && c.pet);
+  const todOf = () => { const h = new Date().getHours(); return h >= 5 && h < 10 ? "morning" : h < 17 ? "day" : h < 20 ? "evening" : "night"; };
+  const homeVisible = () => S.tab === "home" && (S.view === "list" || innerWidth >= 760) && !document.hidden && !$(".page:not(.closing)");
+
+  function mountTabs() {
+    if ($("#tabbar")) return;
+    document.body.insertAdjacentHTML("beforeend", `<nav id="tabbar" aria-label="Main">
+      <i class="tb-bub"></i>${TABS.map((t) => `<button data-tab="${t[0]}"><span class="ti">${t[1]}</span><span class="tl">${t[2]}</span><b class="tbadge" hidden></b></button>`).join("")}</nav>
+      ${TABS.slice(1).map((t) => `<section class="tabpage" data-tp="${t[0]}"><div class="tp-scroll"></div></section>`).join("")}`);
+    $$("#tabbar [data-tab]").forEach((b) => b.onclick = () => setTab(b.dataset.tab));
+    setTab(S.tab, true); tabBadges();
+  }
+  function unmountTabs() { $("#tabbar") && $("#tabbar").remove(); $$(".tabpage").forEach((x) => x.remove()); killLot(); Object.assign(H, { cid: 0, data: null, drawn: 0, coins: null }); }
+  function setTab(t, init) {
+    if (!TABS.some((x) => x[0] === t)) t = "chats";
+    const cur = $(".tabpage.on"); if (cur) cur._sy = $(".tp-scroll", cur).scrollTop;
+    const was = S.tab; S.tab = t; store.set("tab", t);
+    const tb = $("#tabbar"); if (!tb) return;
+    tb.style.setProperty("--ti", TABS.findIndex((x) => x[0] === t));
+    $$("[data-tab]", tb).forEach((b) => { const on = b.dataset.tab === t; b.classList.toggle("on", on); b.setAttribute("aria-selected", on); });
+    $$(".tabpage").forEach((p) => p.classList.toggle("on", p.dataset.tp === t));
+    if (t === "home") homeOpen(); else if (t === "settings") drawSettings();
+    const pg = $(".tabpage.on"); if (pg && pg._sy) $(".tp-scroll", pg).scrollTop = pg._sy;
+    if (!init && was === t && t === "chats") { const l = $(".lscroll"); if (l) l.scrollTo({ top: 0, behavior: "smooth" }); }
+    syncAnim();
+  }
+  function tabBadges() {
+    const tb = $("#tabbar"); if (!tb) return;
+    const n = S.convs.reduce((a, c) => a + (c.unread || 0), 0), b1 = $("[data-tab=chats] .tbadge", tb), b2 = $("[data-tab=home] .tbadge", tb);
+    b1.hidden = !n; b1.textContent = n > 99 ? "99+" : n;
+    b2.hidden = !petConvs().some((c) => c.pet.needs_home); b2.textContent = "♥";
+  }
+
+  // ---- Lottie (loaded the first time Home shows a pet; the animations come from /pets and are cached by the service worker)
+  let LOTP = null; const LOTJ = {};
+  const lottieLib = () => LOTP || (LOTP = new Promise((res) => { const s = document.createElement("script"); s.src = "vendor/lottie_light.min.js?v=19"; s.onload = () => res(window.lottie || null); s.onerror = () => res(null); document.head.appendChild(s); }));
+  async function lotJson(code) {
+    if (!(code in LOTJ)) { try { const r = await fetch(`pets/${code}.json?v=19`); LOTJ[code] = r.ok ? await r.text() : null; } catch { LOTJ[code] = null; } }
+    return LOTJ[code] ? JSON.parse(LOTJ[code]) : null;
+  }
+  async function lotMake(box, code, fb, loop = true) {
+    const L = await lottieLib(), data = L && await lotJson(code);
+    if (!box.isConnected) return null;
+    if (!L || !data) { box.innerHTML = `<span class="pet-fb">${fb}</span>`; return null; }
+    try { return L.loadAnimation({ container: box, renderer: "svg", loop, autoplay: false, animationData: data, rendererSettings: { preserveAspectRatio: "xMidYMid meet" } }); }
+    catch { box.innerHTML = `<span class="pet-fb">${fb}</span>`; return null; }
+  }
+  function killLot() { if (H.lot && H.lot.anim) H.lot.anim.destroy(); if (H.bub && H.bub.anim) H.bub.anim.destroy(); H.lot = H.bub = null; }
+  function syncAnim() {
+    const on = homeVisible();
+    [H.lot, H.bub].forEach((x) => { if (x && x.anim) { try { on ? x.anim.play() : x.anim.pause(); } catch { } } });
+  }
+  async function moodBubble(code, ms) {
+    const room = $(".hm-room"); if (!room) return;
+    if (H.bub) { if (H.bub.anim) H.bub.anim.destroy(); H.bub.el.remove(); H.bub = null; }
+    const el = document.createElement("div"); el.className = "rm-bub"; room.appendChild(el);
+    const b = H.bub = { el, anim: null }; b.anim = await lotMake(el, code, "💤");
+    if (b.anim && homeVisible()) b.anim.play();
+    setTimeout(() => { if (H.bub === b) { if (b.anim) b.anim.destroy(); el.remove(); H.bub = null; } }, ms);
+  }
+
+  // ---- Home
+  const catMap = () => { const m = {}; const cat = (H.data && H.data.catalog) || {}; Object.values(cat).forEach((l) => l.forEach((i) => m[i.id] = i)); return m; };
+  async function homeOpen() {
+    const box = $(".tabpage[data-tp=home] .tp-scroll"); if (!box) return;
+    const pets = petConvs();
+    if (!pets.length) { H.pending = H.pending || []; homeDraw(); try { H.pending = await api("/api/pets/pending"); } catch { } if (S.tab === "home") homeDraw(); return; }
+    if (!pets.some((c) => c.id === H.cid)) H.cid = pets.some((c) => c.id === store.get("homepet")) ? store.get("homepet") : pets[0].id;
+    homeDraw(); homeLoad();
+  }
+  async function homeLoad() {
+    const cid = H.cid; if (!cid) return;
+    try { const d = await api(`/api/pets/${cid}/home`); if (cid !== H.cid) return; d.pet._t = Date.now(); const c = conv(cid); if (c) c.pet = d.pet; H.data = d; cacheSave(); tabBadges(); if (S.tab === "home") homeDraw(); } catch { }
+  }
+  function homeSync(e) {  // a pet event arrived (from me on another device, or from the partner)
+    tabBadges();
+    if (S.tab !== "home" || !H.drawn) return;
+    if (e.conv === H.cid) { const before = H.stage || 0; homeDraw(); if (e.act && e.by !== S.me.id) careFx(e.act, e.pet); if (e.pet.stage > before) celebrate(e.pet); }
+  }
+  function homeEmpty() {
+    const directs = S.convs.filter((c) => c.kind === "direct"), pend = H.pending || [];
+    const rows = pend.map((x) => x.mine ? `<div class="hm-card hm-wait">⏳ Waiting for ${esc(x.name)}…<small>Your pet invite is on its way.</small></div>`
+      : `<div class="hm-card hm-wait">🐾 ${esc(x.name)} wants to share a pet with you<button class="pi-yes" data-hacc="${x.mid}">Accept</button></div>`).join("");
+    const first = (c) => (other(c) && (other(c).name || other(c).username) || "your friend").split(" ")[0];
+    const pending = new Set(pend.filter((x) => x.mine).map((x) => x.conv));
+    const cand = directs.filter((c) => !pending.has(c.id));
+    let ask = "";
+    if (!directs.length) ask = `<p class="hm-hint">Start a chat with someone first, then you can raise a pet together.</p><button class="pi-yes wide" id="hmNew">Start a chat</button>`;
+    else if (cand.length === 1) ask = `<button class="pi-yes wide" data-hshare="${cand[0].id}">Share a pet with ${esc(first(cand[0]))} 🐾</button>`;
+    else if (cand.length > 1) ask = `<p class="hm-hint">Who do you want to share a pet with?</p>${cand.map((c) => `<button class="hm-pick" data-hshare="${c.id}">${avatar(other(c), "sm")}<span>${esc(first(c))}</span><i>🐾</i></button>`).join("")}`;
+    return `<div class="hm"><div class="hm-empty"><div class="hm-egg">🥚</div><h2>Your own little home</h2><p>Raise a pet together: feed it, play, decorate its room and watch it grow.</p>${rows}${ask}</div></div>`;
+  }
+  function bindEmpty(box) {
+    $$("[data-hshare]", box).forEach((b) => b.onclick = async () => { b.disabled = true; try { await api(`/api/convs/${b.dataset.hshare}/petinvite`, { body: {} }); toast("Pet invite sent 🐾"); H.pending = await api("/api/pets/pending"); } catch (x) { toast(x.message); } homeDraw(); });
+    $$("[data-hacc]", box).forEach((b) => b.onclick = () => acceptPet(+b.dataset.hacc, true));
+    const n = $("#hmNew", box); if (n) n.onclick = () => { setTab("chats"); newChat(); };
+  }
+  function homeDraw() {
+    const box = $(".tabpage[data-tp=home] .tp-scroll"); if (!box) return;
+    const pets = petConvs(), c = conv(H.cid), p = c && petOf(c);
+    if (!p) { killLot(); H.drawn = 0; box.innerHTML = homeEmpty(); bindEmpty(box); return; }
+    if (!p._t) p._t = Date.now();
+    const cat = catMap(), tod = todOf(), room = p.room || {}, st = p.stage || 0, mood = petMood(p);
+    const sy = box.scrollTop, other_ = other(c), pn = esc(p.name);
+    H.stage = st; H.tod = tod;
+    const slot = (k) => room[k] && cat[room[k]] ? `<span class="rm-it s-${k}" data-slot="${k}">${cat[room[k]].emoji}</span>` : "";
+    const wear = p.outfit && cat[p.outfit] && st >= 2 ? `<span class="rm-wear w-${cat[p.outfit].at}">${cat[p.outfit].emoji}</span>` : "";
+    const sky = { morning: "🌤️", day: "☀️", evening: "🌅", night: "🌙" }[tod];
+    const bar = (ico, v, t) => `<div class="pbar ${v < 30 ? "low" : ""}" title="${t}"><i>${ico}</i><span><em style="width:${v}%"></em></span><b>${v}</b></div>`;
+    const done = p.quests.filter((q) => q.done).length;
+    const log = ((H.data && H.data.log) || []);
+    const checked = (p.checkin || []).includes(String(S.me.id));
+    box.innerHTML = `<div class="hm">
+      <div class="hm-head">${pets.length > 1 ? `<div class="hm-sw">${pets.map((x) => `<button data-hpet="${x.id}" class="${x.id === c.id ? "on" : ""}">${x.pet.emoji}<span>${esc(x.pet.name)}</span></button>`).join("")}</div>` : `<h1>${pn}<small>${esc(p.stage_name)} · Lv ${p.level}</small></h1>`}
+        <button class="hm-coin" id="hmCoin" title="Shared ♥ coins">♥ <b>${p.coins}</b></button><button class="icon hm-i" id="hmInfo" title="About ${pn}" aria-label="About ${pn}">ⓘ</button></div>
+      <div class="hm-room" data-tod="${tod}" data-mood="${mood}">
+        <div class="rm-win"><span class="rm-sky">${sky}</span>${tod === "night" ? `<span class="rm-st a">✦</span><span class="rm-st b">✦</span><span class="rm-st c">✦</span>` : `<span class="rm-cloud">☁️</span>`}</div>
+        ${slot("window")}${slot("wall")}
+        <div class="rm-floor"></div>${room.floor_r ? "" : `<span class="rm-plant">🪴</span>`}${slot("floor_l")}${slot("floor_r")}
+        <div class="rm-rug"></div><span class="rm-bowl">🥣</span><span class="rm-toy">🧸</span>
+        <div class="rm-pet st${st}" id="hmPet"><div class="rm-scale" style="--sc:${STAGE_SC[st]}">${st === 0 ? `<span class="rm-egg">🥚</span>` : `<div class="rm-lot" id="hmLot"></div>`}${wear}</div><i class="rm-shadow"></i></div>
+        ${mood === "asleep" ? `<span class="rm-zzz">💤</span>` : ""}
+        <div class="rm-dim"></div></div>
+      <div class="hm-card hm-grow"><div class="gr-top"><b>${["🥚", "🐣", "🐾", "🐾", "🌟"][st]} ${esc(p.stage_name)}</b><span>${p.to_next ? `${p.to_next} more fed day${p.to_next === 1 ? "" : "s"} to grow` : "Fully grown 🎉"}</span></div>
+        <div class="gr-bar"><em style="width:${p.stage_pct}%"></em></div><small>Feed ${pn} on a new day to help it grow. A missed day only pauses it.</small></div>
+      <div class="hm-acts" id="hmActs">${PET_ACTS.map(([k, ico, lab]) => { const s = petLeft(p, k); const direct = k === "tend" || k === "sleep"; return `<button data-care="${k}" ${s && direct ? "disabled" : ""}><i>${ico}</i><span>${k === "tend" ? "Bathe" : lab}</span>${s && direct ? `<small>${petFmt(s)}</small>` : ""}</button>`; }).join("")}</div>
+      <div class="hm-acts three"><button id="hmCheck" ${checked ? "disabled" : ""}><i>💛</i><span>${checked ? "Checked in" : "Check in"}</span>${checked ? "" : `<small>+10 ♥</small>`}</button><button id="hmShop"><i>🛍️</i><span>Shop</span></button><button id="hmAlbum"><i>📸</i><span>Album</span></button></div>
+      <button class="hm-talk" id="hmTalk">💬 Talk to ${pn}</button>
+      <div class="hm-card hm-streak"><b>🔥 ${p.streak}</b><span>day${p.streak === 1 ? "" : "s"} together · best ${p.best}</span>${p.both_today ? `<em>💞 both today</em>` : p.cared_today ? `<em class="one">needs you both</em>` : `<em class="one">no care yet today</em>`}</div>
+      <div class="hm-card"><h4>${pn} feels</h4>${bar("🍖", p.hunger, "Fullness")}${bar("💗", p.joy, "Happiness")}${bar("⚡", p.energy, "Energy")}</div>
+      <div class="hm-card"><h4>📋 Quests <b>${done}/${p.quests.length}</b></h4>${p.quests.map((q) => `<div class="hqrow ${q.done ? "done" : ""}"><i>${q.done ? "✓" : ""}</i><span>${esc(q.text)}</span><small>${q.progress}/${q.target}</small></div>`).join("")}<small class="hm-hint">+15 ♥ for each quest</small></div>
+      <div class="hm-card"><h4>📸 Album <button class="sbtn" id="hmAll">See all</button></h4>${log.length ? log.slice(0, 3).map(albumRow).join("") : `<div class="hint">${pn}'s milestones will show up here.</div>`}</div>
+      <p class="hm-credit">Animated emoji © Google, CC BY 4.0</p></div>`;
+    box.scrollTop = sy; H.drawn = 1;
+    // pet animation: keep the running one across redraws
+    const ph = $("#hmLot", box);
+    if (ph) {
+      const code = st === 1 ? "1f423" : LOT_CODE[p.species];
+      if (H.lot && H.lot.code === code && H.lot.el.isConnected === false && H.lot.anim) ph.replaceWith(H.lot.el);
+      else { killLotOnly(); const fb = st === 1 ? "🐣" : p.emoji, me = H.lot = { code, el: ph, anim: null }; lotMake(ph, code, fb).then((a) => { if (H.lot === me) { me.anim = a; if (a && homeVisible()) a.play(); } else if (a) a.destroy(); }); }
+    } else killLotOnly();
+    if (H.coins !== null && p.coins !== H.coins) { const e = $("#hmCoin", box); e.classList.add("pop"); }
+    H.coins = p.coins;
+    if (mood === "asleep" && !H.bub) moodBubble("1f634", 5000);
+    bindHome(box, c);
+  }
+  function killLotOnly() { if (H.lot && H.lot.anim) H.lot.anim.destroy(); H.lot = null; }
+  const albumRow = (l) => {
+    const d = l.day ? new Date(l.day + "T12:00:00").toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" }) : "";
+    return `<div class="alrow" data-lid="${l.id}"><div class="al-t"><b>${esc(l.text)}</b><small>${esc(d)}</small>${l.file ? `<img class="al-img" src="${fileUrl(l.file)}" alt="" loading="lazy">` : ""}</div>
+      <label class="al-add" title="Add a photo">${l.file ? "🔄" : "📷"}<input type="file" accept="image/*" hidden data-alphoto="${l.id}"></label></div>`;
+  };
+  function bindHome(box, c) {
+    $$("[data-hpet]", box).forEach((b) => b.onclick = () => { H.cid = +b.dataset.hpet; store.set("homepet", H.cid); H.data = null; killLotOnly(); homeDraw(); homeLoad(); });
+    $("#hmInfo", box).onclick = () => petInfo(conv(H.cid));
+    $("#hmTalk", box).onclick = () => openConv(H.cid);
+    $("#hmShop", box).onclick = () => shopSheet();
+    $("#hmAlbum", box).onclick = $("#hmAll", box).onclick = albumSheet;
+    $("#hmCoin", box).onclick = () => shopSheet();
+    $("#hmCheck", box).onclick = async (e) => {
+      e.currentTarget.disabled = true;
+      try { const v = await api(`/api/pets/${H.cid}/checkin`, { body: {} }); v._t = Date.now(); conv(H.cid).pet = v; coinGain(v.gain); burstAt($("#hmPet"), "💛", 8); cacheSave(); homeDraw(); tabBadges(); } catch (x) { toast(x.message); homeDraw(); }
+    };
+    $$("[data-care]", box).forEach((b) => b.onclick = () => {
+      const k = b.dataset.care, p = petOf(conv(H.cid));
+      if (k === "feed" || k === "play") careChooser(k, p); else careDo(k, "");
+    });
+    $$("[data-hacc]", box).forEach((b) => b.onclick = () => acceptPet(+b.dataset.hacc, true));
+    $("#hmPet", box).onclick = () => { const e = $("#hmPet"); e.classList.remove("hop"); void e.offsetWidth; e.classList.add("hop"); burstAt(e, "💗", 3); moodBubble("1f63b", 2400); if (navigator.vibrate) navigator.vibrate(10); };
+    $$("[data-alphoto]", box).forEach(albumPhotoBind);
+  }
+  function coinGain(n) { const e = $("#hmCoin"); if (!e || !n) return; const g = document.createElement("span"); g.className = "hm-gain"; g.textContent = "+" + n + " ♥"; e.appendChild(g); setTimeout(() => g.remove(), 1500); }
+  function careFx(act, p) {
+    const pet = $("#hmPet"); if (!pet) return;
+    burstAt(pet, act === "tend" ? "🫧" : PET_FLY[act] || "💗", act === "sleep" ? 3 : 7);
+    pet.classList.remove("hop"); void pet.offsetWidth; pet.classList.add("hop");
+    moodBubble(act === "sleep" ? "1f634" : "1f63b", 2400);
+  }
+  function celebrate(p) {
+    const pet = $("#hmPet"); if (!pet) return;
+    pet.classList.add("grew"); setTimeout(() => pet.classList.remove("grew"), 1400);
+    burstAt(pet, "🎉", 14); burstAt(pet, "✨", 8); toast(`🌱 ${p.name} grew: ${p.stage_name}!`); if (navigator.vibrate) navigator.vibrate([20, 40, 20]);
+    homeLoad();
+  }
+  async function careDo(act, item) {
+    const c = conv(H.cid), p = c && petOf(c); if (!p) return;
+    try {
+      const before = p.stage, v = await api(`/api/pets/${c.id}/care`, { body: { action: act, item } });
+      v._t = Date.now(); c.pet = v; H.stage = v.stage; cacheSave(); drawList(); tabBadges(); homeDraw(); careFx(act, v); coinGain(v.gain);
+      if (v.stage > before) celebrate(v); else if (v.gain >= 10) homeLoad();
+    } catch (x) { toast(x.message); }
+  }
+  function careChooser(act, p) {
+    const cat = (H.data && H.data.catalog) || {}, own = (cat[act === "feed" ? "food" : "toys"] || []).filter((i) => (p.inv || {})[i.id] > 0);
+    const left = petLeft(p, act), free = act === "feed" ? { e: "🥣", n: "Free kibble", d: "+20 fullness · once an hour" } : { e: "🧸", n: "Play together", d: "A little game" };
+    const eff = (i) => act === "feed" ? `+${i.hunger} fullness${i.joy ? ", +" + i.joy + " joy" : ""}` : `+${22 + i.joy} joy`;
+    const s = sheet(`<h3>${act === "feed" ? "Feed" : "Play with"} ${esc(p.name)}</h3><div class="chlist">
+      <button data-it="" ${left ? "disabled" : ""}><i>${free.e}</i><span><b>${free.n}</b><small>${free.d}</small></span>${left ? `<em>${petFmt(left)}</em>` : ""}</button>
+      ${own.map((i) => `<button data-it="${i.id}" ${act === "play" && left ? "disabled" : ""}><i>${i.emoji}</i><span><b>${esc(i.name)}</b><small>${eff(i)}</small></span><em>×${p.inv[i.id]}</em></button>`).join("")}</div>
+      <div class="row" style="justify-content:center;margin-top:10px"><button class="sbtn" id="chShop">🛍️ Visit the shop</button></div>`);
+    $$("[data-it]", s).forEach((b) => b.onclick = () => { s.remove(); careDo(act, b.dataset.it || "kibble"); });
+    $("#chShop", s).onclick = () => { s.remove(); shopSheet(act === "feed" ? "food" : "toys"); };
+  }
+  function shopSheet(tab0) {
+    const cat = H.data && H.data.catalog; if (!cat) { toast("Just a moment…"); homeLoad(); return; }
+    let tab = tab0 || "food";
+    const names = { food: "🍖 Food", toys: "🧸 Toys", room: "🛋️ Room", outfits: "🎀 Outfits" };
+    const s = sheet(`<div class="shop"><div class="shop-head"><h3>🛍️ Shop</h3><b class="hm-coin" id="shCoins"></b></div>
+      <div class="chips tabs shop-tabs">${Object.keys(names).map((k) => `<button data-st="${k}">${names[k]}</button>`).join("")}</div><div class="shop-grid" id="shGrid"></div></div>`);
+    const draw = () => {
+      const p = petOf(conv(H.cid)); if (!p) return;
+      $("#shCoins", s).innerHTML = `♥ <b>${p.coins}</b>`;
+      $$("[data-st]", s).forEach((b) => b.classList.toggle("on", b.dataset.st === tab));
+      $("#shGrid", s).innerHTML = cat[tab].map((i) => {
+        const q = (p.inv || {})[i.id] || 0; let tag, cls = "";
+        if (tab === "food") tag = q ? `×${q} · ♥ ${i.price}` : `♥ ${i.price}`;
+        else if (tab === "toys") tag = q ? "Owned ✓" : `♥ ${i.price}`;
+        else if (tab === "room") tag = q ? ((p.room || {})[i.slot] === i.id ? "In the room ✓" : "Place") : `♥ ${i.price}`;
+        else tag = q ? (p.outfit === i.id ? "Wearing ✓" : "Wear") : `♥ ${i.price}`;
+        if (!q && p.coins < i.price) cls = "poor"; if (q) cls += " own";
+        const sub = tab === "food" ? `+${i.hunger} fullness` : tab === "toys" ? `+${i.joy} joy` : tab === "room" ? ({ wall: "wall", window: "window", floor_l: "floor", floor_r: "floor" })[i.slot] : i.at;
+        return `<button class="shop-it ${cls}" data-buy="${i.id}"><i>${i.emoji}</i><b>${esc(i.name)}</b><small>${sub}</small><em>${tag}</em></button>`;
+      }).join("");
+    };
+    s.addEventListener("click", async (e) => {
+      const t = e.target.closest("[data-st]"); if (t) { tab = t.dataset.st; draw(); return; }
+      const b = e.target.closest("[data-buy]"); if (!b) return;
+      const id = b.dataset.buy, i = cat[tab].find((x) => x.id === id), c = conv(H.cid), p = petOf(c); if (!p) return;
+      const q = (p.inv || {})[id] || 0;
+      try {
+        let v;
+        if (tab === "toys" && q) { toast("Find it under Play 🧸"); return; }
+        if (!q || tab === "food") { v = await api(`/api/pets/${c.id}/buy`, { body: { item: id } }); toast(`${i.emoji} ${i.name} is yours`); burstAt(b, i.emoji, 5); }
+        else if (tab === "room") v = await api(`/api/pets/${c.id}/place`, { body: (p.room || {})[i.slot] === id ? { item: "", slot: i.slot } : { item: id } });
+        else v = await api(`/api/pets/${c.id}/place`, { body: p.outfit === id ? { item: "", slot: "outfit" } : { item: id } });
+        v._t = Date.now(); c.pet = v; cacheSave(); draw(); if (S.tab === "home") homeDraw();
+      } catch (x) { toast(x.message); }
+    });
+    draw();
+  }
+  function albumSheet() {
+    const log = (H.data && H.data.log) || [];
+    const s = sheet(`<h3>📸 Album</h3><div class="alist">${log.length ? log.map(albumRow).join("") : `<div class="hint">Nothing here yet.</div>`}</div>`);
+    $$("[data-alphoto]", s).forEach(albumPhotoBind);
+  }
+  function albumPhotoBind(inp) {
+    inp.onchange = async () => {
+      const f = inp.files[0]; if (!f) return; inp.value = "";
+      try {
+        const fd = new FormData(); fd.append("file", f, f.name || "photo.jpg"); const att = await api("/api/files", { body: fd });
+        await api(`/api/pets/${H.cid}/log/${inp.dataset.alphoto}/photo`, { body: { file: att.id } });
+        const l = H.data && H.data.log.find((x) => x.id === +inp.dataset.alphoto); if (l) l.file = att.id;
+        $$(`[data-lid="${inp.dataset.alphoto}"]`).forEach((r) => { r.outerHTML = albumRow(l); });
+        $$(`[data-alphoto]`).forEach(albumPhotoBind); toast("Photo added 📸");
+      } catch (x) { toast(x.message); }
+    };
+  }
+  setInterval(() => {  // cooldown labels tick, the room follows the clock
+    if (!homeVisible()) return;
+    const p = petOf(conv(H.cid)); if (!p) return;
+    if (todOf() !== H.tod) { homeDraw(); return; }
+    $$("#hmActs [data-care]").forEach((x) => {
+      const k = x.dataset.care, direct = k === "tend" || k === "sleep", s = petLeft(p, k); if (!direct) return;
+      x.disabled = !!s; const sm = $("small", x); if (s) { if (sm) sm.textContent = petFmt(s); else x.insertAdjacentHTML("beforeend", `<small>${petFmt(s)}</small>`); } else if (sm) sm.remove();
+    });
+  }, 1000);
+  setInterval(syncAnim, 1500);
+  document.addEventListener("visibilitychange", syncAnim);
+
+  // ---- Settings (one grouped page)
+  const lookHTML = () => `<div class="lookprev"><div class="msg mine"><div class="bub"><div class="txt">This is how your messages look ✨</div></div></div></div>
+      <h4>Text size</h4><div class="chips lookchips" data-k="size">${LOOK_SIZES.map((x) => `<button data-v="${x[0]}">${x[1]}</button>`).join("")}</div>
+      <h4>Font</h4><div class="chips lookchips" data-k="font">${LOOK_FONTS.map((x) => `<button data-v="${x[0]}" style="${x[2] ? "font-family:" + x[2] : ""}">${x[1]}</button>`).join("")}</div>
+      <h4>Accent colour</h4><div class="lookdots" data-k="accent">${LOOK_ACCENTS.map((c) => `<button data-v="${c}" aria-label="${c || "Default"}" style="background:${c || "#0095f6"}"></button>`).join("")}</div>
+      <div class="row" style="justify-content:center;margin-top:12px"><button class="sbtn" id="lreset">Reset</button></div>`;
+  function lookBind(s) {
+    let l = { ...LOOK_DEFAULT, ...(store.get("look") || {}) };
+    const mark = () => $$("[data-k]", s).forEach((g) => $$("button", g).forEach((b) => b.classList.toggle("on", b.dataset.v === l[g.dataset.k])));
+    $$("[data-k] button", s).forEach((b) => b.onclick = () => {
+      l[b.parentNode.dataset.k] = b.dataset.v; store.set("look", l); applyLook(l); mark();
+      b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop");
+    });
+    $("#lreset", s).onclick = () => { l = { ...LOOK_DEFAULT }; store.del("look"); applyLook(l); mark(); };
+    mark();
+  }
+  function drawSettings() {
+    const box = $(".tabpage[data-tp=settings] .tp-scroll"); if (!box) return;
+    const sy = box.scrollTop, me = S.me, pushOn = "Notification" in window && Notification.permission === "granted", bot = S.convs.find((c) => c.kind === "bot");
+    const row = (id, ico, label, sub) => `<button class="srow nav" id="${id}"><i>${ico}</i><span><b>${label}</b>${sub ? `<small>${sub}</small>` : ""}</span><u>›</u></button>`;
+    box.innerHTML = `<div class="st"><h1 class="st-title">Settings</h1>
+      <div class="st-prof"><label class="st-av">${avatar(me, "lg")}<i>📷</i><input type="file" id="sAv" accept="image/*" hidden></label>
+        <div><b>${esc(me.name)}</b><small>@${esc(me.username)}${me.is_admin ? ` <span class="pill gold">admin</span>` : ""}</small></div></div>
+      <h5>Profile</h5><div class="sbox"><label class="srow"><span>Name</span><input id="sName" value="${esc(me.name)}" maxlength="40"></label>
+        <label class="srow"><span>About</span><input id="sBio" value="${esc(me.bio || "")}" maxlength="140" placeholder="A line about you"></label>
+        <button class="srow act" id="sSave">Save profile</button>${row("sAcct", "🔑", "Username and password")}</div>
+      <h5>Appearance</h5><div class="sbox pad" id="sLook">${lookHTML()}</div>
+      <div class="sbox"><label class="swrow"><span><b>Photo backgrounds</b><small>Turn off to use the plain background on this device</small></span><input type="checkbox" class="swtog" id="tphotobg" ${store.get("photobg", true) === false ? "" : "checked"}></label>
+        <label class="swrow"><span><b>Soft sounds</b><small>When sending and receiving</small></span><input type="checkbox" class="swtog" id="tsound" ${store.get("sound", true) ? "checked" : ""}></label></div>
+      <h5>Notifications</h5><div class="sbox">${isIOS && !standalone ? `<div class="note warn" style="margin:10px">📲 On iPhone, notifications work in the Home Screen app: tap <b>Share</b> ⬆ then <b>Add to Home Screen</b>, and open A.F.R.A ♥ from its icon.</div>`
+        : `<button class="srow act" id="sPush">${pushOn ? "✓ Notifications are on" : "Turn on notifications"}</button>${pushOn ? `<button class="srow act" id="sTest">Send me a test</button>` : ""}`}</div>
+      <h5>Friends</h5><div class="sbox">${row("sInv", "👋", "Invite a friend", "Make a link just for them")}</div>
+      <h5>Assistant</h5><div class="sbox">${row("sBot", "✨", "Open the Assistant", "Reminders, notes, lists and places")}</div>
+      ${me.is_admin ? `<h5>Admin</h5><div class="sbox">${row("sAdm", "🛡", "Admin page", "People, invites and data")}${row("sNot", "📣", "Notify everyone", "Send a push to all people")}</div>` : ""}
+      <h5>About</h5><div class="sbox pad about"><b>A.F.R.A ♥</b><small>Version ${(document.querySelector('script[src*="app.js"]')?.src.match(/v=(\d+)/) || [])[1] || ""} · made with love by danafarmansyah</small>
+        <small>Animated emoji © Google, CC BY 4.0</small></div>
+      <div class="sbox"><button class="srow act danger" id="sOut">Log out</button></div><div style="height:12px"></div></div>`;
+    box.scrollTop = sy;
+    lookBind($("#sLook", box));
+    $("#tphotobg", box).onchange = (e) => { store.set("photobg", e.target.checked); applyStyle(); };
+    $("#tsound", box).onchange = (e) => { store.set("sound", e.target.checked); if (e.target.checked) sound("send"); };
+    $("#sAv", box).onchange = async (e) => {
+      const f = e.target.files[0]; if (!f) return;
+      try { e.target.value = ""; const sq = await cropImage(f, 512); if (!sq) return; const fd = new FormData(); fd.append("file", sq, "avatar.jpg"); S.me = await api("/api/me/avatar", { body: fd }); drawAll(); drawSettings(); toast("Photo updated"); }
+      catch (x) { toast(x.message); }
+    };
+    $("#sSave", box).onclick = async () => {
+      try { S.me = await api("/api/me", { method: "PATCH", body: { name: $("#sName", box).value, username: S.me.username, bio: $("#sBio", box).value } }); cacheSave(); drawAll(); drawSettings(); toast("Saved"); }
+      catch (x) { toast(x.message); }
+    };
+    $("#sAcct", box).onclick = profileSheet;
+    const pu = $("#sPush", box); if (pu) pu.onclick = async () => { toast(await enablePush(true)); drawSettings(); };
+    const te = $("#sTest", box); if (te) te.onclick = () => api("/api/push/test", { body: {} }).then(() => toast("Sent: lock your phone to see it")).catch((x) => toast(x.message));
+    $("#sInv", box).onclick = inviteSheet;
+    $("#sBot", box).onclick = () => { if (bot) openConv(bot.id); else toast("The Assistant is not ready yet"); };
+    const ad = $("#sAdm", box); if (ad) ad.onclick = adminPage;
+    const nt = $("#sNot", box); if (nt) nt.onclick = notifySheet;
+    $("#sOut", box).onclick = () => { if (confirm("Log out on this device?")) logout(); };
+  }
+
+  // ---- Notify everyone (admin)
+  function notifyForm(root, inSheet) {
+    root.innerHTML = `<div class="field"><label>Title</label><input class="inp" id="nTitle" maxlength="60" value="A.F.R.A"></div>
+      <div class="field"><label>Message</label><textarea class="inp" id="nBody" maxlength="180" rows="3" placeholder="What do you want to tell everyone?"></textarea><small class="hint" id="nCount">0 / 180</small></div>
+      <h4>Preview</h4><div class="nprev"><div class="np-ico">♥</div><div><b id="npT">A.F.R.A</b><span id="npB">Your message shows up here</span></div><small>now</small></div>
+      <button class="big-btn" id="nSend" style="margin-top:12px">Send to everyone</button><h4>Recently sent</h4><div id="nList"><div class="hint">Loading…</div></div>`;
+    const t = $("#nTitle", root), b = $("#nBody", root);
+    const prev = () => { $("#npT", root).textContent = t.value.trim() || "A.F.R.A"; $("#npB", root).textContent = b.value.trim() || "Your message shows up here"; $("#nCount", root).textContent = b.value.length + " / 180"; };
+    t.oninput = b.oninput = prev;
+    const list = async () => {
+      let rows = []; try { rows = await api("/api/admin/broadcasts"); } catch { }
+      $("#nList", root).innerHTML = rows.map((r) => `<div class="nrow"><b>${esc(r.title)}</b><span>${esc(r.body)}</span><small>${shortTime(r.created)} · ${r.sent} people, ${r.devices} devices</small></div>`).join("") || `<div class="hint">Nothing sent yet.</div>`;
+    };
+    $("#nSend", root).onclick = async (e) => {
+      const title = t.value.trim() || "A.F.R.A", body = b.value.trim(); if (!body) return toast("Write a message first");
+      const btn = e.currentTarget; btn.disabled = true;
+      try {
+        let n = 0; try { n = (await api("/api/admin/users")).filter((u) => !u.disabled).length; } catch { }
+        if (!confirm(`Send to all ${n} people?\n\n${title}\n${body}`)) return;
+        const r = await api("/api/admin/broadcast", { body: { title, body } });
+        toast(`Sent to ${r.sent} people (${r.devices} devices) ♥`); b.value = ""; prev(); list();
+      } catch (x) { toast(x.message); } finally { btn.disabled = false; }
+    };
+    list();
+  }
+  function notifySheet() { const s = sheet(`<h3 style="font:600 20px var(--serif);margin:4px 0 8px">📣 Notify everyone</h3><div id="nForm"></div>`); notifyForm($("#nForm", s)); }
 
   // ------------------------------------------------------------------ start
   async function start() {

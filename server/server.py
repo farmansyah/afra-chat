@@ -80,7 +80,12 @@ CREATE TABLE IF NOT EXISTS pets (id INTEGER PRIMARY KEY, conv_id INTEGER UNIQUE,
   xp INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, last_care_day TEXT DEFAULT '',
   last_nudge_day TEXT DEFAULT '', cds TEXT DEFAULT '{}', sleep_until REAL DEFAULT 0, UNIQUE (user_a, user_b));
 CREATE TABLE IF NOT EXISTS pet_days (pet_id INTEGER, day TEXT, data TEXT DEFAULT '{}', PRIMARY KEY (pet_id, day));
+CREATE TABLE IF NOT EXISTS pet_items (pet_id INTEGER, item TEXT, qty INTEGER DEFAULT 0, PRIMARY KEY (pet_id, item));
+CREATE TABLE IF NOT EXISTS pet_log (id INTEGER PRIMARY KEY, pet_id INTEGER, kind TEXT, text TEXT, at REAL, day TEXT DEFAULT '', file TEXT DEFAULT '');
+CREATE INDEX IF NOT EXISTS pet_log_pet ON pet_log(pet_id, at);
+CREATE TABLE IF NOT EXISTS broadcasts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT, body TEXT, sent INTEGER DEFAULT 0, devices INTEGER DEFAULT 0, created REAL);
 """
+STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
 
 def db():
@@ -105,6 +110,19 @@ with closing(db()) as _c:
                           ("invites", "for_name", "TEXT DEFAULT ''")):  # who an invite is for (shown on the welcome screen)  # the Assistant's account
         if _col not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN {_col} {_def}")
+    for _col, _def in (("coins", "INTEGER DEFAULT 0"), ("fed_days", "INTEGER DEFAULT 0"), ("stage", "INTEGER DEFAULT 0"),  # v19: shared wallet, growth
+                       ("outfit", "TEXT DEFAULT ''"), ("room", "TEXT DEFAULT '{}'")):
+        if _col not in [r[1] for r in _c.execute("PRAGMA table_info(pets)")]:
+            _c.execute(f"ALTER TABLE pets ADD COLUMN {_col} {_def}")
+            if _col == "stage":  # pets that already exist grow from the days they were already fed
+                for _p in _c.execute("SELECT id FROM pets").fetchall():
+                    _n = 0
+                    for _r in _c.execute("SELECT data FROM pet_days WHERE pet_id=?", (_p[0],)).fetchall():
+                        try:
+                            _n += 1 if json.loads(_r[0] or "{}").get("feed") else 0
+                        except ValueError:
+                            pass
+                    _c.execute("UPDATE pets SET fed_days=?, stage=? WHERE id=?", (_n, sum(1 for x in STAGE_DAYS if _n >= x), _p[0]))
     _c.commit()
 
 app = FastAPI(title="A.F.R.A chat", docs_url=None, redoc_url=None, openapi_url=None)
@@ -1117,7 +1135,7 @@ async def _reminders():
 
 
 # ---------------------------------------------------------------- the shared pet (Home)
-SPECIES = {"cat": "🐱", "dog": "🐶", "bunny": "🐰", "bear": "🐻", "fox": "🦊", "penguin": "🐧"}
+SPECIES = {"cat": "🐱", "dog": "🐶", "bunny": "🐰", "bear": "🐻", "fox": "🦊", "penguin": "🐧", "panda": "🐼"}
 PET_ACTS = {  # action: (cooldown seconds, xp, emoji, what the log says)
     "feed": (1800, 5, "🍖", "fed"), "play": (1200, 6, "🧸", "played with"),
     "tend": (2700, 5, "🛁", "bathed"), "sleep": (10800, 4, "💤", "tucked in")}
@@ -1140,6 +1158,48 @@ _QUESTS = {  # id: (text, target, progress(day))
     "chat": ("Chat with {n}: 6 messages in Home", 6, lambda d: sum(d["msgs"].values())),
     "greet": ("Both say good morning to {n}", 2, lambda d: len(d["greet"])),
     "thanks": ("Tell each other one thing you're grateful for", 2, lambda d: len(d["thanks"]))}
+
+
+STAGES = ["Egg", "Hatching", "Baby", "Kid", "Grown-up"]
+FOOD = {  # id: (emoji, name, price, hunger, joy)
+    "biscuit": ("🍪", "Biscuit", 6, 15, 2), "apple": ("🍎", "Apple", 8, 22, 0), "carrot": ("🥕", "Carrot", 8, 22, 0),
+    "fish": ("🐟", "Tasty fish", 14, 35, 4), "icecream": ("🍦", "Ice cream", 16, 12, 18), "honey": ("🍯", "Honey pot", 18, 25, 12),
+    "pizza": ("🍕", "Pizza slice", 20, 40, 8), "sushi": ("🍣", "Sushi", 22, 40, 10), "cake": ("🍰", "Cake", 28, 30, 22)}
+TOYS = {  # id: (emoji, name, price, extra joy, extra energy cost)
+    "bubbles": ("🫧", "Bubbles", 12, 22, 4), "yarn": ("🧶", "Yarn ball", 14, 24, 6), "ball": ("⚽", "Ball", 18, 28, 10),
+    "puzzle": ("🧩", "Puzzle", 26, 26, 3), "teddy": ("🧸", "Teddy", 30, 32, 4), "drum": ("🥁", "Drum", 34, 30, 8),
+    "kite": ("🪁", "Kite", 36, 34, 14), "game": ("🎮", "Game", 48, 40, 8), "guitar": ("🎸", "Guitar", 60, 45, 8)}
+ROOMS = {  # id: (emoji, name, price, slot)
+    "painting": ("🖼️", "Painting", 40, "wall"), "clock": ("🕰️", "Clock", 35, "wall"), "books": ("📚", "Bookshelf", 45, "wall"),
+    "chime": ("🎐", "Wind chime", 30, "window"), "flowers": ("🌸", "Flowers", 25, "window"), "lantern": ("🏮", "Lantern", 40, "window"),
+    "sofa": ("🛋️", "Sofa", 120, "floor_l"), "bed": ("🛏️", "Cosy bed", 90, "floor_l"), "pot": ("🪴", "Little plant", 45, "floor_l"),
+    "piano": ("🎹", "Piano", 150, "floor_r"), "tree": ("🎄", "Tree", 70, "floor_r"), "basket": ("🧺", "Basket", 40, "floor_r")}
+WEAR = {  # id: (emoji, name, price, where on the pet)
+    "bow": ("🎀", "Bow", 25, "head"), "cap": ("🧢", "Cap", 30, "head"), "hat": ("🎩", "Top hat", 40, "head"), "grad": ("🎓", "Grad cap", 45, "head"),
+    "crown": ("👑", "Crown", 90, "head"), "phones": ("🎧", "Headphones", 38, "head"), "glasses": ("🕶️", "Sunglasses", 35, "face"),
+    "specs": ("👓", "Round glasses", 30, "face"), "scarf": ("🧣", "Scarf", 28, "neck"), "medal": ("🏅", "Medal", 50, "neck")}
+SHOP_TABS = {"food": FOOD, "toys": TOYS, "room": ROOMS, "outfits": WEAR}
+ITEM_TAB = {i: t for t, d in SHOP_TABS.items() for i in d}
+
+
+def _catalog() -> dict:
+    out = {}
+    for t, d in SHOP_TABS.items():
+        out[t] = [{"id": i, "emoji": v[0], "name": v[1], "price": v[2], **({"hunger": v[3], "joy": v[4]} if t == "food" else {"joy": v[3]} if t == "toys" else {"slot": v[3]} if t == "room" else {"at": v[3]})}
+                  for i, v in d.items()]
+    return out
+
+
+def _stage_for(days: int) -> int:
+    return sum(1 for x in STAGE_DAYS if days >= x)
+
+
+def _coins(c, pid: int, n: int):
+    c.execute("UPDATE pets SET coins=coins+? WHERE id=?", (n, pid))
+
+
+def _log(c, pid: int, kind: str, text: str, day: str = ""):
+    c.execute("INSERT INTO pet_log (pet_id, kind, text, at, day) VALUES (?,?,?,?,?)", (pid, kind, text, time.time(), day))
 
 
 def _carers(d) -> set:
@@ -1177,7 +1237,7 @@ def _day_get(c, pid: int, day: str) -> dict:
         d = {}
     for k in ("feed", "play", "tend", "sleep", "msgs"):
         d.setdefault(k, {})
-    for k in ("greet", "thanks", "done"):
+    for k in ("greet", "thanks", "done", "checkin"):
         d.setdefault(k, [])
     return d
 
@@ -1226,13 +1286,25 @@ def pet_view(c, p, now=None) -> dict:
     except ValueError:
         cds = {}
     streak = p["streak"] if p["last_care_day"] in (day, yday) else 0
-    return {"id": p["id"], "conv": p["conv_id"], "bot": p["bot_id"], "name": p["name"], "species": p["species"],
+    stage = min(p["stage"] or 0, 4)
+    nxt = STAGE_DAYS[stage] if stage < 4 else 0
+    prev = STAGE_DAYS[stage - 1] if stage else 0
+    try:
+        room = json.loads(p["room"] or "{}")
+    except ValueError:
+        room = {}
+    inv = {r["item"]: r["qty"] for r in c.execute("SELECT item, qty FROM pet_items WHERE pet_id=? AND qty>0", (p["id"],))}
+    quests = _quests(p, d, day)
+    return {"coins": p["coins"] or 0, "stage": stage, "stage_name": STAGES[stage], "fed_days": p["fed_days"] or 0,
+            "to_next": max(0, nxt - (p["fed_days"] or 0)) if nxt else 0, "stage_pct": round(max(0, min(1, ((p["fed_days"] or 0) - prev) / (nxt - prev))) * 100) if nxt else 100,
+            "outfit": p["outfit"] or "", "room": room, "inv": inv, "checkin": d.get("checkin", []),
+            "needs_home": (not carers) or low < 35 or any(not q["done"] for q in quests), "id": p["id"], "conv": p["conv_id"], "bot": p["bot_id"], "name": p["name"], "species": p["species"],
             "emoji": SPECIES.get(p["species"], "🐾"), "born": p["born"], "at": now, "users": [p["user_a"], p["user_b"]],
             "hunger": round(hunger), "joy": round(joy), "energy": round(energy), "xp": p["xp"],
             "level": p["xp"] // 60 + 1, "lvl_pct": round((p["xp"] % 60) / 60 * 100),
             "streak": streak, "best": max(p["best_streak"], streak), "cared_today": bool(carers), "both_today": len(carers) >= 2,
             "needs_care": (not carers) or low < 35, "mood": mood, "sad": low < 30 or p["last_care_day"] not in (day, yday),
-            "sleeping": sleeping, "cd": {k: max(0, int(cds.get(k, 0) - now)) for k in PET_ACTS}, "quests": _quests(p, d, day)}
+            "sleeping": sleeping, "cd": {k: max(0, int(cds.get(k, 0) - now)) for k in PET_ACTS}, "quests": quests}
 
 
 def _insert_msg(c, cid: int, sender: int, kind: str, text: str, att=None) -> dict:
@@ -1280,12 +1352,13 @@ def _sweep_day(c, p, d: dict, day: str) -> list:
             d["done"].append(q["id"])
             newly.append(q["text"])
     if newly:
-        c.execute("UPDATE pets SET xp=xp+? WHERE id=?", (15 * len(newly), p["id"]))
+        c.execute("UPDATE pets SET xp=xp+?, coins=coins+? WHERE id=?", (15 * len(newly), 15 * len(newly), p["id"]))
     return newly
 
 
-def pet_care(c, p, uid: int, act: str) -> dict:
-    """Someone looks after the pet. Raises ValueError (shown to them) when it's too soon or not needed."""
+def pet_care(c, p, uid: int, act: str, item: str = "") -> dict:
+    """Someone looks after the pet. Raises ValueError (shown to them) when it's too soon or not needed.
+    feed: item = an owned food (or "" / "kibble" for the free kibble, which has a cooldown). play: item = an owned toy (optional)."""
     now = time.time()
     cd, xp, emoji, _ = PET_ACTS[act]
     tz = _pet_tz(c, p)
@@ -1296,44 +1369,77 @@ def pet_care(c, p, uid: int, act: str) -> dict:
         cds = json.loads(p["cds"] or "{}")
     except ValueError:
         cds = {}
-    left = int(cds.get(act, 0) - now)
     name = p["name"]
-    if left > 0:
+    item = "" if item == "kibble" else (item or "")
+    own_food = act == "feed" and item
+    if own_food and item not in FOOD:
+        raise ValueError("Unknown food")
+    if act == "play" and item and item not in TOYS:
+        raise ValueError("Unknown toy")
+    if item and act in ("feed", "play"):
+        q = c.execute("SELECT qty FROM pet_items WHERE pet_id=? AND item=?", (p["id"], item)).fetchone()
+        if not q or q["qty"] < 1:
+            raise ValueError("You don't have that yet. Visit the shop 🛍️")
+    left = int(cds.get(act, 0) - now)
+    if left > 0 and not own_food:
         raise ValueError(f"{name} needs a little break first. Try again in {left // 60 + 1} min ⏳")
     sleep_until = p["sleep_until"] or 0
     if act == "feed":
         if hunger >= 95:
             raise ValueError(f"{name} is full 🍖")
-        hunger, joy = hunger + 30, joy + 3
+        if own_food:
+            fh, fj = FOOD[item][3], FOOD[item][4]
+            hunger, joy = hunger + fh, joy + fj + 3
+            c.execute("UPDATE pet_items SET qty=qty-1 WHERE pet_id=? AND item=?", (p["id"], item))
+        else:
+            hunger, joy = hunger + 20, joy + 2
     elif act == "play":
         if energy < 15:
             raise ValueError(f"{name} is too tired to play. Tuck them in? 💤")
-        joy, energy, hunger = joy + 22, energy - 12, hunger - 6
+        extra_j, extra_e = (TOYS[item][3], TOYS[item][4]) if item else (0, 0)
+        joy, energy, hunger = joy + 22 + extra_j, energy - 12 - extra_e, hunger - 6
     elif act == "tend":
         joy = joy + 12
     else:
         if energy >= 90:
             raise ValueError(f"{name} isn't sleepy yet 🌙")
         energy, sleep_until = energy + 40, now + 3600
-    cds[act] = now + cd
+    if not own_food:
+        cds[act] = now + (3600 if act == "feed" else cd)  # the free kibble waits an hour; bought food has no wait
     d = _day_get(c, p["id"], day)
     k = str(uid)
+    first_feed = act == "feed" and not d["feed"]
     d[act][k] = d[act].get(k, 0) + 1
     both = len(_carers(d)) >= 2
-    gain, bonus = xp, False
+    gain, bonus, coins = xp, False, 0
+    if d.get("cc", 0) < 5:  # +2 coins per care action, five a day
+        d["cc"] = d.get("cc", 0) + 1
+        coins += 2
     if both and "_both" not in d["done"]:
         d["done"].append("_both")
-        gain, bonus = gain + 10, True
+        gain, bonus, coins = gain + 10, True, coins + 10
     last, streak = p["last_care_day"], p["streak"]
     if last != day:
         streak = streak + 1 if last == yday else 1
-    newly = _sweep_day(c, p, d, day)
+        reward = {7: 50, 30: 150, 100: 500}.get(streak, 0)
+        if reward:
+            coins += reward
+            _log(c, p["id"], "streak", f"🔥 {streak}-day streak together (+{reward} ♥)", day)
+    grew = None
+    if first_feed:
+        fed = (p["fed_days"] or 0) + 1
+        st = _stage_for(fed)
+        grew = st if st > (p["stage"] or 0) else None
+        c.execute("UPDATE pets SET fed_days=?, stage=? WHERE id=?", (fed, max(st, p["stage"] or 0), p["id"]))
+        if grew is not None:
+            _log(c, p["id"], "stage", (f"🐣 {name} hatched!") if grew == 1 else f"🌱 {name} grew up: {STAGES[grew]}", day)
+    newly = _sweep_day(c, p, d, day)  # quests pay their own +15 each
     cl = lambda v: max(0.0, min(100.0, v))
-    c.execute("""UPDATE pets SET hunger=?, joy=?, energy=?, stats_at=?, xp=xp+?, streak=?, best_streak=?, last_care_day=?, cds=?, sleep_until=?
-                 WHERE id=?""", (cl(hunger), cl(joy), cl(energy), now, gain, streak, max(p["best_streak"], streak), day, json.dumps(cds),
+    c.execute("""UPDATE pets SET hunger=?, joy=?, energy=?, stats_at=?, xp=xp+?, coins=coins+?, streak=?, best_streak=?, last_care_day=?, cds=?, sleep_until=?
+                 WHERE id=?""", (cl(hunger), cl(joy), cl(energy), now, gain, coins, streak, max(p["best_streak"], streak), day, json.dumps(cds),
                                  sleep_until, p["id"]))
     _day_put(c, p["id"], day, d)
-    return {"newly": newly, "bonus": bonus, "streak": streak}
+    return {"newly": newly, "bonus": bonus, "streak": streak, "coins": coins + 15 * len(newly), "grew": grew}
 
 
 def _wants_reply(c, p, m, text: str) -> bool:
@@ -1546,7 +1652,7 @@ async def pet_care_api(cid: int, body: dict, authorization: str = Header(None)):
     with closing(db()) as c:
         _member(c, cid, u["id"])
         p = _pet_of(c, cid)
-        info = pet_care(c, p, u["id"], act)
+        info = pet_care(c, p, u["id"], act, str(body.get("item") or ""))
         p = _pet_of(c, cid)
         _, _, emoji, verb = PET_ACTS[act]
         out = [_insert_msg(c, cid, u["id"], "petact", f"{_first(u)} {verb} {p['name']} {emoji}")]
@@ -1556,12 +1662,149 @@ async def pet_care_api(cid: int, body: dict, authorization: str = Header(None)):
         last = c.execute("SELECT created FROM messages WHERE conv_id=? AND sender=? AND kind='text' ORDER BY id DESC LIMIT 1", (cid, p["bot_id"])).fetchone()
         if not last or time.time() - last["created"] > 90:
             out.append(_insert_msg(c, cid, p["bot_id"], "text", random.choice(PET_CANNED[act])))
+        if info["grew"] is not None:
+            out.append(_insert_msg(c, cid, p["bot_id"], "petact", f"🌱 {p['name']} is now: {STAGES[info['grew']]}!"))
         view = pet_view(c, p)
+        view["gain"], view["grew"] = info["coins"], info["grew"]
         c.commit()
     for m in out:
         await _bcast_msg(cid, m)
     await home_event(cid, u["id"], act, "quest" if info["newly"] else "", view)
     return view
+
+
+@app.get("/api/pets/pending")
+def pet_pending(authorization: str = Header(None)):
+    """Pet invitations still waiting for an answer (sent by me, or sent to me)."""
+    u = auth(authorization)
+    out = []
+    with closing(db()) as c:
+        for r in c.execute("""SELECT ms.* FROM messages ms JOIN members mb ON mb.conv_id=ms.conv_id AND mb.user_id=?
+                              WHERE ms.kind='petinvite' AND ms.deleted=0 AND ms.created>? AND ms.attachment LIKE '%"pending"%' ORDER BY ms.id DESC""",
+                           (u["id"], time.time() - 7 * 86400)):
+            a = json.loads(r["attachment"] or "{}")
+            if a.get("state") != "pending" or u["id"] not in (a.get("from"), a.get("to")):
+                continue
+            o = c.execute("SELECT * FROM users WHERE id=?", (a["to"] if a["from"] == u["id"] else a["from"],)).fetchone()
+            out.append({"mid": r["id"], "conv": r["conv_id"], "mine": a["from"] == u["id"], "name": _first(o) if o else "?"})
+    return out
+
+
+@app.get("/api/pets/{cid}/home")
+def pet_home(cid: int, authorization: str = Header(None)):
+    """Everything the Home tab needs besides the pet itself: the shop and the album."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        if not c.execute("SELECT 1 FROM pet_log WHERE pet_id=? AND kind='born'", (p["id"],)).fetchone():
+            c.execute("INSERT INTO pet_log (pet_id, kind, text, at, day) VALUES (?,?,?,?,?)",
+                      (p["id"], "born", f"🏡 {p['name']} came home", p["born"], _day(_pet_tz(c, p), p["born"])))
+            c.commit()
+        log = [dict(r) for r in c.execute("SELECT * FROM pet_log WHERE pet_id=? ORDER BY at DESC, id DESC LIMIT 80", (p["id"],))]
+        return {"pet": pet_view(c, p), "catalog": _catalog(), "log": log, "stages": STAGES, "stage_days": STAGE_DAYS}
+
+
+@app.post("/api/pets/{cid}/checkin")
+async def pet_checkin(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        day = _day(_pet_tz(c, p))
+        d = _day_get(c, p["id"], day)
+        if str(u["id"]) in d["checkin"]:
+            raise ValueError("You already checked in today 💛 Come back tomorrow")
+        d["checkin"].append(str(u["id"]))
+        _day_put(c, p["id"], day, d)
+        _coins(c, p["id"], 10)
+        view = pet_view(c, _pet_of(c, cid))
+        view["gain"] = 10
+        c.commit()
+    await home_event(cid, u["id"], "", "", view)
+    return view
+
+
+@app.post("/api/pets/{cid}/buy")
+async def pet_buy(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    item = str(body.get("item") or "")
+    if item not in ITEM_TAB:
+        raise ValueError("Unknown item")
+    tab = ITEM_TAB[item]
+    emoji, nm, price = SHOP_TABS[tab][item][:3]
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        have = c.execute("SELECT qty FROM pet_items WHERE pet_id=? AND item=?", (p["id"], item)).fetchone()
+        if tab != "food" and have and have["qty"] > 0:
+            raise ValueError("You already have it 💛")
+        if tab == "food" and have and have["qty"] >= 20:
+            raise ValueError("The cupboard is full 🍪")
+        if c.execute("UPDATE pets SET coins=coins-? WHERE id=? AND coins>=?", (price, p["id"], price)).rowcount != 1:
+            raise ValueError("Not enough ♥ coins yet. Care for " + p["name"] + " to earn more")
+        first = not c.execute("SELECT 1 FROM pet_items WHERE pet_id=?", (p["id"],)).fetchone()
+        c.execute("INSERT INTO pet_items (pet_id, item, qty) VALUES (?,?,1) ON CONFLICT(pet_id, item) DO UPDATE SET qty=qty+1", (p["id"], item))
+        if tab == "room":
+            room = json.loads(p["room"] or "{}")
+            room[SHOP_TABS[tab][item][3]] = item
+            c.execute("UPDATE pets SET room=? WHERE id=?", (json.dumps(room), p["id"]))
+        elif tab == "outfits":
+            c.execute("UPDATE pets SET outfit=? WHERE id=?", (item, p["id"]))
+        if first:
+            _log(c, p["id"], "item", f"🛍️ First thing from the shop: {emoji} {nm}", _day(_pet_tz(c, p)))
+        view = pet_view(c, _pet_of(c, cid))
+        c.commit()
+    await home_event(cid, u["id"], "", "", view)
+    return view
+
+
+@app.post("/api/pets/{cid}/place")
+async def pet_place(cid: int, body: dict, authorization: str = Header(None)):
+    """Put an owned room item in its slot, wear an outfit, or (item "") take one away: {item, slot?}."""
+    u = auth(authorization)
+    item, slot = str(body.get("item") or ""), str(body.get("slot") or "")
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        if item:
+            q = c.execute("SELECT qty FROM pet_items WHERE pet_id=? AND item=?", (p["id"], item)).fetchone()
+            if item not in ITEM_TAB or not q or q["qty"] < 1:
+                raise ValueError("You don't have that yet")
+        room = json.loads(p["room"] or "{}")
+        if item and ITEM_TAB[item] == "room":
+            room[ROOMS[item][3]] = item
+        elif item and ITEM_TAB[item] == "outfits":
+            c.execute("UPDATE pets SET outfit=? WHERE id=?", (item, p["id"]))
+        elif not item and slot == "outfit":
+            c.execute("UPDATE pets SET outfit='' WHERE id=?", (p["id"],))
+        elif not item and slot in ("wall", "window", "floor_l", "floor_r"):
+            room.pop(slot, None)
+        else:
+            raise ValueError("Pick something to place")
+        c.execute("UPDATE pets SET room=? WHERE id=?", (json.dumps(room), p["id"]))
+        view = pet_view(c, _pet_of(c, cid))
+        c.commit()
+    await home_event(cid, u["id"], "", "", view)
+    return view
+
+
+@app.post("/api/pets/{cid}/log/{lid}/photo")
+def pet_log_photo(cid: int, lid: int, body: dict, authorization: str = Header(None)):
+    """Attach a photo (already uploaded with /api/files) to an album milestone; file "" takes it off."""
+    u = auth(authorization)
+    fid = str(body.get("file") or "")
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        if fid:
+            f = c.execute("SELECT * FROM files WHERE id=? AND owner=?", (fid, u["id"])).fetchone()
+            if not f or not f["mime"].startswith("image/"):
+                raise ValueError("Choose a photo")
+        if c.execute("UPDATE pet_log SET file=? WHERE id=? AND pet_id=?", (fid, lid, p["id"])).rowcount != 1:
+            raise HTTPException(404, "Not found")
+        c.commit()
+    return {"ok": True, "file": fid}
 
 
 @app.get("/api/pets/{cid}")
@@ -2209,6 +2452,42 @@ def admin_q(t: str, authorization: str | None):
     return u
 
 
+BCAST_AT = [0.0]
+
+
+@app.post("/api/admin/broadcast")
+async def admin_broadcast(body: dict, authorization: str = Header(None)):
+    """Push a short message to every person (not bots, not switched-off accounts), even if their app is open."""
+    me_ = admin(authorization)
+    title = re.sub(r"\s+", " ", str(body.get("title") or "A.F.R.A")).strip() or "A.F.R.A"
+    text = re.sub(r"[ \t]+", " ", str(body.get("body") or "")).strip()
+    if len(title) > 60:
+        raise ValueError("The title can be up to 60 characters.")
+    if not text:
+        raise ValueError("Write a message first.")
+    if len(text) > 180:
+        raise ValueError("The message can be up to 180 characters.")
+    wait = int(60 - (time.time() - BCAST_AT[0]))
+    if wait > 0:
+        raise HTTPException(429, f"Wait {wait} s before sending another.")
+    BCAST_AT[0] = time.time()
+    with closing(db()) as c:
+        uids = [r["id"] for r in c.execute("SELECT id FROM users WHERE bot=0 AND disabled=0")]
+        devices = c.execute(f"SELECT COUNT(*) FROM pushes WHERE user_id IN ({','.join('?' * len(uids))})", uids).fetchone()[0] if uids else 0
+    await push_to(uids, {"title": title, "body": text, "conv": 0, "tag": "broadcast", "icon": "/icon-512.png"}, skip_visible=False)
+    with closing(db()) as c:
+        c.execute("INSERT INTO broadcasts (user_id, title, body, sent, devices, created) VALUES (?,?,?,?,?,?)", (me_["id"], title, text, len(uids), devices, time.time()))
+        c.commit()
+    return {"sent": len(uids), "devices": devices}
+
+
+@app.get("/api/admin/broadcasts")
+def admin_broadcasts(authorization: str = Header(None)):
+    admin(authorization)
+    with closing(db()) as c:
+        return [dict(r) for r in c.execute("SELECT id, title, body, sent, devices, created FROM broadcasts ORDER BY id DESC LIMIT 10")]
+
+
 @app.get("/api/admin/stats")
 def admin_stats(authorization: str = Header(None)):
     admin(authorization)
@@ -2585,6 +2864,18 @@ def health():
 @app.get("/")
 def index():
     return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/{sub}/{name}")
+def web_sub_file(sub: str, name: str):
+    """Vendored script and the pet animations: they never change under the same name, so the phone may keep them."""
+    if sub not in ("vendor", "pets"):
+        raise HTTPException(404)
+    f = (WEB / sub / name).resolve()
+    if f.parent != (WEB / sub).resolve() or not f.is_file():
+        raise HTTPException(404)
+    types = {".js": "text/javascript", ".json": "application/json"}
+    return FileResponse(f, media_type=types.get(f.suffix), headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/{name}")
