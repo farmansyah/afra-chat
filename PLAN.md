@@ -11,11 +11,11 @@
   - The partner is told about a new nickname.
 - v25 Question cards: 8 decks that unlock with time together, guess mode, and a Spicier deck both must switch on.
 - v26 Time capsule letters: write now, open on a chosen date, sealed on the server until then. Up to 4 photos, "both of us" letters, drafts.
+- v27 Play: tic-tac-toe, this or that, who's more likely, couple's quiz, 20 questions, draw and guess. +2 coins each per game, +1 to the winner, 20 a day each.
 
 ## Next
 1. Tune the storm size and spacing from the storm test on your phones.
-2. v27: Couple games that earn pet coins.
-3. v28: Shared bucket list with album.
+2. v28: Shared bucket list with album.
 
 ## Touches (Obimy + tap ME), the long game
 What we take from each:
