@@ -7,8 +7,10 @@
 - v23 Touches Phase 0 and 1: the Us screen, actions, buzz words, touch storms and the admin storm test. The pet chat keeps the pet and the owners apart (the pet's face on its lines, owners' names on theirs).
 
 ## Next
-- Tune the storm size and spacing from the storm test on your phones, then Touches Phase 2.
-- Time capsule letters, couple games that earn pet coins, shared bucket list with album.
+1. Tune the storm size and spacing from the storm test on your phones.
+2. v24: Live touch (Touches Phase 2, below).
+3. v25: Question cards (below).
+4. Time capsule letters, couple games that earn pet coins, shared bucket list with album.
 
 ## Touches (Obimy + tap ME), the long game
 What we take from each:
@@ -39,10 +41,16 @@ What we take from each:
 - **Receiver settings:** Touch storms Full / Gentle (one notification) / Off, quiet hours (night touches replay in the morning), and watch mode (only the first buzz).
 - **Safety:** pairs only, server rate limit (e.g. 3 storms a minute and 200 pushes an hour).
 
-### Phase 2: live touch
-- When you're both on the Us screen, every tap arrives instantly: you see and feel each other's taps live.
-- Both touching at once shows each other's fingers. Touching the same spot makes the blobs hug with a heart burst ("in sync 💞").
-- Heartbeat: hold your finger to send a steady pulse that their blob and phone beat with.
+### Phase 2: live touch (v24)
+When both of you have the Us screen open at the same time, it becomes one shared, live space instead of "send and receive later".
+- **Seeing each other there:** the header says "Raina is here 💞" and her blob wakes up (eyes open, leans towards yours). When she leaves, it settles back to sleep. Under the hood: the Us screen tells the server "I'm here" over the existing WebSocket, and the server tells the other phone.
+- **Live taps:** every tap, hold and drum shows on her screen within a fraction of a second. Her blob squishes where you pressed, the action plays (hug, kiss…) and Android phones vibrate with each tap. Taps travel over the WebSocket, roughly 20 small events a second at most, so there is no lag and no server load.
+- **No storm while live:** if she's watching live, your taps are not turned into a notification storm (she's already feeling them). The chat chip still records "💋 ×47 · live".
+- **Fingers:** both touching at once shows each other's fingertips as soft glowing dots on the blobs.
+- **In sync:** touching the same spot, or tapping the same action within a second of each other, makes the blobs hug with a heart burst and "in sync 💞". It counts towards achievements later.
+- **Heartbeat:** hold your finger still for 2 seconds to send a steady pulse. Her blob, and her phone on Android, beat with it, and if she holds too, both blobs beat together.
+- **Inviting her in:** if she isn't there, a "Come to Us 🫶" button sends one gentle notification that opens straight into the Us screen.
+- **Honest limits:** iPhones can't vibrate from a web page, so on iPhone "live" is visual (squish, shake, hearts) plus the normal buzz from notifications when the app is closed. Taps stop when either screen locks; the storm takes over again.
 
 ### Phase 3: habits and fun
 - Tap your own blob to set your mood (joins the v22 mood check-in). It changes your blob's face and colour.
@@ -50,6 +58,34 @@ What we take from each:
 - Achievements: "Mood 3 days in a row", "50 kisses", "In sync 10 times", "Touched every day for a week". Pet coins and Jamaluddin reacting ("Raina sent 40 hugs while you slept 🥹").
 - More actions (massage, warm cheeks, forehead kiss, back scratch, feed, fist bump) and a secret knock you record together.
 - Monthly "you touched each other 1,284 times" recap.
+
+## Question cards (v25)
+A card game for getting to know each other better. Play it in the Us screen or the chat, together live or one card at a time.
+
+### How it plays
+- A deck of cards fans out. One of you draws a card and it flips over with a question ("What's a smell that reminds you of home?").
+- The one who drew answers first (text, voice note or photo), then the card passes to the other. Answers stay hidden until both have answered, like the daily question.
+- Some cards are "you ask, I answer" and some are "both answer". Skip is always allowed, free, and the card goes back in the deck.
+- When both are on the screen, the flip, the answers appearing and the "your turn" happen live (same live channel as Phase 2).
+- Every answered card is kept in a "Cards we've played" archive by deck, so you can look back at what you both said.
+
+### Decks that unlock with time together
+The deck depends on how long you've been together, read from "Our dates" (v22, the together date). If it isn't set, the app asks once.
+- **Just started (0–3 months): Getting to know you.** Light and fun: favourites, childhood, habits, little opinions. "Mountains or beach?", "What's your comfort food?"
+- **3–12 months: Going deeper.** Families, friends, what you value, small fears, what made you who you are.
+- **1–2 years: Us.** Memories you share, what you love about each other, how you handle hard days, little things the other does.
+- **2+ years: The long run.** Dreams, plans, money, home, kids or not, growing old, what you want to keep the same.
+- **Always open:** Silly (would-you-rather, hot takes), Spicy-but-sweet (romantic, optional, hidden behind a switch) and Memory lane (uses your real chat history: "What were we talking about 1 year ago today?").
+- Earlier decks stay open. New decks unlock with a small celebration on the day ("You've been together 1 year. A new deck unlocked 💌").
+
+### Where the questions come from
+- A hand-written bank of about 400 questions in English, natural and not cringe, tagged by deck and level, shipped with the app like lines.js. No AI needed.
+- With the pet AI switch on, Jamaluddin can add a fresh follow-up card based on your answers ("You both said the beach. Where would your dream beach trip be?"). Same AI switch and usage monitor as the pet.
+
+### Fun on top
+- Draw streaks and pet coins for each card both of you answer.
+- "Guess my answer" mode: you answer for her, she answers for herself, and you get a point if you're close (she judges with a 👍 or 👎).
+- Jamaluddin sometimes brings a card into the chat in the evening ("Card time? 🃏").
 
 ## Pending: closer together, and more fun
 ### Every day
