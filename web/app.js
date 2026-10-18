@@ -150,7 +150,7 @@
 
   async function resync() {
     try {
-      S.me = await api("/api/me");
+      S.me = await api("/api/me"); pwGate();
       S.convs = await api("/api/convs");
       const since = lastSync ? lastSync - 5 : 0, t0 = now();
       for (const c of S.convs) {
@@ -634,8 +634,8 @@
       <label class="row" style="font-size:15px"><input type="checkbox" id="psound" ${store.get("sound", true) ? "checked" : ""}> Soft sounds when sending and receiving</label>
       <h4>Password</h4>
       <div class="field"><input class="inp" type="password" id="pold" placeholder="Current password" autocomplete="current-password"></div>
-      <div class="field"><input class="inp" type="password" id="pnew" placeholder="New password (6+ characters)" autocomplete="new-password"></div>
-      <button class="sbtn" id="ppw">Change password</button>
+      <div class="field"><input class="inp" type="password" id="pnew" placeholder="New password" autocomplete="new-password"></div>
+      <button class="sbtn" id="ppw" style="margin-top:8px">Change password</button>
       <h4>This device</h4>
       <button class="item danger" id="pout">Log out</button>`);
     $("#pav", s).onchange = async (e) => {
@@ -647,8 +647,9 @@
       try { S.me = await api("/api/me", { method: "PATCH", body: { name: $("#pname", s).value, username: $("#puser", s).value } }); s.remove(); drawAll(); toast("Saved"); }
       catch (x) { $("#perr", s).textContent = x.message; }
     };
+    pwChecklist($("#pnew", s));
     $("#ppw", s).onclick = async () => {
-      try { await api("/api/me", { method: "PATCH", body: { password: $("#pold", s).value, new_password: $("#pnew", s).value } }); toast("Password changed"); s.remove(); }
+      try { S.me = await api("/api/me", { method: "PATCH", body: { password: $("#pold", s).value, new_password: $("#pnew", s).value } }); cacheSave(); toast("Password changed"); s.remove(); }
       catch (x) { toast(x.message); }
     };
     const pp = $("#ppush", s); if (pp) pp.onclick = async () => { const r = await enablePush(true); toast(r); s.remove(); profileSheet(); };
@@ -783,6 +784,38 @@
     } else el.innerHTML = "";
   }
 
+  // ------------------------------------------------------------------ password rules (same as the server's)
+  const PW_RULES = [["8+ characters", (p) => p.length >= 8], ["A capital letter", (p) => /[A-Z]/.test(p)], ["A small letter", (p) => /[a-z]/.test(p)],
+    ["A number", (p) => /[0-9]/.test(p)], ["A symbol like ! ? # @", (p) => /[^A-Za-z0-9\s]/.test(p)]];
+  function pwChecklist(inp) {  // a small ✓ list under a new-password box that fills in as you type
+    const box = document.createElement("div"); box.className = "pwrules";
+    const draw = () => { box.innerHTML = PW_RULES.map(([t, ok]) => `<span class="${ok(inp.value) ? "ok" : ""}">${ok(inp.value) ? "✓" : "○"} ${t}</span>`).join(""); };
+    inp.after(box); inp.addEventListener("input", draw); draw();
+  }
+  function pwGate() {  // older accounts: a stronger password is required before chatting again
+    if (!S.me || !S.me.needs_new_pw || $("#pwgate")) return;
+    const g = document.createElement("div"); g.id = "pwgate";
+    g.innerHTML = `<div class="setup"><img class="logo" src="icon-512.png" alt=""><h1>New password needed</h1>
+      <p>To keep everyone's chats safe, passwords now need 8+ characters with a capital letter, a small letter, a number and a symbol. Choose a new one to continue.</p>
+      <label>Current password</label><input class="inp" type="password" id="gold" autocomplete="current-password">
+      <label>New password</label><input class="inp" type="password" id="gnew" autocomplete="new-password">
+      <label>New password again</label><input class="inp" type="password" id="gnew2" autocomplete="new-password">
+      <button class="big-btn" id="ggo">Save and continue</button><div class="err" id="gerr"></div>
+      <button class="link" id="gout">Log out</button></div>`;
+    document.body.appendChild(g); pwChecklist($("#gnew", g)); $("#gold", g).focus();
+    const go = async () => {
+      const err = $("#gerr", g); err.textContent = "";
+      if ($("#gnew", g).value !== $("#gnew2", g).value) { err.textContent = "The two new passwords don't match."; return; }
+      $("#ggo", g).disabled = true;
+      try {
+        S.me = await api("/api/me", { method: "PATCH", body: { password: $("#gold", g).value, new_password: $("#gnew", g).value } });
+        cacheSave(); g.remove(); toast("Password updated ♥"); flushOutbox();
+      } catch (e) { err.textContent = e.message; $("#ggo", g).disabled = false; }
+    };
+    $("#ggo", g).onclick = go; $$("input", g).forEach((i) => i.onkeydown = (e) => { if (e.key === "Enter") go(); });
+    $("#gout", g).onclick = () => { g.remove(); logout(); };
+  }
+
   // ------------------------------------------------------------------ sign in / sign up / reset
   function authScreen(mode) {
     const h = new URLSearchParams(location.hash.slice(1));
@@ -792,12 +825,13 @@
     app.innerHTML = `<div class="setup"><img class="logo" src="icon-512.png" alt=""><h1>A.F.R.A ♥</h1><p>${mode === "signup" ? "Create your account" : mode === "reset" ? "Choose a new password" : "A private chat, just for us"}</p>
       ${mode === "login" ? f("au", "Username", 'autocapitalize="none" autocorrect="off" autocomplete="username"') + f("ap", "Password", 'type="password" autocomplete="current-password"') : ""}
       ${mode === "signup" ? f("ai", "Invite code", `value="${esc(h.get("invite") || "")}" autocapitalize="characters"`, "inp code-input") + f("au", "Choose a username", 'autocapitalize="none" autocorrect="off" placeholder="e.g. raina" autocomplete="username"')
-        + f("an", "Your name", 'placeholder="How others see you" autocomplete="name"') + f("ap", "Choose a password", 'type="password" placeholder="6+ characters" autocomplete="new-password"') : ""}
+        + f("an", "Your name", 'placeholder="How others see you" autocomplete="name"') + f("ap", "Choose a password", 'type="password" autocomplete="new-password"') : ""}
       ${mode === "reset" ? f("ai", "Reset code", `value="${esc(h.get("reset") || "")}"`, "inp code-input") + f("ap", "New password", 'type="password" autocomplete="new-password"') : ""}
       <button class="big-btn gold" id="ago">${mode === "signup" ? "Create account ♥" : mode === "reset" ? "Save password" : "Log in"}</button><div class="err" id="aerr"></div>
       ${mode !== "login" ? `<button class="link" data-m="login">I already have an account</button>` : `<button class="link" data-m="signup">I have an invite code</button><button class="link" data-m="reset">Forgot password? (ask the admin for a reset code)</button>`}
       ${isIOS && !standalone ? `<div class="note warn">📲 Tip: tap <b>Share</b> ⬆ → <b>Add to Home Screen</b>, and use the app from its icon: that's where notifications work.</div>` : ""}</div>`;
     $$("[data-m]").forEach((b) => b.onclick = () => authScreen(b.dataset.m));
+    if (mode !== "login") pwChecklist($("#ap"));
     const go = async () => {
       const v = (id) => ($("#" + id) || {}).value || "", err = $("#aerr");
       $("#ago").disabled = true; err.textContent = "";
@@ -815,7 +849,7 @@
     if (!expired) api("/api/logout", { body: {}, noLogout: true }).catch(() => { });
     TOKEN = ""; store.del("token"); store.del("cache"); store.del("outbox"); store.del("lastsync"); lastSync = 0;
     if (WS) { const w = WS; WS = null; w.close(); }
-    S.me = null; S.convs = []; S.msgs = {}; S.cur = null;
+    S.me = null; S.convs = []; S.msgs = {}; S.cur = null; $$("#pwgate").forEach((g) => g.remove());
     authScreen("login"); if (expired) toast("Please log in again");
   }
 
@@ -825,7 +859,7 @@
     if (!TOKEN) return authScreen();
     S.me = S.me || store.get("cache", {}).me || null;
     if (!S.me) { try { S.me = await api("/api/me"); } catch (e) { if (!TOKEN) return; return authScreen(); } }
-    cacheLoad(); shell(); connect();
+    cacheLoad(); shell(); connect(); pwGate();
     toAfra({ type: "ready", me: { username: S.me.username, name: S.me.name } });
     const want = +(new URLSearchParams(location.hash.slice(1)).get("c") || 0);
     if (want) setTimeout(() => conv(want) && openConv(want), 400);

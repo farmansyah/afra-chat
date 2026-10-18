@@ -3,7 +3,7 @@
 A small private social chat on your own server, installable on iPhone and Android from the browser (no App Store),
 with real push notifications.
 
-- **Accounts:** everyone chooses a username, a display name, a password and a profile photo. Stay logged in on each
+- **Accounts:** everyone chooses a username, a display name, a password (8+ characters with a capital, a small letter, a number and a symbol; older weaker ones must be changed before chatting again) and a profile photo. Stay logged in on each
   device; log in on more devices (phone, laptop) with the same account.
 - **Invite only:** the admin makes invite codes (single use, optionally "make them an admin too"). Signing up with a
   code also starts the chat with whoever invited you.

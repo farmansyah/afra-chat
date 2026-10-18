@@ -94,6 +94,35 @@ def hash_pw(pw: str) -> str:
     return base64.b64encode(pw.encode()).decode()
 
 
+COMMON_PW = {"password", "passwrd", "qwerty", "iloveyou", "letmein", "welcome", "admin", "abc", "monkey", "dragon",
+             "sunshine", "princess", "football", "baseball", "master", "superman", "trustno", "loveyou", "mylove"}
+
+
+def pw_problem(pw: str, username: str = "") -> str:
+    """The usual password rules (Instagram, Google, banks); an empty string means the password is fine."""
+    missing = [w for ok, w in [(len(pw) >= 8, "8 characters"), (re.search(r"[A-Z]", pw), "a capital letter"),
+                               (re.search(r"[a-z]", pw), "a small letter"), (re.search(r"[0-9]", pw), "a number"),
+                               (re.search(r"[^A-Za-z0-9\s]", pw), "a symbol like ! ? # @")] if not ok]
+    if missing:
+        return "Password needs at least " + ", ".join(missing) + "."
+    if username and len(username) >= 3 and username.lower() in pw.lower():
+        return "Password can't contain your username."
+    if re.sub(r"[^a-z]", "", pw.lower().replace("0", "o").replace("@", "a").replace("$", "s")) in COMMON_PW:
+        return "That password is too easy to guess. Try something less common."
+    return ""
+
+
+def needs_new_pw(u) -> bool:
+    """True when the saved password doesn't meet the rules above (older accounts): the app asks them to change it.
+    Only reads the stored password; storage stays as it is."""
+    if u["pw"].startswith("scrypt$"):
+        return True
+    try:
+        return bool(pw_problem(base64.b64decode(u["pw"], validate=True).decode(), u["username"]))
+    except (ValueError, UnicodeDecodeError):
+        return True
+
+
 def check_pw(pw: str, stored: str) -> bool:
     try:
         if stored.startswith("scrypt$"):  # accounts made before the switch; changed to Base64 at their next login
@@ -171,8 +200,8 @@ def signup(body: dict, request: Request):
     pw = body.get("password") or ""
     if not USERNAME.match(username):
         raise ValueError("Username: 3–20 letters, numbers, dots or underscores, starting with a letter or number.")
-    if len(pw) < 6:
-        raise ValueError("Password: at least 6 characters.")
+    if pw_problem(pw, username):
+        raise ValueError(pw_problem(pw, username))
     with closing(db()) as c:
         inv = c.execute("SELECT * FROM invites WHERE code=? AND kind='invite'", (code,)).fetchone()
         if not inv or inv["used_by"]:
@@ -206,7 +235,7 @@ def login(body: dict, request: Request):
         token = new_session(c, u["id"], body.get("device") or "device")
         c.commit()
     ATTEMPTS.pop("login:" + username, None)
-    return {"token": token, "user": public(u)}
+    return {"token": token, "user": {**public(u), "needs_new_pw": bool(pw_problem(body["password"], u["username"]))}}
 
 
 @app.post("/api/reset")
@@ -214,13 +243,15 @@ def reset(body: dict, request: Request):
     """Set a new password with a reset code from the admin."""
     throttle("reset:" + (request.client.host if request.client else ""))
     code = (body.get("code") or "").strip().upper()
-    if len(body.get("password") or "") < 6:
-        raise ValueError("Password: at least 6 characters.")
     with closing(db()) as c:
         inv = c.execute("SELECT * FROM invites WHERE code=? AND kind='reset' AND used_at IS NULL", (code,)).fetchone()
         if not inv or time.time() - inv["created"] > 7 * 86400:
             raise ValueError("That reset code isn't valid any more. Ask the admin for a new one.")
         uid = int(inv["note"])
+        who = c.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+        bad = pw_problem(body.get("password") or "", who["username"] if who else "")
+        if bad:
+            raise ValueError(bad)
         c.execute("UPDATE users SET pw=? WHERE id=?", (hash_pw(body["password"]), uid))
         c.execute("UPDATE invites SET used_by=?, used_at=? WHERE code=?", (uid, time.time(), code))
         c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
@@ -240,7 +271,8 @@ def logout(authorization: str = Header(None)):
 
 @app.get("/api/me")
 def me(authorization: str = Header(None)):
-    return public(auth(authorization))
+    u = auth(authorization)
+    return {**public(u), "needs_new_pw": needs_new_pw(u)}
 
 
 @app.patch("/api/me")
@@ -259,13 +291,13 @@ async def update_me(body: dict, authorization: str = Header(None)):
         if body.get("new_password"):
             if not check_pw(body.get("password") or "", u["pw"]):
                 raise ValueError("Your current password isn't right.")
-            if len(body["new_password"]) < 6:
-                raise ValueError("New password: at least 6 characters.")
+            if pw_problem(body["new_password"], u["username"]):
+                raise ValueError(pw_problem(body["new_password"], u["username"]))
             c.execute("UPDATE users SET pw=? WHERE id=?", (hash_pw(body["new_password"]), u["id"]))
         c.commit()
         nu = c.execute("SELECT * FROM users WHERE id=?", (u["id"],)).fetchone()
     await announce_profile(nu)
-    return public(nu)
+    return {**public(nu), "needs_new_pw": needs_new_pw(nu)}
 
 
 @app.post("/api/me/avatar")
@@ -282,7 +314,7 @@ async def set_avatar(file: UploadFile = File(...), authorization: str = Header(N
         c.commit()
         nu = c.execute("SELECT * FROM users WHERE id=?", (u["id"],)).fetchone()
     await announce_profile(nu)
-    return public(nu)
+    return {**public(nu), "needs_new_pw": needs_new_pw(nu)}
 
 
 @app.get("/api/users/search")
@@ -400,6 +432,8 @@ def get_messages(cid: int, before: int = 0, since: float = 0, limit: int = 60, a
 @app.post("/api/convs/{cid}/messages")
 async def send_message(cid: int, body: dict, authorization: str = Header(None)):
     u = auth(authorization)
+    if needs_new_pw(u):  # the app shows the "choose a stronger password" screen; queued messages wait and go out after
+        raise HTTPException(403, "Please choose a stronger password first (8+ characters with a capital letter, a small letter, a number and a symbol).")
     text = (body.get("text") or "").strip()[:8000]
     att = body.get("attachment")
     if not text and not att:
@@ -508,6 +542,8 @@ async def typing(cid: int, authorization: str = Header(None)):
 @app.post("/api/files")
 async def upload(file: UploadFile = File(...), authorization: str = Header(None)):
     u = auth(authorization)
+    if needs_new_pw(u):
+        raise HTTPException(403, "Please choose a stronger password first (8+ characters with a capital letter, a small letter, a number and a symbol).")
     data = await file.read()
     if len(data) > MAX_FILE:
         raise ValueError(f"Files up to {MAX_FILE // 1048576} MB.")
