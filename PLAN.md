@@ -1,8 +1,42 @@
 # AFRA chat plan
 
+## Done
+- v17 shared pet, v18 unread nudges and touch UX, v19 tabs, pet room game and admin broadcast.
+
 ## In progress
-- Shared pet "Home" (v17)
-- Unread nudges: if a 1:1 message is still unread, remind the reader 15 min and 45 min after it arrived
+- v20: full-screen profile photos, and private nicknames for each other ("Dana calls you Sayang 💕").
+
+## Pending: closer together, and more fun
+### Every day
+- [ ] Daily question for two: one question a day ("What made you smile today?"). Your answer stays hidden until both have answered, then both are revealed. Builds a streak and an archive of answers. The pet asks it.
+- [ ] Mood check-in: tap a mood each day (😊 😴 😣 🥰 ...) with an optional word. The other sees it on the chat header, and the pet notices ("Raina's had a rough day, send her something nice?").
+- [ ] "Thinking of you" tap: one button, a soft buzz and a ♥ on their screen with no words needed. A counter shows how many today.
+- [ ] Morning / night ritual: "Good morning" and "Good night" cards with a photo of the sky, the weather where each of you is, and a line from lines.js.
+
+### Memories
+- [ ] Our dates: anniversary, birthdays, first date and a days-together counter, with a gentle reminder the day before and a small celebration screen on the day.
+- [ ] On this day: "1 year ago today you sent…", resurfacing old photos and messages from the same date.
+- [ ] Shared album: a Memories tab of all photos and videos from the chat by month, with favourites and a slideshow.
+- [ ] Time capsule letter: write a letter now that unlocks on a chosen date (anniversary, graduation, next year).
+- [ ] Monthly "our month" recap card: messages sent, photos, longest call, top emoji, pet milestones and streaks. Shareable as an image.
+
+### Together, apart
+- [ ] Distance and time: where each of you is (city level, opt-in), the kilometres apart, both local times and a countdown to the next meeting ("Next time together: 12 days").
+- [ ] Watch / listen together: share a YouTube or Spotify link and both press play together with a synced countdown.
+- [ ] Live location while travelling (from the roadmap), with "arrived safely" auto-messages.
+- [ ] Voice and video calls (WebRTC, from the roadmap).
+
+### Play
+- [ ] Mini games in chat: tic-tac-toe, "who's more likely to", this-or-that, 20 questions, a couple's quiz ("How well do you know me?"), and draw-and-guess. Wins earn pet coins.
+- [ ] Shared bucket list: places to go, food to try and things to do together. Tick them off with a photo and they go into the album.
+- [ ] Date-night spinner: a wheel of date ideas (stay-in or go-out, budget filter), and the pet suggests one on weekends.
+- [ ] Love coupons: make redeemable coupons for each other ("one free massage", "I'll cook tonight") that the other can redeem with a tap.
+- [ ] Doodle together: a shared live canvas, with the drawing sent as a sticker.
+
+### Care
+- [ ] Wishlist: gift ideas each of you saves privately about the other ("she likes this"), with a reminder before birthdays.
+- [ ] Gratitude jar: drop a little note of thanks any time. The jar fills up, and once a week the pet reads one out.
+- [ ] Gentle "we should talk" mode: a calm way to ask for a serious conversation, with a calm-down timer and prompts to keep it kind.
 
 ## Pending: chat settings
 Ordered roughly lightest first.
