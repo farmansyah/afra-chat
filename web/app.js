@@ -95,7 +95,7 @@
   const userById = (id) => id === S.me.id ? S.me : S.convs.flatMap((c) => c.members).find((u) => u.id === id);
 
   function avatar(u, cls = "", self = false) {
-    if (self) return `<div class="av ${cls}" style="background:var(--navy)">📝</div>`;
+    if (self) return `<div class="av ${cls}" style="background:var(--field)">📝</div>`;
     if (!u) return `<div class="av ${cls}">?</div>`;
     const ini = (u.name || u.username || "?").trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
     const col = COLORS[(u.id || 0) % COLORS.length];
@@ -314,7 +314,7 @@
       <div id="replybar"></div>
       <div class="quick" id="quick"></div>
       <div class="compose">
-        <button class="cbtn" id="btpl" title="Love notes">💌</button>
+        <button class="cbtn" id="btpl" title="Quick messages">💌</button>
         <button class="cbtn" id="bemoji" title="Emoji">😊</button>
         <textarea id="txt" rows="1" placeholder="Message"></textarea>
         <button class="cbtn" id="battach" title="Photo or file">📎</button>
@@ -349,7 +349,7 @@
     const tpl = await loadTemplates(), all = (tpl.categories || []).flatMap((c) => c.items).filter((t) => t.length <= 46);
     const picks = all.sort(() => Math.random() - .5).slice(0, 4);
     const chips = ["❤️", "🥰", "🤗", ...picks];
-    el.innerHTML = chips.map((t, i) => `<button data-q="${i}" class="${t.length <= 3 ? "emo" : ""}">${esc(t)}</button>`).join("") + `<button data-q="more" title="More love notes">💌 More</button>`;
+    el.innerHTML = chips.map((t, i) => `<button data-q="${i}" class="${t.length <= 3 ? "emo" : ""}">${esc(t)}</button>`).join("") + `<button data-q="more" title="More messages">💌 More</button>`;
     $$("[data-q]", el).forEach((b) => b.onclick = () => {
       if (b.dataset.q === "more") return openTemplates();
       b.classList.add("sent"); setTimeout(() => b.classList.remove("sent"), 400);
@@ -413,7 +413,7 @@
         ${rx.length ? `<div class="reacts">${rx.map(([uid, e]) => `<span title="${esc((userById(+uid) || {}).name || "")}">${esc(e)}</span>`).join("")}</div>` : ""}
         <div class="meta">${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
     }
-    log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made love notes.</small>`}</div>`);
+    log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const v = document.createElement("div"); v.className = "viewer"; v.innerHTML = `<img src="${img.dataset.full}">`; v.onclick = () => v.remove(); document.body.appendChild(v); });
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
@@ -553,7 +553,7 @@
     await loadTemplates();
     const cats = TEMPLATES.categories || [], all = cats.flatMap((c) => c.items.map((t) => [c, t]));
     let cur = store.get("tplcat", cats[0] && cats[0].id), q = "";
-    const s = sheet(`<h3>💌 Love notes</h3><input class="inp" type="search" id="tq" placeholder="Search ${all.length} notes" style="margin-bottom:8px">
+    const s = sheet(`<h3>💌 Quick messages</h3><input class="inp" type="search" id="tq" placeholder="Search ${all.length} messages" style="margin-bottom:8px">
       <div class="chips" id="tchips"></div><div class="tlist" id="tlist"></div>`);
     const pick = (t) => { const txt = $("#txt"); txt.value = txt.value.trim() ? txt.value.trim() + " " + t : t; window.growComposer(); s.remove(); txt.focus(); };
     const draw = () => {
@@ -668,7 +668,8 @@
             <a class="dl" href="${dl("/api/admin/export/notes")}" download><span>📝</span><span><b>Everyone's Notes to self (.zip)</b><small>One folder per person, with transcripts and files.</small></span></a>
             <a class="dl" href="${dl("/api/admin/export/users.csv")}" download><span>👥</span><span><b>People (spreadsheet)</b><small>Everyone with username, name, joined, last seen, messages sent. Opens in Excel, Numbers or Google Sheets. No passwords.</small></span></a>
             <a class="dl" href="${dl("/api/admin/export/chats.json")}" download><span>💬</span><span><b>All chats (JSON)</b><small>Every person, chat and message, readable. No passwords.</small></span></a>
-            <a class="dl" href="${dl("/api/admin/export/db")}" download><span>🗄</span><span><b>Complete database (${st.db_mb} MB, .db)</b><small>Everything, for a full copy or a move. Open it with “DB Browser for SQLite”. Passwords inside are scrambled (hashed).</small></span></a>
+            <div class="dl pick"><span>🗄</span><span style="flex:1"><b>Complete database (${st.db_mb} MB)</b><small>Every table and row. <b>.db</b> opens with “DB Browser for SQLite” (for a full copy or a move); <b>.json</b> is the same data as readable JSON. Passwords stay scrambled (hashed).</small>
+              <span class="row" style="margin-top:8px"><a class="sbtn" href="${dl("/api/admin/export/db")}" download>⬇ .db</a><a class="sbtn" href="${dl("/api/admin/export/db.json")}" download>⬇ .json</a></span></span></div>
             <h4>Automatic daily backups (on the server)</h4>
             ${st.backups.map((b) => `<a class="dl small" href="${dl("/api/admin/backups/" + encodeURIComponent(b.name))}" download><span>📦</span><span><b>${esc(b.name)}</b><small>${b.mb} MB · ${shortTime(b.at)}</small></span></a>`).join("") || `<div class="hint">The first one is made within a few hours.</div>`}`;
           const [people, chats] = await Promise.all([api("/api/admin/users"), api("/api/admin/chats")]);

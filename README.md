@@ -9,7 +9,7 @@ with real push notifications.
   code also starts the chat with whoever invited you.
 - **Chats:** type someone's @username and talk right away, with no request to accept. One chat per person, plus
   **Notes to self**. All chats are saved on the server, and each device keeps an offline copy.
-- **Messages:** text and emoji, 💌 200+ ready-made love and encouragement notes (English and Indonesian, "Surprise me"),
+- **Messages:** text and emoji, 💌 115 ready-made messages in 12 categories (check-ins, encouragement, study, plans, love…, plus "Surprise me"),
   photos, files, voice notes, replies, reactions (double-tap for ❤️), edit, delete for everyone, search, "typing…",
   online/last seen, read ticks (✓ sent, ✓✓ read), unread badges (also on the app icon).
 - **Notifications** show the sender's name and the message, and open that chat when tapped. They are encrypted for

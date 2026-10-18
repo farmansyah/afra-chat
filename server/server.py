@@ -812,6 +812,41 @@ def export_db(t: str = "", authorization: str = Header(None)):
                     headers={"Content-Disposition": f'attachment; filename="afra-chat-{time.strftime("%Y%m%d-%H%M")}.db"'})
 
 
+def database_as_json() -> str:
+    """The complete database converted to JSON: every table, every column, every row. Login tokens and the phones'
+    push keys are left out (they only let someone pretend to be a device); passwords stay hashed, as in the .db."""
+    hidden = {("sessions", "token"), ("pushes", "endpoint"), ("pushes", "sub")}
+    out = {"exported": time.strftime("%Y-%m-%d %H:%M:%S"), "database": "A.F.R.A chat", "tables": {}}
+    with closing(db()) as c:
+        for (table,) in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
+            cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
+            rows = []
+            for r in c.execute(f"SELECT * FROM {table}"):
+                row = {}
+                for col in cols:
+                    v = r[col]
+                    if (table, col) in hidden:
+                        v = "(hidden)"
+                    elif col in ("attachment", "reactions") and isinstance(v, str) and v[:1] in "{[":
+                        try:
+                            v = json.loads(v)
+                        except ValueError:
+                            pass
+                    elif isinstance(v, bytes):
+                        v = base64.b64encode(v).decode()
+                    row[col] = v
+                rows.append(row)
+            out["tables"][table] = {"columns": cols, "count": len(rows), "rows": rows}
+    return json.dumps(out, ensure_ascii=False, indent=1)
+
+
+@app.get("/api/admin/export/db.json")
+def export_db_json(t: str = "", authorization: str = Header(None)):
+    admin_q(t, authorization)
+    return Response(database_as_json(), media_type="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="afra-chat-database-{time.strftime("%Y%m%d-%H%M")}.json"'})
+
+
 @app.get("/api/admin/export/users.csv")
 def export_users(t: str = "", authorization: str = Header(None)):
     """Everyone in a spreadsheet (opens in Excel / Numbers / Google Sheets). No passwords."""
@@ -1016,6 +1051,7 @@ def export_everything(t: str = "", authorization: str = Header(None)):
 
             def build(z):
                 z.write(tmp, "database/chat.db")
+                z.writestr("database/chat.json", database_as_json())
                 z.writestr("people.json", json.dumps([_profile(u) for u in users.values()], ensure_ascii=False, indent=1))
                 done = set()
                 for cv in c.execute("SELECT * FROM convs ORDER BY kind, id").fetchall():
@@ -1025,6 +1061,7 @@ def export_everything(t: str = "", authorization: str = Header(None)):
                         z.write(FILES / u["avatar"], f"profile-photos/@{u['username']}.jpg")
                 z.writestr("README.txt", "A.F.R.A chat: complete export.\n"
                            "database/chat.db - the whole database (open with DB Browser for SQLite; passwords are hashed)\n"
+                           "database/chat.json - the same database as JSON (every table and row)\n"
                            "people.json - everyone (no passwords)\nchats/ - every chat, including each person's Notes to self:\n"
                            "  transcript.html (open in a browser), transcript.txt, chat.json, files/\nprofile-photos/ - everyone's photo\n")
             return _zip_response(build, f"afra-chat - everything - {time.strftime('%Y%m%d-%H%M')}.zip")

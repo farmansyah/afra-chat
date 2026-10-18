@@ -1,0 +1,105 @@
+/* A.F.R.A ♥ theme: simple and calm, like Instagram's light and dark modes.
+   Black/white surfaces, grey secondary text, one blue accent, your own messages in blue. Loaded last. */
+:root {
+  color-scheme: light dark;            /* native controls (dropdowns, scrollbars, date pickers) follow the theme */
+  --bg: #ffffff; --panel: #ffffff; --sheet: #ffffff; --field: #efefef; --hover: #f5f5f5;
+  --ink: #000000; --muted: #737373; --line: #dbdbdb;
+  --accent: #0095f6; --accent-press: #1877f2; --on-accent: #ffffff;
+  --mine: #3797f0; --mine-ink: #ffffff; --theirs: #efefef; --theirs-ink: #000000;
+  --love: #ff3040; --ok: #1cd14f; --shadow: none;
+  --navy: var(--accent); --gold: var(--accent);   /* older names, kept so nothing is left unstyled */
+  --serif: var(--sans);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000; --panel: #000000; --sheet: #262626; --field: #262626; --hover: #121212;
+    --ink: #f5f5f5; --muted: #a8a8a8; --line: #262626;
+    --theirs: #262626; --theirs-ink: #f5f5f5;
+  }
+}
+html, body, #app { background: var(--bg); color: var(--ink); }
+
+/* headers: plain, like the rest of the page */
+.top { background: var(--bg); color: var(--ink); border-bottom: 1px solid var(--line); }
+.top h1 { font: 700 22px var(--sans); }
+.top .who b { font: 600 16px var(--sans); }
+.top .who small, .top .greet { color: var(--muted); }
+.top .who small.live { color: var(--ok); }
+.top .icon { color: var(--ink); }
+.top .icon:hover, .top .icon:active { background: var(--hover); }
+
+/* fields, dropdowns and small buttons all match */
+input, select, textarea { color: var(--ink); }
+.inp, .list-tools input, .searchbar input, .compose textarea, select.inp {
+  background: var(--field); border: 1px solid transparent; color: var(--ink); border-radius: 10px; }
+.inp:focus, .list-tools input:focus, .searchbar input:focus, .compose textarea:focus { border-color: var(--muted); box-shadow: none; outline: none; }
+.compose textarea { border-radius: 22px; }
+select.inp { appearance: none; -webkit-appearance: none; padding-right: 34px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 18px) 55%, calc(100% - 13px) 55%; background-size: 5px 5px; background-repeat: no-repeat; }
+select option { background: var(--sheet); color: var(--ink); }
+.sbtn, a.sbtn { background: var(--field); color: var(--ink); border: 0; border-radius: 8px; padding: 8px 14px; font: 600 14px var(--sans);
+  text-decoration: none; display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; cursor: pointer; }
+.sbtn:hover, a.sbtn:hover { filter: brightness(.95); }
+@media (prefers-color-scheme: dark) { .sbtn:hover, a.sbtn:hover { filter: brightness(1.25); } }
+.big-btn, .big-btn.gold { background: var(--accent); color: var(--on-accent); border-radius: 10px; font-weight: 600; }
+.big-btn:hover { background: var(--accent-press); }
+.big-btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.link { color: var(--accent); text-decoration: none; font-weight: 600; }
+.chips button { background: var(--field); border: 0; color: var(--ink); font-weight: 600; }
+.chips button.on { background: var(--ink); color: var(--bg); }
+.pill.gold { background: var(--accent); color: var(--on-accent); }
+.code { background: var(--field); border: 0; }
+.note { background: var(--field); border: 0; }
+.note.warn { background: var(--field); border-left: 3px solid var(--accent); }
+.banner { background: var(--field); color: var(--ink); border-bottom: 1px solid var(--line); }
+.banner button { background: var(--accent); }
+.toast { background: #262626; color: #fff; }
+
+/* chat list */
+.conv { border-bottom: 0; }
+.conv:hover { background: var(--hover); }
+.conv.on { background: var(--field); }
+@keyframes bump { 30% { background: var(--field); } }
+.conv .row1 b { font-weight: 600; }
+.av-wrap.on::after { border-color: var(--bg); }
+.fab { background: var(--accent); color: #fff; box-shadow: 0 6px 18px rgba(0, 0, 0, .3); }
+
+/* messages: yours in blue, theirs in grey, no shadows */
+.bub { background: var(--theirs); color: var(--theirs-ink); box-shadow: none; border-radius: 22px 22px 22px 6px; }
+.mine .bub { background: var(--mine); color: var(--mine-ink); border-radius: 22px 22px 6px 22px; }
+.mine .bub .quote { color: rgba(255, 255, 255, .85); border-left-color: rgba(255, 255, 255, .7); background: rgba(255, 255, 255, .12); }
+.mine .bub a.file small { color: rgba(255, 255, 255, .8); }
+.bub.deleted { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.day { background: transparent; box-shadow: none; color: var(--muted); font-weight: 600; }
+.reacts span { background: var(--sheet); border: 2px solid var(--bg); box-shadow: none; }
+.flash .bub { outline: 3px solid var(--accent); }
+.typing-bub { background: var(--theirs); box-shadow: none; }
+.cbtn.send { background: transparent; color: var(--accent); font-size: 22px; }
+.cbtn.send[data-mode="send"] { background: var(--accent); color: #fff; font-size: 18px; }
+.quick { border-top: 0; background: var(--bg); }
+.quick button { background: var(--field); border: 0; color: var(--ink); }
+@keyframes sentFly { 50% { transform: translateY(-8px) scale(1.1); background: var(--accent); color: #fff; } }
+.reply-bar, .compose, .searchbar { background: var(--bg); border-top-color: var(--line); }
+.reply-bar div { border-left-color: var(--accent); }
+
+/* sheets and pages */
+.sheet-bg { background: rgba(0, 0, 0, .5); }
+.sheet { background: var(--sheet); }
+.sheet .grab { background: var(--muted); opacity: .5; }
+.sheet h3, .setup h1 { font: 700 18px var(--sans); }
+.setup h1 { font-size: 26px; }
+.menu .rx button.on { background: var(--field); }
+.menu > button:hover, .item:hover { background: var(--hover); }
+.tlist button { background: var(--field); border: 0; color: var(--ink); }
+.tlist button:active { background: var(--line); }
+.urow { border-bottom-color: var(--line); }
+.page { background: var(--bg); }
+.page .tabs { background: var(--bg); border-bottom-color: var(--line); }
+.stat { background: var(--field); border: 0; }
+.stat b { font: 700 26px var(--sans); }
+.dl { background: var(--bg); border: 1px solid var(--line); }
+.dl:hover { box-shadow: none; background: var(--hover); transform: none; }
+.dl .row { gap: 8px; flex-wrap: nowrap; }
+.dl select.inp { min-width: 0; }
+.banner-in { background: var(--sheet); color: var(--ink); }
