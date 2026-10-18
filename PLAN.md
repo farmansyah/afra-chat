@@ -2,10 +2,9 @@
 
 ## Done
 - v17 shared pet, v18 unread nudges and touch UX, v19 tabs, pet room game and admin broadcast.
+- v20 profile photo viewer and nicknames. v21 auto-update, jump-to-newest, pet thought bubbles, AI usage monitor and pet AI switch.
 
 ## In progress
-- v20: full-screen profile photos, and private nicknames for each other ("Dana calls you Sayang 💕").
-- v21: auto-update (the app refreshes itself after every deploy, no force restart), and a floating "jump to newest" button in chats with an unread count.
 - v22: daily question for two, mood check-in, our dates and countdown, on this day.
 - v23: time capsule letters, couple games that earn pet coins, shared bucket list with album.
 
