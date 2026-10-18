@@ -205,7 +205,9 @@
       drawAll();
     } else if (e.t === "conv") {
       const i = S.convs.findIndex((c) => c.id === e.conv.id); if (i >= 0) S.convs[i] = e.conv; else S.convs.unshift(e.conv);
-      drawList();    } else if (e.t === "conv_gone") {  // the admin deleted the other person's account
+      if (S.cur === e.conv.id) applyStyle();
+      if (e.styled && e.by !== S.me.id && S.cur === e.conv.id) toast(`${(userById(e.by) || {}).name || "They"} changed the chat theme`);
+      cacheSave(); drawList();    } else if (e.t === "conv_gone") {  // the admin deleted the other person's account
       S.convs = S.convs.filter((c) => c.id !== e.conv); delete S.msgs[e.conv];
       if (S.cur === e.conv) { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); }
       cacheSave(); drawList(); badge();
@@ -310,7 +312,7 @@
     pane.innerHTML = `
       <div class="top"><button class="icon back" id="bBack">‹</button><div id="chatAv"></div>
         <div class="who"><b id="chatName"></b><small id="chatStat"></small></div>
-        <button class="icon" id="bSearch" title="Search">🔍</button></div>
+        <button class="icon" id="bTheme" title="Chat theme">🎨</button><button class="icon" id="bSearch" title="Search">🔍</button></div>
       <div class="searchbar" id="sbar" hidden><input type="search" id="sq" placeholder="Search in this chat"><button class="cbtn" id="sclose">✕</button></div>
       <div class="log" id="log"></div>
       <div class="typing-line" id="typing"></div>
@@ -326,6 +328,7 @@
       </div>`;
     $("#bBack").onclick = () => { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); drawList(); };
     $("#bSearch").onclick = () => { $("#sbar").hidden = false; $("#sq").focus(); };
+    $("#bTheme").onclick = themeSheet;
     $("#sclose").onclick = () => { $("#sbar").hidden = true; S.search = ""; drawChat(); };
     $("#sq").oninput = (e) => { S.search = e.target.value.trim().toLowerCase(); drawChat(); };
     const txt = $("#txt");
@@ -343,7 +346,7 @@
     $("#file").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) sendFile(f); };
     $("#btpl").onclick = openTemplates; $("#bemoji").onclick = openEmoji;
     window.growComposer = grow; grow(); drawQuick();
-    drawHeader(); drawChat(); scrollEnd(true);
+    applyStyle(); drawHeader(); drawChat(); scrollEnd(true);
     if (focus && !matchMedia("(pointer: coarse)").matches) txt.focus();
   }
 
@@ -467,6 +470,200 @@
     if (!removing) burstAt($(`.msg[data-id="${id}"] .bub`), e);
     return api(`/api/messages/${id}/react`, { body: { emoji: e } }).then(upsert).then(drawChat).catch((x) => toast(x.message));
   };
+
+  // ------------------------------------------------------------------ chat themes: background and bubbles (for both of you, or just for me)
+  const BUBBLES = [  // id, name, my bubble, my text, (their bubble, their text)
+    ["default", "Classic", "#3797f0", "#fff"],
+    ["love", "Love", "linear-gradient(135deg,#ff6b9a,#ff2d55)", "#fff"],
+    ["candy", "Cotton candy", "linear-gradient(135deg,#7aa7ff,#ff8fd1)", "#fff"],
+    ["sunset", "Sunset", "linear-gradient(135deg,#ffa53c,#ff4f81)", "#fff"],
+    ["ocean", "Ocean", "linear-gradient(135deg,#00c6c2,#2f6bff)", "#fff"],
+    ["aurora", "Aurora", "linear-gradient(135deg,#2fd98f,#0f9bd7)", "#fff"],
+    ["grape", "Grape", "linear-gradient(135deg,#a259ff,#6a3df0)", "#fff"],
+    ["berry", "Berry", "linear-gradient(135deg,#d6246e,#8e2de2)", "#fff"],
+    ["gold", "Gold", "linear-gradient(135deg,#f7d774,#d4a017)", "#2b1d00"],
+    ["peach", "Peach", "#ffcfb0", "#4a2a12", "#fff1e8", "#4a2a12"],
+    ["butter", "Butter", "#ffe27a", "#3d3000", "#fff8d6", "#3d3000"],
+    ["matcha", "Matcha", "#b5e3a1", "#1d3b12", "#eef8e8", "#1d3b12"],
+    ["lilac", "Lilac", "#d8c6ff", "#2e1a5c", "#f3eeff", "#2e1a5c"],
+    ["mono", "Mono", "var(--ink)", "var(--bg)"],
+  ];
+  const pat = (svg, fill, base, size = 48) => `url("data:image/svg+xml,${encodeURIComponent(svg.replace(/FILL/g, fill))}") 0 0/${size}px ${size}px repeat, ${base}`;
+  const HEART = "<svg xmlns='http://www.w3.org/2000/svg' width='48' height='48'><path d='M14 20s-6-3.7-6-7.5A3.2 3.2 0 0 1 14 10.6a3.2 3.2 0 0 1 6 1.9C20 16.3 14 20 14 20zM38 44s-6-3.7-6-7.5a3.2 3.2 0 0 1 6-1.9 3.2 3.2 0 0 1 6 1.9C44 40.3 38 44 38 44z' fill='FILL'/></svg>";
+  const DOTS = "<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'><circle cx='6' cy='6' r='2' fill='FILL'/><circle cx='18' cy='18' r='2' fill='FILL'/></svg>";
+  const STARS = "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><path d='M15 6l1.6 4.4L21 12l-4.4 1.6L15 18l-1.6-4.4L9 12l4.4-1.6zM45 36l1.2 3.3 3.3 1.2-3.3 1.2L45 45l-1.2-3.3-3.3-1.2 3.3-1.2zM44 10l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8zM14 44l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z' fill='FILL'/></svg>";
+  const GRID = "<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28'><path d='M28 0H0v28' fill='none' stroke='FILL' stroke-width='1'/></svg>";
+  const BGS = [  // id, name, light mode, dark mode (empty = same), is it dark [light, dark]
+    ["none", "Plain", "", "", [false, false]],
+    ["blush", "Blush", "#fde2e4", "#2a1519", [false, true]], ["sky", "Sky", "#dcefff", "#0f1d2c", [false, true]],
+    ["mint", "Mint", "#dff5e8", "#0f2219", [false, true]], ["sand", "Sand", "#f4ecdf", "#221d15", [false, true]],
+    ["lilac", "Lilac", "#ece4ff", "#1b1530", [false, true]],
+    ["g-love", "Love", "linear-gradient(160deg,#ffe0ec,#ffb3cf 60%,#ff8ab4)", "linear-gradient(160deg,#2a0f1c,#4a1531 60%,#6b1d45)", [false, true]],
+    ["g-sunset", "Sunset", "linear-gradient(160deg,#ffd9b8,#ffa8bd 55%,#cfa6ff)", "linear-gradient(160deg,#3a1d2b,#4b2140 55%,#2c2152)", [false, true]],
+    ["g-ocean", "Ocean", "linear-gradient(160deg,#c4efff,#8cc4ff 60%,#7d95f0)", "linear-gradient(160deg,#071a2b,#0d3157 60%,#1c2f6e)", [false, true]],
+    ["g-aurora", "Aurora", "linear-gradient(160deg,#0b1d3a,#1f6f78 55%,#3ddc97)", "", [true, true]],
+    ["g-dusk", "Dusk", "linear-gradient(160deg,#2b1055,#7597de)", "", [true, true]],
+    ["g-peach", "Peach", "linear-gradient(160deg,#fff1e6,#ffd6c2)", "linear-gradient(160deg,#2a1c14,#3b2418)", [false, true]],
+    ["p-hearts", "Hearts", pat(HEART, "#ff9fbf", "#fff2f6"), pat(HEART, "#5a2038", "#1a0d13"), [false, true]],
+    ["p-dots", "Dots", pat(DOTS, "#c9d3e6", "#f7f9fc", 24), pat(DOTS, "#26304a", "#0b0f18", 24), [false, true]],
+    ["p-stars", "Stars", pat(STARS, "#f0c64a", "#fffaf0", 60), pat(STARS, "#b9a560", "#0c1024", 60), [false, true]],
+    ["p-grid", "Paper", pat(GRID, "#e3e8f0", "#ffffff", 28), pat(GRID, "#1c2230", "#0a0c12", 28), [false, true]],
+  ];
+  const darkMode = () => matchMedia("(prefers-color-scheme: dark)").matches;
+  const hasKeys = (o) => !!o && Object.keys(o).length > 0;
+  const chatStyle = (c) => (c && hasKeys(c.my_style) ? c.my_style : (c && c.style) || {});
+  function isDark(hex) {
+    const m = /#([0-9a-f]{6})/i.exec(hex || ""); if (!m) return false;
+    const n = parseInt(m[1], 16); return 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) < 140;
+  }
+  const inkFor = (hex) => isDark(hex) ? "#ffffff" : "#111111";
+  function bgCss(st) {  // [css background, is it dark?]
+    const b = st.bg || "";
+    if (b.startsWith("photo:")) { const d = (st.dim ?? 25) / 100; return [`linear-gradient(rgba(0,0,0,${d}),rgba(0,0,0,${d})), url("${fileUrl(b.slice(6))}") center/cover no-repeat`, d >= 0.2]; }
+    if (b === "custom") { const a = st.bg1 || "#ffd1dc", z = st.bg2 || a; return [`linear-gradient(160deg,${a},${z})`, isDark(a) && isDark(z)]; }
+    const p = BGS.find((x) => x[0] === b); if (!p || !p[2]) return ["", false];
+    const dm = darkMode() && !!p[3]; return [dm ? p[3] : p[2], p[4][darkMode() ? 1 : 0]];
+  }
+  function bubbleVars(st) {
+    if (st.bubble === "custom") { const m = st.mine || "#ff6b9a"; return { mine: m, mineInk: inkFor(m), theirs: st.theirs || "", theirsInk: st.theirs ? inkFor(st.theirs) : "" }; }
+    const p = BUBBLES.find((x) => x[0] === st.bubble);
+    return !p || p[0] === "default" ? null : { mine: p[2], mineInk: p[3], theirs: p[4] || "", theirsInk: p[5] || "" };
+  }
+  function paintStyle(el, log, st) {
+    const [bg, dark] = bgCss(st);
+    log.style.background = bg; log.classList.toggle("styled", !!bg); log.classList.toggle("on-dark", !!bg && dark);
+    const v = bubbleVars(st);
+    ["--mine-bg", "--mine-ink", "--theirs", "--theirs-ink"].forEach((k) => el.style.removeProperty(k));
+    el.classList.toggle("themed", !!v);
+    if (v) {
+      el.style.setProperty("--mine-bg", v.mine); el.style.setProperty("--mine-ink", v.mineInk);
+      if (v.theirs) { el.style.setProperty("--theirs", v.theirs); el.style.setProperty("--theirs-ink", v.theirsInk); }
+    }
+  }
+  function applyStyle() { const c = conv(S.cur), pane = $("#chatPane"), log = $("#log"); if (c && pane && log) paintStyle(pane, log, chatStyle(c)); }
+  try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyStyle); } catch { }
+
+  function themeSheet() {
+    const c = conv(S.cur); if (!c) return;
+    const shared = c.kind !== "self", mineOwn = hasKeys(c.my_style);
+    let scope = mineOwn ? "me" : "both", tab = "bg", d = { ...chatStyle(c) };
+    const isPhoto = () => String(d.bg || "").startsWith("photo:");
+    const s = sheet(`<h3>Chat theme</h3>
+      <div class="tprev" id="tprev"><div class="log" id="tlog">
+        <div class="msg"><div class="bub"><div class="txt">Hey you 👋</div></div></div>
+        <div class="msg mine"><div class="bub"><div class="txt">Hi! I like this one</div></div><div class="meta">${fmtTime(now())} <span class="ticks read">✓✓</span></div></div>
+      </div></div>
+      <div class="seg" id="ttabs"><button data-t="bg">Background</button><button data-t="bub">Bubbles</button></div>
+      <div id="tbody"></div>
+      ${shared ? `<h4>Who sees it</h4><div class="seg" id="tscope"><button data-s="both">Both of us</button><button data-s="me">Just me</button></div>` : ""}
+      <button class="big-btn" id="tsave" style="margin-top:14px">Apply</button>
+      <div class="row" style="justify-content:center;margin-top:8px"><button class="sbtn" id="treset">Default look</button>
+        ${shared && mineOwn ? `<button class="sbtn" id="tfollow">Use the shared theme</button>` : ""}</div>
+      <input type="file" id="tphoto" accept="image/*" hidden>`);
+    const preview = () => paintStyle($("#tprev", s), $("#tlog", s), d);
+    const draw = () => {
+      $$("#ttabs button", s).forEach((b) => b.classList.toggle("on", b.dataset.t === tab));
+      $$("#tscope button", s).forEach((b) => b.classList.toggle("on", b.dataset.s === scope));
+      const body = $("#tbody", s);
+      if (tab === "bg") {
+        const cur = isPhoto() ? "photo" : (d.bg || "none");
+        body.innerHTML = `<div class="swatches">${BGS.map(([id, name]) => `<button class="sw ${cur === id ? "on" : ""}" data-bg="${id}"><i style="background:${esc(bgCss({ bg: id })[0] || "var(--bg)")}"></i><span>${name}</span></button>`).join("")}
+          <button class="sw ${cur === "photo" ? "on" : ""}" data-bg="photo"><i style="${isPhoto() ? `background:${esc(bgCss(d)[0])}` : ""}">📷</i><span>Your photo</span></button>
+          <button class="sw ${cur === "custom" ? "on" : ""}" data-bg="custom"><i style="background:${esc(bgCss({ bg: "custom", bg1: d.bg1 || "#ffd1dc", bg2: d.bg2 || "#c3b1ff" })[0])}"></i><span>Custom</span></button></div>
+          ${cur === "custom" ? `<div class="row colors"><label>Top <input type="color" id="tbg1" value="${d.bg1 || "#ffd1dc"}"></label><label>Bottom <input type="color" id="tbg2" value="${d.bg2 || "#c3b1ff"}"></label></div>` : ""}
+          ${cur === "photo" ? `<label class="row colors">Darken <input type="range" id="tdim" min="0" max="70" value="${d.dim ?? 25}" style="flex:1"></label>` : ""}`;
+      } else {
+        const cur = d.bubble || "default";
+        body.innerHTML = `<div class="swatches">${BUBBLES.map(([id, name, bg, ink]) => `<button class="sw ${cur === id ? "on" : ""}" data-bub="${id}"><i class="bubsw" style="background:${bg};color:${ink}">Aa</i><span>${name}</span></button>`).join("")}
+          <button class="sw ${cur === "custom" ? "on" : ""}" data-bub="custom"><i class="bubsw" style="background:${d.mine || "#ff6b9a"};color:${inkFor(d.mine || "#ff6b9a")}">🎨</i><span>Custom</span></button></div>
+          ${cur === "custom" ? `<div class="row colors"><label>Mine <input type="color" id="tmine" value="${d.mine || "#ff6b9a"}"></label><label>Theirs <input type="color" id="ttheirs" value="${d.theirs || (darkMode() ? "#262626" : "#efefef")}"></label></div>` : ""}`;
+      }
+      $$("[data-bg]", body).forEach((b) => b.onclick = () => {
+        const v = b.dataset.bg;
+        if (v === "photo") return $("#tphoto", s).click();
+        d.bg = v; if (v === "custom") { d.bg1 = d.bg1 || "#ffd1dc"; d.bg2 = d.bg2 || "#c3b1ff"; } draw();
+      });
+      $$("[data-bub]", body).forEach((b) => b.onclick = () => { d.bubble = b.dataset.bub; if (d.bubble === "custom") d.mine = d.mine || "#ff6b9a"; draw(); });
+      const live = (id, key, redraw) => { const el = $("#" + id, body); if (el) { el.oninput = () => { d[key] = key === "dim" ? +el.value : el.value; preview(); }; if (redraw) el.onchange = draw; } };
+      live("tbg1", "bg1", true); live("tbg2", "bg2", true); live("tdim", "dim"); live("tmine", "mine", true); live("ttheirs", "theirs", true);
+      preview();
+    };
+    $$("#ttabs button", s).forEach((b) => b.onclick = () => { tab = b.dataset.t; draw(); });
+    $$("#tscope button", s).forEach((b) => b.onclick = () => { scope = b.dataset.s; draw(); });
+    $("#tphoto", s).onchange = async (e) => {
+      const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+      try {
+        toast("Uploading…"); const img = await shrinkImage(f, 1600); const fd = new FormData(); fd.append("file", img, img.name);
+        const att = await api("/api/files", { body: fd }); d.bg = "photo:" + att.id; d.dim = d.dim ?? 25; draw();
+      } catch (x) { toast(x.message); }
+    };
+    const save = async (style, sc) => {
+      try {
+        const v = await api(`/api/convs/${c.id}/style`, { method: "PUT", body: { scope: sc, style } });
+        const i = S.convs.findIndex((x) => x.id === c.id); if (i >= 0) S.convs[i] = v;
+        cacheSave(); applyStyle(); s.remove();
+        toast(!shared ? "Theme saved" : sc === "me" ? (hasKeys(style) ? "Theme set just for you" : "Back to the shared theme") : "Theme set for both of you");
+      } catch (x) { toast(x.message); }
+    };
+    $("#tsave", s).onclick = () => {
+      const st = { bg: isPhoto() ? d.bg : (d.bg || "none"), bubble: d.bubble || "default" };
+      if (st.bg === "custom") { st.bg1 = d.bg1; st.bg2 = d.bg2; }
+      if (isPhoto()) st.dim = d.dim ?? 25;
+      if (st.bubble === "custom") { st.mine = d.mine; if (d.theirs) st.theirs = d.theirs; }
+      save(st, shared ? scope : "both");
+    };
+    $("#treset", s).onclick = () => { d = {}; draw(); };
+    const fol = $("#tfollow", s); if (fol) fol.onclick = () => save({}, "me");
+    draw();
+  }
+
+  // ------------------------------------------------------------------ photo cropper (profile photo): drag to move, pinch / slider / wheel to zoom
+  function cropImage(file, out = 512) {
+    return new Promise(async (resolve) => {
+      const bmp = await createImageBitmap(file).catch(() => null);
+      if (!bmp) { toast("That photo can't be opened"); return resolve(null); }
+      const s = sheet(`<h3>Move and scale</h3>
+        <div class="crop" id="crop"><canvas id="ccan"></canvas><div class="crop-ring"></div></div>
+        <div class="row colors"><span>➖</span><input type="range" id="czoom" min="100" max="400" value="100" style="flex:1"><span>➕</span></div>
+        <div class="row" style="margin-top:12px"><button class="big-btn ghost" id="ccancel" style="flex:1">Cancel</button><button class="big-btn" id="cdone" style="flex:1">Done</button></div>`);
+      const box = $("#crop", s), can = $("#ccan", s), ctx = can.getContext("2d");
+      const D = box.clientWidth || 300, dpr = window.devicePixelRatio || 1;
+      can.width = can.height = Math.round(D * dpr); can.style.width = can.style.height = D + "px";
+      const base = Math.max(D / bmp.width, D / bmp.height);  // smallest scale that still fills the circle
+      let z = 1, x = 0, y = 0;  // zoom, and offset of the photo's centre from the box centre (css px)
+      const clamp = () => {
+        const w = bmp.width * base * z, h = bmp.height * base * z;
+        x = Math.max(-(w - D) / 2, Math.min((w - D) / 2, x)); y = Math.max(-(h - D) / 2, Math.min((h - D) / 2, y));
+      };
+      const paint = () => {
+        clamp(); const k = base * z * dpr;
+        ctx.clearRect(0, 0, can.width, can.height);
+        ctx.drawImage(bmp, (can.width - bmp.width * k) / 2 + x * dpr, (can.height - bmp.height * k) / 2 + y * dpr, bmp.width * k, bmp.height * k);
+      };
+      const zoomTo = (nz) => { const r = Math.max(1, Math.min(4, nz)) / z; x *= r; y *= r; z *= r; $("#czoom", s).value = Math.round(z * 100); paint(); };
+      const pts = new Map(); let last = null;
+      box.onpointerdown = (e) => { box.setPointerCapture(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]); last = null; };
+      box.onpointermove = (e) => {
+        if (!pts.has(e.pointerId)) return;
+        const prev = pts.get(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]);
+        if (pts.size === 1) { x += e.clientX - prev[0]; y += e.clientY - prev[1]; paint(); }
+        else { const [a, b] = [...pts.values()], dist = Math.hypot(a[0] - b[0], a[1] - b[1]); if (last) zoomTo(z * dist / last); last = dist; }
+      };
+      box.onpointerup = box.onpointercancel = (e) => { pts.delete(e.pointerId); last = null; };
+      box.onwheel = (e) => { e.preventDefault(); zoomTo(z * (e.deltaY < 0 ? 1.08 : 1 / 1.08)); };
+      $("#czoom", s).oninput = (e) => zoomTo(+e.target.value / 100);
+      const finish = (v) => { s.remove(); resolve(v); };
+      $("#ccancel", s).onclick = () => finish(null);
+      s.onclick = (e) => { if (e.target === s) finish(null); };
+      $("#cdone", s).onclick = () => {
+        clamp(); const o = document.createElement("canvas"); o.width = o.height = out;
+        const k = base * z * out / D;
+        o.getContext("2d").drawImage(bmp, (out - bmp.width * k) / 2 + x * out / D, (out - bmp.height * k) / 2 + y * out / D, bmp.width * k, bmp.height * k);
+        o.toBlob((b) => finish(b ? new File([b], "avatar.jpg", { type: "image/jpeg" }) : null), "image/jpeg", 0.9);
+      };
+      paint();
+    });
+  }
 
   function sheet(html) {
     const bg = document.createElement("div"); bg.className = "sheet-bg";
@@ -640,7 +837,7 @@
       <button class="item danger" id="pout">Log out</button>`);
     $("#pav", s).onchange = async (e) => {
       const f = e.target.files[0]; if (!f) return;
-      try { const sq = await shrinkImage(f, 384, true); const fd = new FormData(); fd.append("file", sq, "avatar.jpg"); S.me = await api("/api/me/avatar", { body: fd }); s.remove(); drawAll(); profileSheet(); toast("Photo updated"); }
+      try { e.target.value = ""; const sq = await cropImage(f, 512); if (!sq) return; const fd = new FormData(); fd.append("file", sq, "avatar.jpg"); S.me = await api("/api/me/avatar", { body: fd }); s.remove(); drawAll(); profileSheet(); toast("Photo updated"); }
       catch (x) { toast(x.message); }
     };
     $("#psave", s).onclick = async () => {

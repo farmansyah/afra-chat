@@ -79,6 +79,9 @@ with closing(db()) as _c:
     _c.executescript(SCHEMA)
     if "info" not in [r[1] for r in _c.execute("PRAGMA table_info(sessions)")]:  # what each logged-in device is (added later)
         _c.execute("ALTER TABLE sessions ADD COLUMN info TEXT DEFAULT ''")
+    for _t in ("convs", "members"):  # chat theme: on convs = shared by both people, on members = "just for me"
+        if "style" not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
+            _c.execute(f"ALTER TABLE {_t} ADD COLUMN style TEXT DEFAULT '{{}}'")
     _c.commit()
 
 app = FastAPI(title="A.F.R.A chat", docs_url=None, redoc_url=None, openapi_url=None)
@@ -364,13 +367,14 @@ def _member(c, cid: int, uid: int):
 def conv_view(c, cid: int, uid: int) -> dict:
     cv = c.execute("SELECT * FROM convs WHERE id=?", (cid,)).fetchone()
     others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>?", (cid, uid))]
-    mine = c.execute("SELECT last_read FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
+    mine = c.execute("SELECT last_read, style FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
     last = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
     unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND created>?",
                        (cid, uid, mine["last_read"] if mine else 0)).fetchone()[0]
     other_read = max([r["last_read"] for r in c.execute("SELECT last_read FROM members WHERE conv_id=? AND user_id<>?", (cid, uid))] or [0])
     return {"id": cid, "kind": cv["kind"], "members": others, "last": msg_view(last) if last else None, "unread": unread,
-            "last_at": cv["last_at"], "other_read": other_read}
+            "last_at": cv["last_at"], "other_read": other_read,
+            "style": json.loads(cv["style"] or "{}"), "my_style": json.loads((mine["style"] if mine else "") or "{}")}
 
 
 def msg_view(m) -> dict:
@@ -414,6 +418,61 @@ async def open_conv(body: dict, authorization: str = Header(None)):
             with closing(db()) as c:
                 await send_to(m, {"t": "conv", "conv": conv_view(c, cid, m)})
     return view
+
+
+STYLE_ID = re.compile(r"^[a-z0-9-]{1,24}$")
+COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def clean_style(c, st: dict, cid: int) -> dict:
+    """Keep only known keys with safe values: preset ids, #rrggbb colours, and a photo that was sent by someone in this chat."""
+    out = {}
+    bg = st.get("bg") or ""
+    if bg.startswith("photo:"):
+        fid = bg[6:]
+        f = c.execute("SELECT 1 FROM files f JOIN members m ON m.user_id=f.owner WHERE f.id=? AND m.conv_id=? AND f.mime LIKE 'image/%'", (fid, cid)).fetchone()
+        if not f:
+            raise ValueError("That background photo isn't available.")
+        out["bg"] = bg
+    elif bg:
+        if not STYLE_ID.match(bg):
+            raise ValueError("Unknown background.")
+        out["bg"] = bg
+    if st.get("bubble"):
+        if not STYLE_ID.match(st["bubble"]):
+            raise ValueError("Unknown bubble theme.")
+        out["bubble"] = st["bubble"]
+    for k in ("mine", "theirs", "bg1", "bg2"):
+        if st.get(k):
+            if not COLOR.match(st[k]):
+                raise ValueError("Colours look like #ff3366.")
+            out[k] = st[k].lower()
+    if "dim" in st:
+        out["dim"] = max(0, min(70, int(st.get("dim") or 0)))
+    return out
+
+
+@app.put("/api/convs/{cid}/style")
+async def set_style(cid: int, body: dict, authorization: str = Header(None)):
+    """Chat background and bubble colours. scope "both" changes it for everyone in the chat; "me" only on my own devices
+    (an empty "me" style means: follow the shared one again)."""
+    u = auth(authorization)
+    scope = body.get("scope") or "both"
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        st = clean_style(c, body.get("style") or {}, cid)
+        if scope == "me":
+            c.execute("UPDATE members SET style=? WHERE conv_id=? AND user_id=?", (json.dumps(st), cid, u["id"]))
+            members = [u["id"]]
+        else:
+            c.execute("UPDATE convs SET style=? WHERE id=?", (json.dumps(st), cid))
+            c.execute("UPDATE members SET style='{}' WHERE conv_id=? AND user_id=?", (cid, u["id"]))  # my own override would hide what I just chose
+            members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cid,))]
+        c.commit()
+        views = {m: conv_view(c, cid, m) for m in members}
+    for m, v in views.items():
+        await send_to(m, {"t": "conv", "conv": v, "by": u["id"], "styled": True})
+    return views[u["id"]]
 
 
 @app.get("/api/convs/{cid}/messages")

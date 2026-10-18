@@ -112,3 +112,31 @@ select option { background: var(--sheet); color: var(--ink); }
 .devcard { display: flex; flex-direction: column; gap: 3px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .devcard small { color: var(--muted); }
 .devcard details { font-size: 12px; color: var(--muted); } .devcard code { word-break: break-all; font-size: 11px; }
+
+/* chat themes: a background behind the messages and coloured bubbles (set per chat, see themeSheet in app.js) */
+.themed .mine .bub { background: var(--mine-bg); color: var(--mine-ink); }
+.themed .mine .bub .quote { color: inherit; opacity: .85; border-left-color: currentColor; background: rgba(127, 127, 127, .18); }
+.themed .mine .bub a.file small, .themed .mine .bub a { color: inherit; }
+.log.styled .meta, .log.styled .empty { color: rgba(0, 0, 0, .62); }
+.log.styled.on-dark .meta, .log.styled.on-dark .empty { color: rgba(255, 255, 255, .88); text-shadow: 0 1px 2px rgba(0, 0, 0, .45); }
+.log.styled .day, .log.styled .older { background: rgba(255, 255, 255, .78); color: #333; border: 0; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+.log.styled.on-dark .day, .log.styled.on-dark .older { background: rgba(0, 0, 0, .45); color: #fff; }
+.log.styled .bub.deleted { background: rgba(127, 127, 127, .22); }
+.seg { display: flex; background: var(--field); border-radius: 10px; padding: 3px; gap: 3px; margin-top: 10px; }
+.seg button { flex: 1; border: 0; background: transparent; border-radius: 8px; padding: 8px; font: 600 14px var(--sans); color: var(--muted); }
+.seg button.on { background: var(--bg); color: var(--ink); box-shadow: 0 1px 3px rgba(0, 0, 0, .15); }
+.tprev { border-radius: 16px; overflow: hidden; border: 1px solid var(--line); flex: none; }
+.tprev .log { height: 140px; flex: none; justify-content: center; overflow: hidden; }
+.tprev .msg { animation: none; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 10px 8px; margin-top: 12px; }
+.sw { border: 0; background: none; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 0; color: var(--ink); font-size: 12px; }
+.sw i { width: 58px; height: 58px; border-radius: 16px; border: 1px solid var(--line); display: grid; place-items: center; font-style: normal; font-size: 22px; background: var(--field); }
+.sw i.bubsw { border-radius: 20px 20px 6px 20px; font: 600 16px var(--sans); border: 0; }
+.sw.on i { outline: 3px solid var(--accent); outline-offset: 2px; }
+.row.colors { margin-top: 12px; gap: 16px; font-size: 14px; }
+.row.colors input[type=color] { width: 44px; height: 32px; border: 0; padding: 0; background: none; vertical-align: middle; }
+
+/* profile photo cropper */
+.crop { position: relative; width: min(320px, 80vw); aspect-ratio: 1; margin: 6px auto 0; touch-action: none; cursor: grab; overflow: hidden; border-radius: 12px; background: #000; flex: none; }
+.crop canvas { display: block; }
+.crop-ring { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(0, 0, 0, .55); pointer-events: none; outline: 1px solid rgba(255, 255, 255, .6); outline-offset: -1px; }
