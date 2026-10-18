@@ -3,6 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
+  const APP_V = 21;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -257,12 +258,14 @@
   }
 
   function onEvent(e) {
+    if (e.t === "hello" || e.t === "update") { if (e.t === "update" || (e.version && String(e.version) !== String(APP_V))) checkUpdate(true); return; }
     if (e.t === "msg" || e.t === "upd") {
       upsert(e.msg);
       const c = conv(e.msg.conv_id);
       if (!c) { resync(); return; }
       if (e.t === "msg") {
         c.last = e.msg; c.last_at = e.msg.created;
+        if (c.kind === "pet" && e.msg.kind === "text" && e.msg.text && (userById(e.msg.sender) || {}).bot === 2) petThink(c.id, e.msg.text);
         if (e.msg.sender !== S.me.id) {
           delete S.typing[c.id];
           if (S.cur === c.id && isVisible()) markRead(c.id); else c.unread = (c.unread || 0) + 1;
@@ -428,6 +431,7 @@
       <div class="searchbar" id="sbar" hidden><input type="search" id="sq" placeholder="Search in this chat"><button class="cbtn" id="sclose">✕</button></div>
       <div class="home" id="home" hidden></div>
       <div class="log" id="log"></div>
+      <button class="jump" id="bJump" aria-label="Jump to newest message" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><b class="jbadge"></b></button>
       <div class="dock" id="dock">
         <div class="typing-line" id="typing"></div>
         <div id="replybar"></div>
@@ -461,7 +465,9 @@
     $(".top .who", pane).onclick = infoPage; $("#chatAv").onclick = infoPage;
     $("#bemoji").onclick = openEmoji; bindCamera();
     const dock = $("#dock"), logEl = $("#log");  // the glass bar floats over the chat: keep the last message clear of it
-    if (window.ResizeObserver) (dockRO && dockRO.disconnect(), dockRO = new ResizeObserver(() => { const near = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 160; logEl.style.paddingBottom = (dock.offsetHeight + 6) + "px"; if (near) logEl.scrollTop = logEl.scrollHeight; })).observe(dock);
+    if (window.ResizeObserver) (dockRO && dockRO.disconnect(), dockRO = new ResizeObserver(() => { const near = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 160; logEl.style.paddingBottom = (dock.offsetHeight + 6) + "px"; pane.style.setProperty("--dockh", dock.offsetHeight + "px"); if (near) logEl.scrollTop = logEl.scrollHeight; })).observe(dock);
+    pane.style.setProperty("--dockh", dock.offsetHeight + "px");
+    jumpBind(pane, logEl);
     window.growComposer = grow; grow(); drawQuick();
     pane.classList.toggle("is-pet", c.kind === "pet");
     applyStyle(); drawHeader(); drawHome(); drawChat(); scrollEnd(true);
@@ -552,6 +558,24 @@
   }
   setInterval(() => { drawHeader(); const t = now(); if (Object.values(S.typing).some((x) => x < t && x > t - 2)) drawList(); }, 2000);
 
+  // ---- jump to newest: shows when you have scrolled well up; new messages that arrive meanwhile are counted on it
+  const JUMP = { n: 0, last: 0, raf: 0, el: null, log: null };
+  const jumpFar = (log) => log.scrollHeight - log.scrollTop - log.clientHeight > Math.min(300, log.clientHeight);
+  function jumpUpdate() {
+    const b = JUMP.el, log = JUMP.log; if (!b || !log || !log.isConnected) return;
+    if (log.scrollHeight - log.scrollTop - log.clientHeight < 140) JUMP.n = 0;
+    const show = jumpFar(log), badge = b.querySelector(".jbadge");
+    b.classList.toggle("show", show); b.tabIndex = show ? 0 : -1;
+    badge.textContent = JUMP.n > 99 ? "99+" : JUMP.n; badge.classList.toggle("on", JUMP.n > 0);
+  }
+  function jumpBind(pane, log) {
+    JUMP.n = 0; JUMP.last = 0; JUMP.el = $("#bJump", pane); JUMP.log = log;
+    log.addEventListener("scroll", () => { if (!JUMP.raf) JUMP.raf = requestAnimationFrame(() => { JUMP.raf = 0; jumpUpdate(); }); }, { passive: true });
+    JUMP.el.onclick = () => {
+      navigator.vibrate && navigator.vibrate(8);
+      JUMP.n = 0; log.scrollTo({ top: log.scrollHeight, behavior: "smooth" }); jumpUpdate();
+    };
+  }
   function scrollEnd(force) { const log = $("#log"); if (log && (force || log.scrollHeight - log.scrollTop - log.clientHeight < 140)) log.scrollTop = log.scrollHeight; }
 
   function bubbleBody(m, list) {
@@ -590,11 +614,14 @@
       const ticks = mine && !m.deleted && c.kind !== "self" ? `<span class="ticks ${read ? "read" : ""}">${m.pending ? "🕓" : read ? "✓✓" : "✓"}</span>` : (m.pending ? "🕓" : "");
       const key = m.client_id || m.id; fresh.add(key);
       const pop = seen && !seen.has(key) ? "pop" : "";
-      html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
-        <div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
+      const ps = c.kind === "pet" && !m.deleted && m.kind === "text" && (userById(m.sender) || {}).bot === 2;  // the pet speaking: a thought cloud instead of a normal bubble
+      if (pop && !atBottom && !S.search && !mine && !m.deleted && m.created >= JUMP.last) JUMP.n++;
+      html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""} ${ps ? "petsay" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
+        ${ps ? `<span class="psav" aria-hidden="true">${esc((petOf(c) || {}).emoji || "🐾")}</span>` : ""}<div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
         ${rxPill(m)}
         <div class="meta">${S.stars.has(m.id) ? "⭐ " : ""}${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
     }
+    if (list.length) JUMP.last = Math.max(JUMP.last, list[list.length - 1].created || 0);
     log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : c.kind === "bot" ? "Ask me anything, or tell me what to remember ✨" : c.kind === "pet" ? "Say hello 🐾" : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
@@ -608,6 +635,7 @@
     $$(".msg", log).forEach(bindPress);
     S.seen[c.id] = fresh;
     if (atBottom) log.scrollTo({ top: log.scrollHeight, behavior: seen ? "smooth" : "auto" });
+    jumpUpdate();
     drawHeader();
   }
   async function loadOlder() {
@@ -2033,7 +2061,7 @@
   async function adminPage() {
     const page = document.createElement("div"); page.className = "page";
     page.innerHTML = `<div class="top"><button class="icon" id="pBack">‹</button><h1>🛡 Admin</h1></div>
-      <div class="chips tabs"><button data-t="home" class="on">Overview</button><button data-t="users">People</button><button data-t="inv">Invites</button><button data-t="notify">📣 Notify</button></div>
+      <div class="chips tabs"><button data-t="home" class="on">Overview</button><button data-t="users">People</button><button data-t="inv">Invites</button><button data-t="notify">📣 Notify</button><button data-t="ai">🤖 AI</button></div>
       <div class="page-body" id="adm"></div>`;
     document.body.appendChild(page);
     const pclose = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
@@ -2070,6 +2098,8 @@
           us.onchange = cs.onchange = sync; sync();
         } else if (t === "notify") {
           notifyForm(el);
+        } else if (t === "ai") {
+          aiUsage(el);
         } else if (t === "inv") {
           const inv = await api("/api/admin/invites");
           el.innerHTML = `<div class="note">Make an invite code and send the link. They choose their own username and password, and their chat with you starts right away.</div>
@@ -2412,7 +2442,24 @@
     if (H.coins !== null && p.coins !== H.coins) { const e = $("#hmCoin", box); e.classList.add("pop"); }
     H.coins = p.coins;
     if (mood === "asleep" && !H.bub) moodBubble("1f634", 5000);
+    thinkShow();
     bindHome(box, c);
+  }
+  // the pet's latest line as a thought bubble over its head in the Home room: "…" for a moment, then the words, then it fades
+  function petThink(cid, text) { H.think = { cid, text, at: Date.now() }; if (S.tab === "home" && H.drawn) thinkShow(); }
+  function thinkShow() {
+    const t = H.think, room = $(".hm-room"), old = $(".rm-think");
+    if (old) old.remove(); (H.tt || []).forEach(clearTimeout); H.tt = [];
+    if (!t || !room || t.cid !== H.cid) return;
+    const age = Date.now() - t.at; if (age > 6800) return;
+    const el = document.createElement("div"), said = age >= 800;
+    el.className = "rm-think" + (age > 150 ? " again" : "") + (said ? " said" : " dots"); el.setAttribute("role", "button");
+    const words = () => `<span class="tx">${esc(t.text)}</span>`;
+    el.innerHTML = said ? words() : `<span class="tt"><i></i><i></i><i></i></span>`;
+    el.onclick = () => openConv(t.cid);
+    room.appendChild(el);
+    if (!said) H.tt.push(setTimeout(() => { el.classList.remove("dots"); el.classList.add("said", "swap"); el.innerHTML = words(); }, 800 - age));
+    H.tt.push(setTimeout(() => { el.classList.add("out"); setTimeout(() => el.remove(), 450); }, 6800 - age));
   }
   function killLotOnly() { if (H.lot && H.lot.anim) H.lot.anim.destroy(); H.lot = null; }
   const albumRow = (l) => {
@@ -2597,11 +2644,41 @@
     $("#sOut", box).onclick = () => { if (confirm("Log out on this device?")) logout(); };
   }
 
+  // ---- AI usage (admin): tokens and cost per day, who spends it, and the switch that lets the pet run on built-in lines
+  async function aiUsage(el) {
+    const u = await api("/api/admin/ai-usage");
+    const tok = (n) => n >= 1e6 ? (n / 1e6).toFixed(2) + "M" : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "k" : String(n || 0);
+    const usd = (n) => !n ? "$0" : n < 0.01 ? "$" + n.toFixed(4) : "$" + n.toFixed(n < 1 ? 3 : 2);
+    const card = (label, r) => `<div class="aicard"><small>${label}</small><b>${usd(r.cost)}</b><span>${tok(r.prompt + r.completion)} tokens · ${r.calls} call${r.calls === 1 ? "" : "s"}</span></div>`;
+    const sr = u.series, max = Math.max(1, ...sr.map((d) => d.tokens));
+    const bars = sr.map((d, i) => { const h = Math.max(d.tokens ? 4 : 1.5, d.tokens / max * 58); return `<rect x="${i * 20 + 3}" y="${64 - h}" width="14" height="${h}" rx="4" class="${i === sr.length - 1 ? "now" : ""}"><title>${d.day}: ${tok(d.tokens)} tokens, ${usd(d.cost)}</title></rect>`; }).join("");
+    const days = (d) => new Date(d + "T12:00:00").toLocaleDateString([], { weekday: "narrow" });
+    const labels = sr.map((d, i) => `<text x="${i * 20 + 10}" y="76" text-anchor="middle">${days(d.day)}</text>`).join("");
+    const w = (k) => u.by_who[k] || { calls: 0, prompt: 0, completion: 0, cost: 0 };
+    const split = [["🐾 Pet", w("pet")], ["✨ Assistant", w("assistant")]];
+    const tot = Math.max(1, split.reduce((a, [, r]) => a + r.prompt + r.completion, 0));
+    el.innerHTML = `<label class="swrow aisw"><span><b>Pet uses AI</b><small>Off: the pet chats with built-in lines, no API cost</small></span><input type="checkbox" class="swtog" id="aiPet" ${u.pet_ai ? "checked" : ""}></label>
+      <div class="aicards">${card("Today", u.periods.today)}${card("7 days", u.periods.week)}${card("30 days", u.periods.month)}</div>
+      <div class="aichart"><h4>Last 14 days</h4><svg viewBox="0 0 280 82" role="img" aria-label="Tokens per day for the last 14 days">${bars}${labels}</svg><small>Tokens per day · model ${esc(u.model)}</small></div>
+      <h4>Pet vs Assistant (30 days)</h4>
+      <div class="aisplit">${split.map(([l, r]) => `<div><span>${l}</span><i><em style="width:${Math.round((r.prompt + r.completion) / tot * 100)}%"></em></i><b>${usd(r.cost)}</b><small>${tok(r.prompt + r.completion)} tokens · ${r.calls} calls</small></div>`).join("")}</div>
+      <h4>By person (30 days)</h4>
+      ${u.by_user.map((r) => `<div class="urow"><div class="mid"><b>${esc(r.name)}</b><small>${tok(r.prompt)} in · ${tok(r.completion)} out · ${r.calls} calls</small></div><b>${usd(r.cost)}</b></div>`).join("") || `<div class="hint">No AI calls yet.</div>`}
+      <div class="hint" style="margin-top:10px">All time: ${usd(u.periods.all.cost)} · ${tok(u.periods.all.prompt + u.periods.all.completion)} tokens · ${u.periods.all.calls} calls. Cost shows when OpenRouter reports it.</div>`;
+    const sw = $("#aiPet", el);
+    sw.onchange = async () => {
+      sw.disabled = true;
+      try { const r = await api("/api/admin/settings", { method: "PUT", body: { pet_ai: sw.checked } }); toast(r.pet_ai ? "The pet uses AI again" : "The pet uses built-in lines"); }
+      catch (x) { sw.checked = !sw.checked; toast(x.message); } finally { sw.disabled = false; }
+    };
+  }
+
   // ---- Notify everyone (admin)
   function notifyForm(root, inSheet) {
     root.innerHTML = `<div class="field"><label>Title</label><input class="inp" id="nTitle" maxlength="60" value="A.F.R.A"></div>
       <div class="field"><label>Message</label><textarea class="inp" id="nBody" maxlength="180" rows="3" placeholder="What do you want to tell everyone?"></textarea><small class="hint" id="nCount">0 / 180</small></div>
       <h4>Preview</h4><div class="nprev"><div class="np-ico">♥</div><div><b id="npT">A.F.R.A</b><span id="npB">Your message shows up here</span></div><small>now</small></div>
+      <label class="nrefresh"><input type="checkbox" id="nUpd"><span>Also refresh everyone's app</span></label>
       <button class="big-btn" id="nSend" style="margin-top:12px">Send to everyone</button><h4>Recently sent</h4><div id="nList"><div class="hint">Loading…</div></div>`;
     const t = $("#nTitle", root), b = $("#nBody", root);
     const prev = () => { $("#npT", root).textContent = t.value.trim() || "A.F.R.A"; $("#npB", root).textContent = b.value.trim() || "Your message shows up here"; $("#nCount", root).textContent = b.value.length + " / 180"; };
@@ -2616,7 +2693,7 @@
       try {
         let n = 0; try { n = (await api("/api/admin/users")).filter((u) => !u.disabled).length; } catch { }
         if (!confirm(`Send to all ${n} people?\n\n${title}\n${body}`)) return;
-        const r = await api("/api/admin/broadcast", { body: { title, body } });
+        const r = await api("/api/admin/broadcast", { body: { title, body, refresh: $("#nUpd", root).checked } });
         toast(`Sent to ${r.sent} people (${r.devices} devices) ♥`); b.value = ""; prev(); list();
       } catch (x) { toast(x.message); } finally { btn.disabled = false; }
     };
@@ -2624,20 +2701,82 @@
   }
   function notifySheet() { const s = sheet(`<h3 style="font:600 20px var(--serif);margin:4px 0 8px">📣 Notify everyone</h3><div id="nForm"></div>`); notifyForm($("#nForm", s)); }
 
+  // ------------------------------------------------------------------ auto-update: the server says which version is current; this copy reloads itself when it is behind
+  const hadController = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+  let updBusy = false, updReady = false, updAt = 0, updBanner = null, updWait = null;
+  const updIdle = () => {
+    const t = $("#txt"), a = document.activeElement;
+    if (t && t.value.trim()) return false;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return false;
+    if (rec || vrec || vrev || S.edit) return false;
+    if ($(".sheet-bg,.viewer,.avv,.hn,.wpv,.vrec,.mpv,#vrev,.page")) return false;
+    if ($$("video,audio").some((v) => !v.paused && !v.ended)) return false;
+    return !Object.values(S.msgs).some((l) => l.some((m) => m.pending));
+  };
+  function updReload(force) {  // remember where we are, then reload (not twice within 2 minutes unless the person tapped it)
+    try {
+      const last = JSON.parse(sessionStorage.getItem("afra_updtry") || "null");
+      if (!force && last && Date.now() - last.t < 120000) return false;
+      sessionStorage.setItem("afra_updtry", JSON.stringify({ t: Date.now() }));
+      sessionStorage.setItem("afra_resume", JSON.stringify({ cid: S.cur || 0, t: Date.now() }));
+    } catch { }
+    location.reload(); return true;
+  }
+  function updShowBanner() {
+    if (updBanner && updBanner.isConnected) return;
+    const b = updBanner = document.createElement("div"); b.className = "banner-in upd-banner"; b.setAttribute("role", "button");
+    b.innerHTML = `<span class="upd-ico">✨</span><div class="mid"><b>A new version is ready</b><small>Tap to refresh</small></div>`;
+    b.onclick = () => { navigator.vibrate && navigator.vibrate(8); updReload(true); };
+    document.body.appendChild(b);
+  }
+  function updNow() {  // the new version has arrived: reload quietly when nothing is in progress, otherwise ask
+    updReady = true;
+    if (updIdle() && updReload(false)) return;
+    updShowBanner();
+  }
+  async function checkUpdate(force) {
+    if (updReady) { if (updIdle()) updReload(false); return; }
+    if (updBusy || (!force && Date.now() - updAt < 5000)) return;
+    updBusy = true; updAt = Date.now();
+    try {
+      const r = await fetch("/api/version", { cache: "no-store" });
+      const v = r.ok ? String((await r.json()).version || "") : "";
+      if (!v || v === String(APP_V)) return;
+      const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration().catch(() => null) : null;
+      if (reg) {
+        const arrived = new Promise((res) => { updWait = res; setTimeout(res, 8000); });
+        reg.update().catch(() => { });
+        await arrived; updWait = null;
+      }
+      updNow();
+    } catch { } finally { updBusy = false; }
+  }
+  if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController) return;  // the very first install taking control is not an update
+    if (updWait) updWait(); else updNow();
+  });
+  addEventListener("focus", () => checkUpdate());
+  addEventListener("pageshow", (e) => { if (e.persisted) checkUpdate(true); });
+  setInterval(() => { if (document.visibilityState === "visible") checkUpdate(true); }, 30 * 60 * 1000);
+
   // ------------------------------------------------------------------ start
   async function start() {
-    if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => { });
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(() => { });
+    checkUpdate(true);
     if (!TOKEN) return authScreen();
     S.me = S.me || store.get("cache", {}).me || null;
     if (!S.me) { try { S.me = await api("/api/me"); } catch (e) { if (!TOKEN) return; return authScreen(); } }
     cacheLoad(); shell(); connect(); pwGate(); reportDevice();
     toAfra({ type: "ready", me: { username: S.me.username, name: S.me.name } });
     const want = +(new URLSearchParams(location.hash.slice(1)).get("c") || 0);
+    let back = null; try { back = JSON.parse(sessionStorage.getItem("afra_resume") || "null"); sessionStorage.removeItem("afra_resume"); } catch { }
+    if (back && Date.now() - back.t < 60000) { setTimeout(() => toast("✨ Updated"), 500); if (!want && back.cid && conv(back.cid)) setTimeout(() => openConv(back.cid), 150); }
     if (want) setTimeout(() => conv(want) && openConv(want), 400);
     if ("Notification" in window && Notification.permission === "granted") enablePush(false);
   }
   document.addEventListener("visibilitychange", () => {
     sendVis();
+    if (document.visibilityState === "visible") checkUpdate();
     if (isVisible() && TOKEN && S.me) {
       autoWhere();
       if (!WS || WS.readyState > 1) connect(); else resync();

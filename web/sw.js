@@ -1,7 +1,7 @@
 /* A.F.R.A ♥: works offline (app shell) and shows notifications with the sender's name and message.
    The notification text arrives encrypted for this phone (Web Push, RFC 8291); only this phone can read it. */
-const CACHE = "afra-chat-v20";
-const SHELL = ["./", "index.html", "app.css?v=20", "alive.css?v=20", "theme.css?v=20", "app.js?v=20", "lines.js?v=20", "templates.json", "manifest.webmanifest", "icon-512.png"];
+const CACHE = "afra-chat-v21";
+const SHELL = ["./", "index.html", "app.css?v=21", "alive.css?v=21", "theme.css?v=21", "app.js?v=21", "lines.js?v=21", "templates.json", "manifest.webmanifest", "icon-512.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", (e) => {
@@ -11,9 +11,16 @@ self.addEventListener("fetch", (e) => {
     e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => { if (r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); } return r; })));
     return;
   }
+  const shellPage = e.request.mode === "navigate" || u.pathname === "/" || u.pathname.endsWith("/index.html");
+  if (shellPage) {  // the page itself: network first so a new deploy shows at once, the cached copy only when offline
+    e.respondWith(fetch(e.request, { cache: "no-store" }).then((r) => { if (r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put("index.html", copy)); } return r; })
+      .catch(() => caches.match("index.html").then((r) => r || caches.match("./"))));
+    return;
+  }
   e.respondWith(fetch(e.request).then((r) => { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return r; })
     .catch(() => caches.match(e.request).then((r) => r || caches.match("index.html"))));
 });
+self.addEventListener("message", (e) => { if (e.data && e.data.type === "skipWaiting") self.skipWaiting(); });
 // the sender's profile picture when they have one (Android and desktop show it; iPhone always shows the app icon)
 const iconUrl = (u) => { try { return u ? new URL(u, self.location.origin).href : "icon-512.png"; } catch (err) { return "icon-512.png"; } };
 self.addEventListener("push", (e) => {

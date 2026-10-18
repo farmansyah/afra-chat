@@ -84,6 +84,9 @@ CREATE TABLE IF NOT EXISTS pet_days (pet_id INTEGER, day TEXT, data TEXT DEFAULT
 CREATE TABLE IF NOT EXISTS pet_items (pet_id INTEGER, item TEXT, qty INTEGER DEFAULT 0, PRIMARY KEY (pet_id, item));
 CREATE TABLE IF NOT EXISTS pet_log (id INTEGER PRIMARY KEY, pet_id INTEGER, kind TEXT, text TEXT, at REAL, day TEXT DEFAULT '', file TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS pet_log_pet ON pet_log(pet_id, at);
+CREATE TABLE IF NOT EXISTS ai_usage (id INTEGER PRIMARY KEY, ts REAL, user_id INTEGER, conv_id INTEGER, who TEXT, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost REAL);
+CREATE INDEX IF NOT EXISTS ai_usage_ts ON ai_usage(ts);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS broadcasts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT, body TEXT, sent INTEGER DEFAULT 0, devices INTEGER DEFAULT 0, created REAL);
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
@@ -1019,6 +1022,39 @@ def _history(c, cid: int, bot: int) -> list:
     return out
 
 
+def get_setting(key: str, default: str = "") -> str:
+    try:
+        with closing(db()) as c:
+            r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return r[0] if r else default
+    except Exception:
+        return default
+
+
+def set_setting(key: str, value: str):
+    with closing(db()) as c:
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
+        c.commit()
+
+
+def pet_ai_on() -> bool:
+    return get_setting("pet_ai", "1") != "0"
+
+
+def log_usage(uid: int, cid: int, who: str, data: dict):
+    """One row per model call. Never allowed to break a reply."""
+    try:
+        us = data.get("usage") or {}
+        cost = us.get("cost")
+        with closing(db()) as c:
+            c.execute("INSERT INTO ai_usage (ts, user_id, conv_id, who, model, prompt_tokens, completion_tokens, cost) VALUES (?,?,?,?,?,?,?,?)",
+                      (time.time(), uid, cid, who, ASSISTANT_MODEL, int(us.get("prompt_tokens") or 0), int(us.get("completion_tokens") or 0),
+                       float(cost) if isinstance(cost, (int, float)) else None))
+            c.commit()
+    except Exception as e:
+        print("usage log failed:", repr(e)[:200], flush=True)
+
+
 async def think(uid: int, cid: int, pet=None) -> str:
     """One answer from the model. With `pet` (a pets row) it is the pet in Home, speaking for the couple; otherwise the personal Assistant."""
     if not OPENROUTER_KEY:
@@ -1033,10 +1069,12 @@ async def think(uid: int, cid: int, pet=None) -> str:
     async with httpx.AsyncClient(timeout=90) as h:
         for _ in range(5):  # the model may use a few tools before it answers
             r = await h.post("https://openrouter.ai/api/v1/chat/completions", json={
-                "model": ASSISTANT_MODEL, "messages": msgs, "tools": tools, "temperature": 0.8 if pet else 0.4, "max_tokens": 350 if pet else 900},
+                "model": ASSISTANT_MODEL, "messages": msgs, "tools": tools, "temperature": 0.8 if pet else 0.4, "max_tokens": 350 if pet else 900, "usage": {"include": True}},
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "HTTP-Referer": "https://chat.farmansyah.cloud", "X-Title": "A.F.R.A chat"})
             r.raise_for_status()
-            msg = r.json()["choices"][0]["message"]
+            data = r.json()
+            log_usage(uid, cid, "pet" if pet else "assistant", data)
+            msg = data["choices"][0]["message"]
             calls = msg.get("tool_calls") or []
             if not calls:
                 return re.sub(r"\*\*(.+?)\*\*", r"\1", (msg.get("content") or "").strip()) or "👍"
@@ -1181,6 +1219,88 @@ PET_CANNED = {
     "tend": ["All clean and fluffy ✨", "Ahh, that feels nice 🫧", "Sparkly! 🛁"],
     "sleep": ["Goodnight... 💤", "Sleepy... thank you 🌙", "Cosy. Zzz 😴"],
     "idle": ["I'm here! 🐾", "Hehe 🥰", "You two are my favourites 💛", "*wiggles happily*"]}
+# What the pet says when "Pet uses AI" is off: plain keyword matching, no API cost. {n} pet, {me} the speaker, {them} the partner.
+PET_LOCAL = {
+    "morning": ["Good morning, {me}! ☀️ I've been up for ages.", "Mornin' {me}! 🐾 Is it breakfast time yet?", "Rise and shine, {me}! I saved you the sunniest spot ☀️",
+                "Good morning! I dreamed about snacks 🍖 What about you?", "Hehe, good morning {me}! Say hi to {them} for me 💛", "Morning, {me}! Today feels like a good day 🌤️"],
+    "night": ["Goodnight, {me} 🌙 Sleep tight!", "Nighty night 💤 I'll keep the room warm.", "Sweet dreams, {me}! Give {them} a goodnight too 💛",
+              "Zzz... oh, goodnight! 😴", "Goodnight {me}. I'll be right here 🐾", "Close your eyes, {me}. I'll guard the dreams 🌙"],
+    "love": ["Aww, {me}! I love you too 🥰", "My heart just did a flip 💗", "You and {them} are my whole world 💛", "Hehe, I miss you when you're away too 🐾",
+             "*snuggles up closer* 🥹", "That's the nicest thing I heard today, {me} 💞", "Come here, I'm giving you the biggest cuddle 🤗"],
+    "hungry": ["Food?! I'm listening 👀", "Did someone say snack? 🍖", "A little treat from the Home screen would be lovely, {me} 😋", "My tummy says yes please 🥣",
+              "I can always make room for dinner 🍽️", "Feeding me is basically a love language, {me} 💛", "Mmm, yes. Let's eat! 🍖"],
+    "play": ["Yes yes yes, let's play! 🧸", "I'm ready! Throw something! 🎾", "Play time is the best time 🥳", "Catch me if you can, {me}! 🐾",
+             "Wheee! Tap the play button and watch me go 🎉", "Ooh, can {them} join too? Games are better with two 💛"],
+    "sleep": ["Sleepy... want to nap together? 😴", "A nap sounds perfect right now 💤", "Tuck me in, {me}? 🌙", "*yawns* Me too, honestly 🥱",
+              "Rest well, {me}. You've earned it 💛", "Cosy blankets, soft pillows... yes please 😴"],
+    "sad": ["Oh {me}... I'm here, okay? 🫂", "Sending you my softest cuddle 🥺 Want to tell me what happened?", "It's okay not to be okay. I'm staying right here 🐾",
+            "Hey, you're doing better than you think, {me} 💛", "*leans on you quietly* I'm not going anywhere.", "That sounds heavy. Maybe {them} could use a hug too? 💞", "Take a slow breath with me. In... and out 🌿"],
+    "happy": ["Yay! That makes me so happy, {me}! 🎉", "I can feel the good mood from here ✨", "Hehe, do a happy wiggle with me! 🐾", "Tell me everything! 🥳",
+              "Best news ever! Let's celebrate 🎊", "Your happiness is contagious, {me} 💛", "Woohoo! 🙌"],
+    "thanks": ["Anytime, {me}! 🐾", "Aww, you're welcome 💛", "That's what I'm here for 🥰", "Hehe, no problem at all!", "Always happy to help, {me} 😊", "You don't need to thank me, just keep the cuddles coming 🤗"],
+    "self": ["I'm {n}! Your very own pet, and your biggest fan 🐾", "I'm {n}. I live here with you and {them} 🏡", "Who am I? {n}, professional cuddler and snack inspector 🧐",
+             "I'm {n}, and this is my home. You're both welcome anytime 💛", "{n} at your service! 🫡", "I'm your little {n}. Nice to see you again, {me} 😊"],
+    "partner": ["{them} is the other half of my favourite team 💛", "I think {them} is wonderful. Have you told them today? 💞", "{them} always gives good snacks 😋 Same as you, {me}!",
+                "You two make a great pair, you know 🥰", "I'd love to hear from {them} too! Maybe say hi in here? 🐾", "{them} is lucky to have you, {me} 💗"],
+    "compliment": ["Aww, stop it, I'm blushing 🥰", "You're making my tail wiggle! 🐾", "Thank you, {me}! You're pretty great yourself 💛", "Hehe, I try my best ✨",
+                   "That made my whole day 🥹", "Careful, I might get a big head. Keep going though 😌"],
+    "bored": ["Bored? Let's play something! 🧸", "Hmm, we could say something nice to each other? 💛", "I could do a little dance for you 💃🐾", "Check the quests on the Home screen, maybe there's something fun there 📋",
+              "Want to tell me a story? I love stories 📖", "Let's wake {them} up with a silly message 😄"],
+    "how": ["I'm doing good! Thanks for asking, {me} 🐾", "Feeling cosy and happy now that you're here 💛", "Great, now that you're talking to me 😊", "Pretty good! How about you, {me}?",
+            "Wagging, purring, whatever you call it. All good here ✨", "I'm okay! A cuddle would make it perfect 🤗"],
+    "default": ["Hehe 🥰", "I'm here! 🐾", "Tell me more, {me}!", "You two are my favourites 💛", "*tilts head* Mm-hm? 👀", "Oh? I'm listening 🐾",
+                "I like it when you talk to me, {me} 💛", "*wiggles happily*", "Hmm, interesting! 🤔", "Aww, I'm glad you're here 💛"]}
+PET_LOCAL_RULES = [  # first match wins
+    ("night", r"good\s*night|nighty|sleep well|sweet dreams|selamat malam|\bgn\b"),
+    ("morning", r"good\s*morning|\bmorning\b|selamat\s*pagi|\bpagi\b|\bgm\b"),
+    ("thanks", r"\bthank|\bthx\b|makasih|terima kasih|grateful|appreciate"),
+    ("love", r"love (you|u)|\bluv\b|miss (you|u)|i love|sayang|kangen|cinta|\bxoxo\b|❤|💗|💛|🥰|😘"),
+    ("sad", r"\bsad\b|stress|anxious|worried|upset|cry|tired of|lonely|depress|bad day|rough|hard day|down\b|sedih|capek banget|\bsakit\b|😢|😭|🥺"),
+    ("hungry", r"hungry|\bfood\b|\bfeed\b|\beat\b|snack|dinner|lunch|breakfast|treat|lapar|makan|\bfed\b"),
+    ("play", r"\bplay\b|game|\bfun\b|toy|\bmain\b|ayo main|fetch|\bball\b"),
+    ("sleep", r"sleepy|tired|\bnap\b|\bsleep\b|bed ?time|exhausted|ngantuk|\btidur\b|😴"),
+    ("bored", r"bored|nothing to do|boring|bosan"),
+    ("partner", r"\b(he|she|they)\b.*(here|home|doing)|partner|boyfriend|girlfriend|husband|wife|\bbae\b|\bpacar\b"),
+    ("compliment", r"cute|adorable|good (boy|girl|pet|job)|so sweet|best pet|handsome|pretty|clever|smart|\bimut\b|lucu"),
+    ("self", r"who are you|your name|what are you|what('?s| is) your name|siapa kamu|who r u|introduce"),
+    ("how", r"how are (you|u)|how('?s| is) it going|how do you feel|you okay|you ok|apa kabar|what('?s| is) up|\bsup\b"),
+    ("happy", r"\bhappy\b|excited|so good|great news|yay|woohoo|promotion|passed|\bwon\b|awesome|amazing|senang|seneng|🎉|🥳|😁|😄"),
+    ("greet", r"^\s*(hi|hey|hello|hallo|halo|yo|hiya|hai|heyy+|hii+)\b")]
+PET_LOCAL["greet"] = ["Hi {me}! 🐾", "Hey hey! I missed you 💛", "Hello hello! What's up? 😊", "Hi! You're here, yay 🥳", "Heyy {me}! Come sit with me 🐾", "Oh hi! I was just thinking about you 💭"]
+
+
+def pet_local_reply(c, p, uid: int, text: str) -> str:
+    """Built-in answer: match the last message to an intent, pick a line, fill in the names, lean on how the pet feels."""
+    import random
+    t = (text or "").lower().strip()
+    intent = "default"
+    for name, pat in PET_LOCAL_RULES:
+        if re.search(pat, t):
+            intent = name
+            break
+    u = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    other_id = p["user_b"] if uid == p["user_a"] else p["user_a"]
+    o = c.execute("SELECT * FROM users WHERE id=?", (other_id,)).fetchone()
+    nick = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (uid, other_id)).fetchone()
+    me = _first(u) if u else "friend"
+    them = (nick[0] if nick and nick[0] else _first(o)) if o else "your partner"
+    v = pet_view(c, p)
+    if intent in ("hungry",) and v["hunger"] < 40:
+        line = random.choice(["Honestly? My tummy is rumbling 🥺 Could you feed me, {me}?", "I'm so hungry, {me}... a snack would save my day 🍖", "Yes please! I'm running on empty here 😋"])
+    elif intent in ("hungry",) and v["hunger"] >= 85:
+        line = random.choice(["I'm actually stuffed right now, but I won't say no to a treat later 😋", "Full tummy here! Ask me again in a bit 🍖", "Just ate, {me}! Still, I love that you asked 💛"])
+    elif intent == "how" and v["mood"] in ("hungry", "sleepy", "lonely"):
+        line = {"hungry": "A bit hungry, to be honest 🥺 Food would fix everything.", "sleepy": "A little sleepy, but happy you're here 😴",
+                "lonely": "I missed you two a lot today 🥺 Better now!"}[v["mood"]]
+    elif intent == "sleep" and v["mood"] == "sleeping":
+        line = "*half asleep* mm... hi... 💤"
+    elif intent == "default" and v["needs_care"] and random.random() < .4:
+        line = random.choice(["I'd love some attention today, {me} 🥺 A little care goes a long way.", "Psst, I haven't had my cuddles yet today 🐾"])
+    else:
+        line = random.choice(PET_LOCAL[intent])
+    return line.format(n=p["name"], me=me, them=them)
+
+
 PET_LOCKS: dict[int, asyncio.Lock] = {}
 PET_CHECK = [0.0]
 _ONE_OF = (["feed2", "feed_each", "tend1", "sleep1"], ["play_both", "together", "chat"], ["greet", "thanks"])
@@ -1549,7 +1669,11 @@ async def pet_turn(cid: int, uid: int, mid: int):
                     await asyncio.sleep(4)
             t = asyncio.create_task(typing())
             try:
-                if recent >= 30 or not OPENROUTER_KEY:
+                if not pet_ai_on():  # built-in lines: no API cost, but still a short pause so it feels alive
+                    await asyncio.sleep(random.uniform(1, 3))
+                    with closing(db()) as c:
+                        reply = pet_local_reply(c, p, uid, text)
+                elif recent >= 30 or not OPENROUTER_KEY:
                     reply = random.choice(PET_CANNED["idle"])
                 else:
                     try:
@@ -2088,6 +2212,24 @@ async def announce_profile(u):
         await send_to(p, {"t": "profile", "user": public(u)})
 
 
+def _app_version() -> str:
+    """APP_V in app.js is the app version: bump it (with the ?v= and sw.js cache name) and every open app updates itself.
+    Read from the very file the page runs, so a fresh page always matches and can never reload in a loop."""
+    try:
+        m = re.search(r"const APP_V = (\d+);", (WEB / "app.js").read_text(encoding="utf-8"))
+        return m.group(1) if m else ""  # empty: clients skip the check
+    except OSError:
+        return ""
+
+
+APP_VERSION = _app_version()
+
+
+@app.get("/api/version")
+def app_version():
+    return JSONResponse({"version": APP_VERSION}, headers={"Cache-Control": "no-store"})
+
+
 @app.websocket("/api/ws")
 async def ws(sock: WebSocket, token: str = "", device: str = "device"):
     try:
@@ -2105,6 +2247,10 @@ async def ws(sock: WebSocket, token: str = "", device: str = "device"):
         except Exception:
             pass
     SOCKETS[uid][dev] = {"ws": sock, "visible": True}
+    try:
+        await sock.send_text(json.dumps({"t": "hello", "version": APP_VERSION}))
+    except Exception:
+        pass
     if first:
         await announce_presence(uid, True)
     try:
@@ -2516,7 +2662,11 @@ async def admin_broadcast(body: dict, authorization: str = Header(None)):
     with closing(db()) as c:
         uids = [r["id"] for r in c.execute("SELECT id FROM users WHERE bot=0 AND disabled=0")]
         devices = c.execute(f"SELECT COUNT(*) FROM pushes WHERE user_id IN ({','.join('?' * len(uids))})", uids).fetchone()[0] if uids else 0
-    await push_to(uids, {"title": title, "body": text, "conv": 0, "tag": "broadcast", "icon": "/icon-512.png"}, skip_visible=False)
+    refresh = bool(body.get("refresh"))
+    await push_to(uids, {"title": title, "body": text, "conv": 0, "tag": "broadcast", "icon": "/icon-512.png", **({"update": 1} if refresh else {})}, skip_visible=False)
+    if refresh:
+        for uid in uids:
+            await send_to(uid, {"t": "update", "version": APP_VERSION})
     with closing(db()) as c:
         c.execute("INSERT INTO broadcasts (user_id, title, body, sent, devices, created) VALUES (?,?,?,?,?,?)", (me_["id"], title, text, len(uids), devices, time.time()))
         c.commit()
@@ -2528,6 +2678,40 @@ def admin_broadcasts(authorization: str = Header(None)):
     admin(authorization)
     with closing(db()) as c:
         return [dict(r) for r in c.execute("SELECT id, title, body, sent, devices, created FROM broadcasts ORDER BY id DESC LIMIT 10")]
+
+
+@app.get("/api/admin/ai-usage")
+def admin_ai_usage(authorization: str = Header(None)):
+    admin(authorization)
+    now = time.time()
+    t0 = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    agg = "COUNT(*) calls, COALESCE(SUM(prompt_tokens),0) prompt, COALESCE(SUM(completion_tokens),0) completion, COALESCE(SUM(cost),0) cost"
+    out = {"pet_ai": pet_ai_on(), "model": ASSISTANT_MODEL}
+    with closing(db()) as c:
+        out["periods"] = {k: dict(c.execute(f"SELECT {agg} FROM ai_usage WHERE ts>=?", (since,)).fetchone())
+                          for k, since in (("today", t0), ("week", t0 - 6 * 86400), ("month", t0 - 29 * 86400), ("all", 0))}
+        since = t0 - 29 * 86400
+        out["by_who"] = {r["who"]: {k: r[k] for k in ("calls", "prompt", "completion", "cost")}
+                         for r in c.execute(f"SELECT who, {agg} FROM ai_usage WHERE ts>=? GROUP BY who", (since,))}
+        out["by_user"] = [dict(r) for r in c.execute(
+            f"SELECT COALESCE(u.name, u.username, '?') name, {agg} FROM ai_usage a LEFT JOIN users u ON u.id=a.user_id WHERE a.ts>=? GROUP BY a.user_id ORDER BY cost DESC, prompt DESC", (since,))]
+        days = {r["d"]: dict(r) for r in c.execute(
+            f"SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') d, {agg} FROM ai_usage WHERE ts>=? GROUP BY d", (t0 - 13 * 86400,))}
+    series = []
+    for i in range(13, -1, -1):
+        d = datetime.fromtimestamp(t0 - i * 86400 + 3600).strftime("%Y-%m-%d")
+        r = days.get(d) or {}
+        series.append({"day": d, "calls": r.get("calls", 0), "tokens": (r.get("prompt", 0) or 0) + (r.get("completion", 0) or 0), "cost": r.get("cost", 0) or 0})
+    out["series"] = series
+    return out
+
+
+@app.put("/api/admin/settings")
+def admin_settings(body: dict, authorization: str = Header(None)):
+    admin(authorization)
+    if "pet_ai" in body:
+        set_setting("pet_ai", "1" if body.get("pet_ai") else "0")
+    return {"pet_ai": pet_ai_on()}
 
 
 @app.get("/api/admin/stats")
