@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 24;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 25;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -262,6 +262,7 @@
   function onEvent(e) {
     if (e.t === "hello" || e.t === "update") { if (e.t === "update" || (e.version && String(e.version) !== String(APP_V))) checkUpdate(true); return; }
     if (e.t === "touch") { onTouchEvent(e); return; }
+    if (e.t === "card") { onCardEvent(e); return; }
     if (e.t === "us_here" || e.t === "us_tap" || e.t === "us_sync" || e.t === "us_invite") { onUsEvent(e); return; }
     if (e.t === "pins") {
       const c = conv(e.conv); if (!c) return; c.pins = e.pins || []; P.k[c.id] = 0; cacheSave();
@@ -277,9 +278,9 @@
         if (c.kind === "pet" && e.msg.kind === "text" && e.msg.text && (userById(e.msg.sender) || {}).bot === 2) petThink(c.id, e.msg.text);
         if (e.msg.sender !== S.me.id) {
           delete S.typing[c.id];
-          if (S.cur === c.id && isVisible()) markRead(c.id); else c.unread = (c.unread || 0) + 1;
-          if (!isVisible() && e.msg.kind !== "touch") toAfra({ type: "message", conv: c.id, from: title(c), text: preview(e.msg) });
-          if (e.msg.kind !== "touch" && isVisible() && (S.cur === c.id || !isMuted(c))) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
+          if (S.cur === c.id && isVisible()) markRead(c.id); else if (e.msg.kind !== "card") c.unread = (c.unread || 0) + 1;
+          if (!isVisible() && e.msg.kind !== "touch" && e.msg.kind !== "card") toAfra({ type: "message", conv: c.id, from: title(c), text: preview(e.msg) });
+          if (e.msg.kind !== "touch" && e.msg.kind !== "card" && isVisible() && (S.cur === c.id || !isMuted(c))) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
         }
         S.convs.sort((a, b) => (b.last_at || 0) - (a.last_at || 0));
       } else if (c.last && c.last.id === e.msg.id) c.last = e.msg;
@@ -639,6 +640,7 @@
       prevSender = m.kind === "petact" ? 0 : m.sender;  // the pet speaking: a thought cloud instead of a normal bubble
       if (pop && !atBottom && !S.search && !mine && !m.deleted && m.created >= JUMP.last) JUMP.n++;
       if (m.kind === "touch" && !m.deleted) { html += touchChip(m, pop); continue; }
+      if (m.kind === "card" && !m.deleted) { html += cardChip(m, pop); continue; }
       html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" || m.kind === "pinact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""} ${ps ? "petsay" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
         ${ps ? `<span class="psav" aria-hidden="true">${esc((petOf(c) || {}).emoji || "🐾")}</span>` : ""}${who ? `<div class="msg-who">${esc(dn(who).split(" ")[0])}</div>` : ""}<div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
         ${rxPill(m)}
@@ -649,7 +651,7 @@
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
-    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log);
+    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log); bindCardChips(log);
     $$("[data-rxs]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); navigator.vibrate && navigator.vibrate(5); rxSheet(+b.dataset.rxs); });
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
       e.stopPropagation(); const t = $(`.msg[data-id="${q.dataset.goto}"]`); if (!t) return;
@@ -2560,7 +2562,8 @@
       : `<button class="otd-it" data-otd="${i.id}"><p>“${esc(i.text)}”</p><small>${esc(pName(i.sender))}</small></button>`).join("")}</div></div>` : "";
     const dc = S.convs.find((x) => x.kind === "direct" && x.members.some((u) => u.id === oid)), ou = userById(oid);
     const usCard = dc && ou ? `<button class="hm-card pc-us" id="pcUs" data-cid="${dc.id}"><span class="pcus-blobs"><span class="us-blob" style="--bc:${blobCol(ou)}">${blobFace(ou)}</span><span class="us-blob" style="--bc:${blobCol(S.me)}">${blobFace(S.me)}</span></span><span><b>Us</b><small class="hm-hint">Send ${esc(dn(ou).split(" ")[0])} a hug, a kiss or a little buzz</small></span><em>🫶</em></button>` : "";
-    return `<div class="pc-stack">${usCard}
+    const cardsCard = `<button class="hm-card pc-cards" id="pcCards" data-cid="${d.conv}"><i>🃏</i><span><b>Cards</b><small class="hm-hint">Little questions to answer together</small></span><em>›</em></button>`;
+    return `<div class="pc-stack">${usCard}${cardsCard}
       <div class="hm-card pc-dq ${q.revealed ? "done" : ""}" id="pcDq"><h4>💭 Today's question ${q.streak ? `<b class="dq-streak">🔥 ${q.streak}</b>` : ""}<button class="sbtn" id="dqPast">Past</button></h4><p class="dq-q">${esc(q.q)}</p>${body}</div>
       <div class="hm-card pc-mood"><h4>🌤️ Moods</h4>${mrow(me)}${mrow(oid)}</div>
       ${dates}${otd}</div>`;
@@ -2584,6 +2587,7 @@
     $("#dqPast", box).onclick = pastSheet;
     $("#pcMood", box).onclick = moodSheet;
     const pu = $("#pcUs", box); if (pu) pu.onclick = () => usOpen(+pu.dataset.cid);
+    const pk = $("#pcCards", box); if (pk) pk.onclick = () => cardsOpen(+pk.dataset.cid);
     $("#pcDates", box).onclick = () => datesSheet(d.conv);
     $$("[data-otd]", box).forEach((b) => b.onclick = () => {
       store.set(otdSeenKey(), true); tabBadges();
@@ -3228,7 +3232,7 @@
   function usOpen(cid, act) {
     const c = conv(cid), them = c && other(c); if (!c || c.kind !== "direct" || !them || T.us) return;
     const page = document.createElement("div"); page.className = "page us";
-    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small><button class="us-come" id="usCome" hidden>Come to Us 🫶</button></div></div>
+    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small><button class="us-come" id="usCome" hidden>Come to Us 🫶</button></div><button class="us-cardsb" id="usCards">Cards 🃏</button></div>
       <div class="us-stage" id="usStage">
         <div class="us-aura"></div>
         <div class="us-blob them" id="usThem" style="--bc:${blobCol(them)}" role="button" aria-label="Touch ${esc(dn(them))}">${blobFace(them)}<i class="us-eyes" aria-hidden="true"><b></b><b></b></i></div>
@@ -3252,7 +3256,7 @@
       clearTimeout(U.still); clearTimeout(U.hbT); U.beating = false; usPresence(cid, false);
       if (U.count) send(); T.us = null; setTimeout(() => page.remove(), 200);
     };
-    layer(page, close); $("#usBack", page).onclick = close;
+    layer(page, close); $("#usBack", page).onclick = close; $("#usCards", page).onclick = () => cardsOpen(cid);
     const blob = $("#usThem", page), mine = $("#usMe", page), cnt = $("#usCount", page), sbtn = $("#usSend", page), hint = $("#usHold", page);
     const sync = () => {
       const u = other(conv(cid)) || them; U.them = u;
@@ -3481,6 +3485,195 @@
       try { touchReplay(await api(`/api/touch/${id}`), { force: true }); } catch (x) { toast(x.message); }
     });
     $$(".tback", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); usOpen(S.cur, b.dataset.tb); });
+  }
+
+  // ------------------------------------------------------------------ v25: question cards (the questions live in cards.js, the rounds on the server)
+  const K = { st: null, cid: 0, page: null, deck: "", mode: "normal", edit: false, reveal: 0, just: false, busy: false, flipId: 0, draft: "" };
+  const kName = (id) => (K.st && K.st.names[id]) || "They";
+  const kOther = () => K.st ? +Object.keys(K.st.names).find((k) => +k !== K.st.me) : 0;
+  const kLock = (n) => n >= 365 ? (n % 365 === 0 ? (n === 365 ? "1 year" : n / 365 + " years") : (n / 365).toFixed(1) + " years") : n >= 30 ? Math.round(n / 30) + " months" : n + " days";
+  const kWhy = (d) => d.why === "spicy" ? "Both turn on Spicier 🌶️" : K.st.days === null ? "Set your date to unlock" : "Unlocks at " + kLock(d.minDays) + " together";
+  const kDay = (t) => t ? new Date(t * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : "";
+  function kScore() {
+    const st = K.st, ids = Object.keys(st.score); if (!ids.some((k) => st.score[k].total)) return "";
+    return `<p class="kc-score">🎯 ${ids.map((k) => `${+k === st.me ? "You" : esc(st.names[k])} ${st.score[k].right}/${st.score[k].total}`).join(" · ")}</p>`;
+  }
+  function kAns(r, names, me) {  // the answers of a finished round, side by side (guess mode: the guess against the answer)
+    const rv = r.reveal || { answers: {}, guess: "", judged: 0 }, nm = (id) => id === me ? "You" : esc(names[id] || "They");
+    if (r.mode === "guess" && r.guesser) {
+      const a = r.answerers[0];
+      return `<div class="dq-pair kc-pair"><div class="dq-a ${r.guesser === me ? "mine" : "theirs"}"><small>${r.guesser === me ? "Your guess" : esc(names[r.guesser] || "They") + "'s guess"}</small><p>${esc(rv.guess)}</p></div>
+        <div class="dq-a ${a === me ? "mine" : "theirs"}"><small>${a === me ? "Your answer" : esc(names[a] || "They") + "'s answer"}</small><p>${esc(rv.answers[a] || "")}</p></div></div>
+        ${rv.judged ? `<p class="kc-verdict ${rv.judged > 0 ? "yes" : "no"}">${rv.judged > 0 ? "Nailed it 👍" : "Not quite 👎"}</p>` : ""}`;
+    }
+    const ids = Object.keys(rv.answers).map(Number).sort((x, y) => (y === me) - (x === me));
+    return `<div class="dq-pair kc-pair ${ids.length < 2 ? "one" : ""}">${ids.map((id) => `<div class="dq-a ${id === me ? "mine" : "theirs"}"><small>${nm(id)}</small><p>${esc(rv.answers[id])}</p></div>`).join("")}</div>`;
+  }
+  async function cardsOpen(cid) {
+    if (K.page) return;
+    const page = document.createElement("div"); page.className = "page cards";
+    page.innerHTML = `<div class="kc-top"><button class="icon" id="kcBack" aria-label="Back">‹</button><b>Cards 🃏</b><span class="kc-sp"></span><button class="icon" id="kcArch" aria-label="Cards we've played">🗂️</button><button class="icon" id="kcSet" aria-label="Card settings">⚙️</button></div>
+      <div class="kc-body" id="kcBody"><div class="hint">Shuffling…</div></div>`;
+    document.body.appendChild(page);
+    Object.assign(K, { page, cid, st: null, deck: "", mode: "normal", edit: false, reveal: 0, just: false, busy: false, flipId: 0, draft: "" });
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); if (K.page === page) K.page = null; setTimeout(() => page.remove(), 200); };
+    layer(page, close); $("#kcBack", page).onclick = close;
+    $("#kcArch", page).onclick = () => cardsArchive(cid);
+    $("#kcSet", page).onclick = cardsSettings;
+    await cardsLoad();
+  }
+  async function cardsLoad() {
+    const page = K.page; if (!page) return;
+    try { K.st = await api(`/api/cards/${K.cid}`); } catch (x) { if (K.page === page && !K.st) $("#kcBody", page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (K.page === page) cardsPaint();
+  }
+  function kApply(st) {  // an answer, rating or skip came back: if my round just finished, show the reveal
+    const prev = K.st && K.st.round; K.st = st;
+    if (prev && !st.round && st.last && st.last.id === prev.id) { K.reveal = st.last.id; K.just = true; }
+    cardsPaint();
+  }
+  function kFace(r) {
+    return `<div class="kc-flip ${K.flipId === r.id ? "flipped" : ""}" id="kcFlip"><div class="kc-side back"><i>${r.emoji}</i><small>${esc(r.deck_name)}</small></div>
+      <div class="kc-side front"><small>${r.emoji} ${esc(r.deck_name)}${r.mode === "guess" ? " · guess mode" : ""}</small><p>${esc(r.q)}</p></div></div>`;
+  }
+  function cardsPaint() {
+    const st = K.st, box = K.page && $("#kcBody", K.page); if (!st || !box) return;
+    const me = st.me, o = kOther(), on = kName(o), r = st.round;
+    const last = !r && st.last && K.reveal === st.last.id ? st.last : null;
+    let h = "";
+    if (st.days === null) h += `<div class="kc-note"><b>When did you get together?</b><small>Decks for longer-together couples open as the days add up.</small><div class="kc-date"><input type="date" id="kcDate" aria-label="Together since"><button class="pi-yes" id="kcDateGo">Save</button></div></div>`;
+    if (st.spicy[o] && !st.spicy[me]) h += `<div class="kc-note ask"><span>${esc(on)} wants to unlock Spicier 🌶️</span><button class="pi-yes" id="kcSpOn">Turn on</button></div>`;
+    if (r) {
+      const iAns = r.answerers.includes(me), iGuess = r.guesser === me, mine = r.submitted[me] === true;
+      h += kFace(r);
+      if (r.phase === "judge") {
+        h += kAns(r, st.names, me) + (r.answerers.includes(me)
+          ? `<p class="kc-wait">Did ${esc(on)} get it right?</p><div class="kc-rate"><button class="kc-r yes" id="kcYes" aria-label="Right">👍</button><button class="kc-r no" id="kcNo" aria-label="Wrong">👎</button></div>`
+          : `<p class="kc-wait">${esc(on)} is rating your guess…</p>`);
+      } else {
+        if ((iAns || iGuess) && (!mine || K.edit)) {
+          h += `<textarea id="kcText" rows="4" maxlength="1000" placeholder="${iGuess ? "What will " + esc(on) + " say?" : "Your answer…"}">${esc(K.edit ? r.mine : K.draft)}</textarea>
+            <div class="kc-act"><button class="sbtn" id="kcSkip">Skip</button><button class="pi-yes" id="kcSend">${iGuess ? "Lock in guess" : "Send"}</button></div>
+            <small class="hm-hint">${r.t === "both" && r.mode !== "guess" ? "Hidden from " + esc(on) + " until you both answer · +2 ♥" : "Only you can see this for now"}</small>`;
+        } else {
+          if (mine) h += `<div class="dq-a mine kc-mine"><small>${iGuess ? "Your guess" : "You"}</small><p>${esc(r.mine)}</p></div>`;
+          const os = r.submitted[o], og = r.guesser === o;
+          h += `<p class="kc-wait ${os ? "ok" : ""}">${os === true ? esc(on) + (og ? " made a guess ✓" : " answered ✓") : os === false ? esc(on) + (og ? " is guessing…" : " is answering…") : (iAns || iGuess ? "" : "This one is for " + esc(on) + " to answer")}</p>
+            <div class="kc-act">${mine ? `<button class="sbtn" id="kcEdit">Edit</button>` : ""}<button class="sbtn" id="kcSkip">Skip</button></div>`;
+        }
+      }
+    } else if (last) {
+      h += `<div class="kc-qhead"><small>${last.emoji} ${esc(last.deck_name)}</small><p>${esc(last.q)}</p></div>${kAns(last, st.names, me)}${last.mode === "guess" ? kScore() : ""}
+        <small class="hm-hint kc-gain">${st.coins ? "+2 ♥ for your pet 🐾" : ""}</small><button class="pi-yes kc-draw" id="kcAgain">Draw another</button>`;
+    } else {
+      if (!K.deck || !st.decks.some((d) => d.id === K.deck && d.open)) K.deck = (st.decks.find((d) => d.open) || {}).id || "";
+      h += `<div class="kc-fan" id="kcFan">${st.decks.map((d, i) => `<button class="kc-deck ${d.open ? "" : "locked"} ${d.id === K.deck ? "on" : ""}" data-d="${esc(d.id)}" style="--i:${i}" aria-pressed="${d.id === K.deck}"><i>${d.emoji}</i><b>${esc(d.name)}</b><small>${esc(d.blurb)}</small><em>${d.open ? d.left + " left" : esc(kWhy(d))}</em></button>`).join("")}</div>
+        ${kScore()}
+        <label class="swrow kc-mode"><span><b>Guess mode</b><small>One of you guesses what the other will say</small></span><input type="checkbox" class="swtog" id="kcGuess" ${K.mode === "guess" ? "checked" : ""}></label>
+        <button class="pi-yes kc-draw" id="kcDraw" ${K.deck ? "" : "disabled"}>Draw a card</button>`;
+    }
+    box.innerHTML = h;
+    const on_ = (id, fn) => { const el = $("#" + id, box); if (el) el.onclick = fn; };
+    on_("kcDateGo", async () => {
+      const v = $("#kcDate", box).value; if (!v) return toast("Pick a date first");
+      try { await api(`/api/home/${K.cid}/dates`, { method: "PUT", body: { together: v } }); await cardsLoad(); toast("Saved 💞"); } catch (x) { toast(x.message); }
+    });
+    on_("kcSpOn", async () => { try { K.st = await api(`/api/cards/${K.cid}/spicy`, { method: "PUT", body: { on: true } }); cardsPaint(); toast("Spicier is on for you 🌶️"); } catch (x) { toast(x.message); } });
+    $$(".kc-deck", box).forEach((b) => b.onclick = () => {
+      const d = st.decks.find((x) => x.id === b.dataset.d); if (!d) return;
+      if (!d.open) { toast(kWhy(d)); return; }
+      K.deck = d.id; haptic([6]); $$(".kc-deck", box).forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", x === b); });
+    });
+    const g = $("#kcGuess", box); if (g) g.onchange = () => { K.mode = g.checked ? "guess" : "normal"; };
+    on_("kcDraw", async () => {
+      if (K.busy || !K.deck) return; K.busy = true; K.reveal = 0; K.edit = false; K.draft = "";
+      try { K.st = await api(`/api/cards/${K.cid}/draw`, { body: { deck: K.deck, mode: K.mode } }); haptic([10]); }
+      catch (x) { toast(x.message); await cardsLoad(); }
+      K.busy = false; cardsPaint();
+    });
+    on_("kcAgain", () => { K.reveal = 0; cardsPaint(); });
+    const tx = $("#kcText", box); if (tx) {
+      tx.oninput = () => { if (!K.edit) K.draft = tx.value; };
+      tx.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) $("#kcSend", box).click(); };
+      if (K.edit) { const n = tx.value.length; tx.setSelectionRange(n, n); }
+    }
+    on_("kcSend", async () => {
+      const v = tx.value.trim(); if (!v) { tx.focus(); return; }
+      if (K.busy) return; K.busy = true;
+      try { const s = await api(`/api/cards/${K.cid}/answer`, { body: { text: v } }); K.edit = false; K.draft = ""; K.busy = false; kApply(s); if (s.round && s.round.phase !== "judge") toast("Saved 🔒"); }
+      catch (x) { K.busy = false; toast(x.message); }
+    });
+    on_("kcEdit", () => { K.edit = true; cardsPaint(); });
+    on_("kcSkip", async () => {
+      if (K.busy) return; K.busy = true;
+      try { const s = await api(`/api/cards/${K.cid}/skip`, { body: {} }); K.edit = false; K.draft = ""; K.busy = false; kApply(s); }
+      catch (x) { K.busy = false; toast(x.message); cardsLoad(); }
+    });
+    const rate = async (ok) => {
+      if (K.busy) return; K.busy = true;
+      try { const s = await api(`/api/cards/${K.cid}/judge`, { body: { ok } }); K.busy = false; kApply(s); }
+      catch (x) { K.busy = false; toast(x.message); }
+    };
+    on_("kcYes", () => rate(true)); on_("kcNo", () => rate(false));
+    const fl = $("#kcFlip", box);
+    if (fl && !fl.classList.contains("flipped")) { K.flipId = r.id; haptic([8]); setTimeout(() => fl.classList.add("flipped"), 90); }
+    if (K.just && last) { K.just = false; haptic([15, 30, 15]); setTimeout(() => { const t = $(".kc-pair", box); burstAt(t, "💞", 9); burstAt(t, "✨", 6); }, 250); }
+  }
+  function onCardEvent(e) {
+    const open = K.page && K.st && K.st.conv === e.conv;
+    if (open) {
+      if (e.what === "done" && e.round && e.round.id) { K.reveal = e.round.id; K.just = true; }
+      if (e.what === "skip" && e.by !== S.me.id) toast(kName(e.by) + " skipped the card");
+      if (e.what === "spicy" && e.by !== S.me.id && e.spicy && !e.spicy[S.me.id]) toast(kName(e.by) + " wants to unlock Spicier 🌶️");
+      cardsLoad();
+    } else if (e.what === "draw" && e.by !== S.me.id && isVisible()) {
+      const u = userById(e.by); toast(`${u ? dn(u).split(" ")[0] : "They"} drew a card 🃏`);
+    }
+  }
+  function cardsSettings() {
+    const st = K.st; if (!st) return; const me = st.me, o = kOther(), on = kName(o);
+    const s = sheet(`<h3 style="margin:4px 0 2px">Card settings</h3>
+      <label class="swrow"><span><b>Spicier 🌶️</b><small>A cheekier deck. It opens only when you both turn it on, and either of you can lock it again any time.</small></span><input type="checkbox" class="swtog" id="kcSp" ${st.spicy[me] ? "checked" : ""}></label>
+      <small class="hint" id="kcSpHint"></small>`);
+    const hint = () => { const a = K.st.spicy[me], b = K.st.spicy[o]; $("#kcSpHint", s).textContent = a && b ? "Spicier is open 🌶️" : a ? `Waiting for ${on} to turn it on too.` : b ? `${on} has it on. Turn it on to open the deck.` : "Off for both of you."; };
+    hint();
+    $("#kcSp", s).onchange = async (ev) => {
+      const box = ev.target;
+      try { K.st = await api(`/api/cards/${K.cid}/spicy`, { method: "PUT", body: { on: box.checked } }); hint(); cardsPaint(); } catch (x) { toast(x.message); box.checked = !box.checked; }
+    };
+  }
+  async function cardsArchive(cid) {
+    const s = sheet(`<h3 style="margin:4px 0 2px">Cards we've played</h3><div class="ka" id="ka"><div class="hint">Loading…</div></div>`);
+    const box = $("#ka", s); let items = [], more = false, names = {}, me = 0;
+    const paint = () => {
+      if (!items.length) { box.innerHTML = `<div class="hint">Nothing here yet. Draw a card and answer it together.</div>`; return; }
+      const groups = []; items.forEach((r) => { let g = groups.find((x) => x.id === r.deck); if (!g) groups.push(g = { id: r.deck, name: r.deck_name, emoji: r.emoji, list: [] }); g.list.push(r); });
+      box.innerHTML = groups.map((g) => `<div class="ka-g"><h4>${g.emoji} ${esc(g.name)} <small>${g.list.length}</small></h4>${g.list.map((r) => `<button class="ka-i" data-r="${r.id}"><b>${esc(r.q)}</b><small>${esc(kDay(r.done))}</small></button><div class="ka-a" data-a="${r.id}" hidden>${kAns(r, names, me)}</div>`).join("")}</div>`).join("")
+        + (more ? `<button class="sbtn ka-more" id="kaMore">Show more</button>` : "");
+      $$(".ka-i", box).forEach((b) => b.onclick = () => { const a = $(`[data-a="${b.dataset.r}"]`, box); a.hidden = !a.hidden; b.classList.toggle("open", !a.hidden); });
+      const m = $("#kaMore", box); if (m) m.onclick = load;
+    };
+    const load = async () => {
+      try {
+        const r = await api(`/api/cards/${cid}/archive?limit=40${items.length ? "&before=" + items[items.length - 1].id : ""}`);
+        items = items.concat(r.items); more = r.more; names = r.names; me = r.me; paint();
+      } catch (x) { box.innerHTML = `<div class="hint">${esc(x.message)}</div>`; }
+    };
+    load();
+  }
+  async function cardRoundSheet(cid, rid) {
+    try {
+      const r = await api(`/api/cards/${cid}/round/${rid}`), v = r.round;
+      sheet(`<h3 style="margin:4px 0 6px">${v.emoji} ${esc(v.deck_name)}</h3><p class="kc-qhead big">${esc(v.q)}</p>${v.phase === "done" ? kAns(v, r.names, r.me) : `<div class="hint">Still being played.</div>`}`);
+    } catch (x) { toast(x.message); }
+  }
+  function cardChip(m, pop_) {  // in the chat, like the touch chip: tap to read what you both said
+    const a = m.attachment || {}, res = { both: "both answered", one: "answered", yes: "guessed right 👍", no: "not quite 👎" }[a.res] || "played";
+    return `<div class="tchip-row kchip-row ${pop_}" data-id="${m.id || ""}"><button class="tchip kchip" data-kr="${a.round || 0}"><i>${esc(a.emoji || "🃏")}</i><span>${esc(a.q || m.text)}</span></button>
+      <small>${res} · ${fmtTime(m.created)}</small></div>`;
+  }
+  function bindCardChips(log) {
+    $$(".kchip", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const id = +b.dataset.kr; if (id && S.cur) cardRoundSheet(S.cur, id); });
   }
 
   // ---- Settings: how touches reach me

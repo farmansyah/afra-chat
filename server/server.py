@@ -113,6 +113,13 @@ CREATE INDEX IF NOT EXISTS storm_run ON storm_log(run);
 CREATE TABLE IF NOT EXISTS pinned_msgs (conv_id INTEGER, msg_id INTEGER, "by" INTEGER, at REAL, PRIMARY KEY (conv_id, msg_id));
 CREATE TABLE IF NOT EXISTS us_sync (id INTEGER PRIMARY KEY, conv_id INTEGER, at REAL);
 CREATE INDEX IF NOT EXISTS us_sync_conv ON us_sync(conv_id, at);
+-- v25: question cards (rounds belong to the couple's direct chat; answers stay hidden until the round is complete)
+CREATE TABLE IF NOT EXISTS card_rounds (id INTEGER PRIMARY KEY, conv_id INTEGER, deck TEXT, idx INTEGER, q TEXT, t TEXT DEFAULT 'both', drawn_by INTEGER,
+  mode TEXT DEFAULT 'normal', created REAL, done REAL DEFAULT 0, skipped INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS card_rounds_conv ON card_rounds(conv_id, done);
+CREATE TABLE IF NOT EXISTS card_answers (round_id INTEGER, user_id INTEGER, text TEXT DEFAULT '', guess TEXT DEFAULT '', judged INTEGER DEFAULT 0, created REAL,
+  PRIMARY KEY (round_id, user_id));
+CREATE TABLE IF NOT EXISTS card_prefs (conv_id INTEGER, user_id INTEGER, spicy INTEGER DEFAULT 0, PRIMARY KEY (conv_id, user_id));
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
@@ -541,7 +548,7 @@ def conv_view(c, cid: int, uid: int) -> dict:
     others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>? AND (u.bot<>2 OR ?<>'pet')", (cid, uid, cv["kind"]))]
     mine = c.execute("SELECT last_read, style, muted, nudge_on FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
     last = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
-    unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind<>'pinact' AND created>?",
+    unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('pinact','card') AND created>?",
                        (cid, uid, mine["last_read"] if mine else 0)).fetchone()[0]
     other_read = max([r["last_read"] for r in c.execute("SELECT last_read FROM members WHERE conv_id=? AND user_id<>?", (cid, uid))] or [0])
     return {"id": cid, "kind": cv["kind"], "members": others, "last": msg_view(last) if last else None, "unread": unread,
@@ -739,8 +746,8 @@ async def edit_message(mid: int, body: dict, authorization: str = Header(None)):
     def fn(c, m):
         if m["sender"] != u["id"] or m["deleted"]:
             raise HTTPException(403, "You can only edit your own messages.")
-        if m["kind"] == "touch":
-            raise HTTPException(400, "A touch can't be edited.")
+        if m["kind"] in ("touch", "card"):
+            raise HTTPException(400, "That can't be edited.")
         c.execute("UPDATE messages SET text=?, edited=? WHERE id=?", ((body.get("text") or "").strip()[:8000], time.time(), mid))
     return await _changed(mid, u["id"], fn)
 
@@ -779,7 +786,7 @@ async def pin_msg(mid: int, authorization: str = Header(None)):
             raise HTTPException(404, "Message not found")
         cid = m["conv_id"]
         _member(c, cid, u["id"])
-        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite"):
+        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite", "card"):
             raise HTTPException(400, "That one can't be pinned.")
         line = None
         if not c.execute("SELECT 1 FROM pinned_msgs WHERE conv_id=? AND msg_id=?", (cid, mid)).fetchone():
@@ -1317,10 +1324,10 @@ async def _nudge_unread():
     t = time.time()
     with closing(db()) as c:
         c.execute("""UPDATE members SET nudged=0 WHERE nudged>0 AND NOT EXISTS (SELECT 1 FROM messages ms WHERE ms.conv_id=members.conv_id
-                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact') AND ms.created>members.last_read)""")
+                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card') AND ms.created>members.last_read)""")
         rows = c.execute("""SELECT m.conv_id, m.user_id, m.nudged, MIN(ms.created) AS oldest FROM members m
                             JOIN convs cv ON cv.id=m.conv_id AND cv.kind='direct'
-                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact') AND ms.created>m.last_read
+                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card') AND ms.created>m.last_read
                             WHERE m.nudge_on=1 AND m.nudged<2 AND m.muted<=?
                             GROUP BY m.conv_id, m.user_id HAVING MIN(ms.created)<=?""", (t, t - 900)).fetchall()
         todo = []
@@ -1328,7 +1335,7 @@ async def _nudge_unread():
             stage = 2 if t - r["oldest"] >= 2700 and r["nudged"] == 1 else 1 if r["nudged"] == 0 else 0
             if not stage:
                 continue
-            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('touch','pinact') AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
+            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('touch','pinact','card') AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
                              ORDER BY id LIMIT 1""", (r["conv_id"], r["user_id"], r["conv_id"], r["user_id"])).fetchone()
             sender = c.execute("SELECT * FROM users WHERE id=?", (m["sender"],)).fetchone() if m else None
             c.execute("UPDATE members SET nudged=? WHERE conv_id=? AND user_id=?", (stage, r["conv_id"], r["user_id"]))
@@ -2792,6 +2799,398 @@ def celebrate_seen(body: dict, authorization: str = Header(None)):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- v25: question cards
+CARDS_FILE = WEB / "cards.js"
+CARD_MAX = 1000
+_CARDS = {"mtime": -1.0, "decks": []}
+
+
+def cards_bank() -> list:
+    """The decks from web/cards.js (strict JSON after `const CARDS =`), read again whenever the file changes."""
+    try:
+        mt = CARDS_FILE.stat().st_mtime
+    except OSError:
+        return _CARDS["decks"]
+    if mt != _CARDS["mtime"]:
+        try:
+            src = CARDS_FILE.read_text(encoding="utf-8")
+            a = src.index("{", src.index("=", src.index("const CARDS")))
+            data = json.loads(src[a:src.rindex("}") + 1])
+            decks = []
+            for d in data["decks"]:
+                cards = [{"q": str(x["q"]).strip(), "t": "ask" if x.get("t") == "ask" else "both"} for x in d["cards"] if str(x.get("q") or "").strip()]
+                decks.append({"id": str(d["id"]), "name": str(d["name"]), "emoji": str(d.get("emoji") or "🃏"), "minDays": int(d.get("minDays") or 0),
+                              "blurb": str(d.get("blurb") or ""), "locked": str(d.get("locked") or ""), "cards": cards})
+            _CARDS.update(mtime=mt, decks=decks)
+        except Exception as e:
+            print("cards.js not readable:", repr(e)[:200], flush=True)
+            _CARDS["mtime"] = mt
+    return _CARDS["decks"]
+
+
+def _deck(deck_id: str):
+    return next((d for d in cards_bank() if d["id"] == deck_id), None)
+
+
+def _cards_when(c, pr: dict, today=None):
+    """(together date as text, days together) of the couple; days is None while the date isn't set."""
+    pd = c.execute("SELECT together FROM pair_dates WHERE conv_id=?", (pr["direct"],)).fetchone()
+    t = _dparse(pd["together"]) if pd else None
+    today = today or datetime.now(pr["tz"]).date()
+    return (t.isoformat() if t else ""), ((today - t).days if t and t <= today else None)
+
+
+def _cards_spicy(c, pr: dict) -> dict:
+    out = {pr["a"]: False, pr["b"]: False}
+    for r in c.execute("SELECT user_id, spicy FROM card_prefs WHERE conv_id=?", (pr["direct"],)):
+        if r["user_id"] in out:
+            out[r["user_id"]] = bool(r["spicy"])
+    return out
+
+
+def _deck_open(d: dict, days, spicy: dict):
+    """(open?, why not): 'spicy' = both must switch it on, 'days' = not together long enough yet (or the date isn't set)."""
+    if d["locked"] == "spicy" and not all(spicy.values()):
+        return False, "spicy"
+    if d["minDays"] > 0 and (days is None or days < d["minDays"]):
+        return False, "days"
+    return True, ""
+
+
+def _deck_used(c, cid: int, d: dict):
+    """(questions already played in the current pass through the deck, cards played in all). Once every card was played the pass starts again."""
+    done = [r["q"] for r in c.execute("SELECT q FROM card_rounds WHERE conv_id=? AND deck=? AND done>0 AND skipped=0 ORDER BY id", (cid, d["id"]))]
+    n = len(d["cards"])
+    k = (len(done) // n * n) if n else 0
+    return set(done[k:]), len(done)
+
+
+def _card_roles(rd, pr: dict):
+    """(who answers, who guesses). Normal: both answer a 'both' card, only the partner answers an 'ask' card. Guess: the partner answers, the drawer guesses."""
+    partner = pr["b"] if rd["drawn_by"] == pr["a"] else pr["a"]
+    if rd["mode"] == "guess":
+        return [partner], rd["drawn_by"]
+    return ([partner] if rd["t"] == "ask" else [pr["a"], pr["b"]]), 0
+
+
+def _card_phase(rd, pr: dict, rows: dict) -> str:
+    """open (waiting for answers), complete (all in; normal mode, about to close), judge (guess mode: the partner rates the guess), done, skipped."""
+    if rd["skipped"]:
+        return "skipped"
+    if rd["done"]:
+        return "done"
+    ans, guesser = _card_roles(rd, pr)
+    if all(u in rows and rows[u]["text"] for u in ans):
+        if not guesser:
+            return "complete"
+        if guesser in rows and rows[guesser]["guess"]:
+            return "judge"
+    return "open"
+
+
+def _card_view(c, pr: dict, rd, uid: int) -> dict:
+    """One round as `uid` may see it: your own words, only "answered" for the other, and everything once the round is revealed."""
+    rows = {r["user_id"]: r for r in c.execute("SELECT * FROM card_answers WHERE round_id=?", (rd["id"],))}
+    ans, guesser = _card_roles(rd, pr)
+    phase = _card_phase(rd, pr, rows)
+    d = _deck(rd["deck"]) or {}
+    sub = {}
+    for u in (pr["a"], pr["b"]):
+        r = rows.get(u)
+        if u == guesser:
+            sub[str(u)] = bool(r and r["guess"])
+        elif u in ans:
+            sub[str(u)] = bool(r and r["text"])
+    mine = ""
+    if uid in rows:
+        mine = rows[uid]["guess"] if uid == guesser else rows[uid]["text"]
+    out = {"id": rd["id"], "deck": rd["deck"], "deck_name": d.get("name", ""), "emoji": d.get("emoji", "🃏"), "q": rd["q"], "t": rd["t"], "mode": rd["mode"],
+           "drawn_by": rd["drawn_by"], "created": rd["created"], "done": rd["done"], "phase": phase, "answerers": ans, "guesser": guesser,
+           "submitted": sub, "mine": mine, "need_me": phase == "open" and sub.get(str(uid)) is False, "reveal": None}
+    if phase in ("judge", "done"):
+        g = rows.get(guesser) if guesser else None
+        out["reveal"] = {"answers": {str(u): rows[u]["text"] for u in ans if u in rows}, "guess": g["guess"] if g else "", "judged": g["judged"] if g else 0}
+    return out
+
+
+def _cards_names(c, pr: dict, viewer: int) -> dict:
+    return {str(x): _first_name(c, viewer, x) for x in (pr["a"], pr["b"])}
+
+
+def _cards_state(c, pr: dict, uid: int) -> dict:
+    together, days = _cards_when(c, pr)
+    spicy = _cards_spicy(c, pr)
+    decks = []
+    for d in cards_bank():
+        ok, why = _deck_open(d, days, spicy)
+        used, played = _deck_used(c, pr["direct"], d)
+        decks.append({"id": d["id"], "name": d["name"], "emoji": d["emoji"], "blurb": d["blurb"], "minDays": d["minDays"], "locked": d["locked"], "open": ok, "why": why,
+                      "total": len(d["cards"]), "played": played, "left": sum(1 for x in d["cards"] if x["q"] not in used)})
+    rd = c.execute("SELECT * FROM card_rounds WHERE conv_id=? AND done=0 ORDER BY id DESC LIMIT 1", (pr["direct"],)).fetchone()
+    last = c.execute("SELECT * FROM card_rounds WHERE conv_id=? AND done>? AND skipped=0 ORDER BY id DESC LIMIT 1", (pr["direct"], time.time() - 1800)).fetchone()
+    score = {str(x): {"right": 0, "total": 0} for x in (pr["a"], pr["b"])}
+    for r in c.execute("""SELECT r.drawn_by AS who, SUM(a.judged=1) AS right, COUNT(*) AS total FROM card_rounds r JOIN card_answers a ON a.round_id=r.id AND a.user_id=r.drawn_by
+                          WHERE r.conv_id=? AND r.mode='guess' AND r.done>0 AND r.skipped=0 AND a.judged<>0 GROUP BY r.drawn_by""", (pr["direct"],)):
+        score[str(r["who"])] = {"right": r["right"] or 0, "total": r["total"]}
+    return {"conv": pr["direct"], "pet": pr["pet"], "me": uid, "names": _cards_names(c, pr, uid), "together": together, "days": days,
+            "decks": decks, "round": _card_view(c, pr, rd, uid) if rd else None, "last": _card_view(c, pr, last, uid) if last else None,
+            "spicy": {str(k): v for k, v in spicy.items()}, "score": score, "coins": bool(pr["pet_id"])}
+
+
+async def cards_ping(pr: dict, what: str, by: int, rid: int = 0):
+    """Tell both phones that the round changed. Each one gets its own view of it (answers stay hidden until the reveal)."""
+    for uid in (pr["a"], pr["b"]):
+        with closing(db()) as c:
+            rd = c.execute("SELECT * FROM card_rounds WHERE id=?", (rid,)).fetchone() if rid else c.execute(
+                "SELECT * FROM card_rounds WHERE conv_id=? AND done=0 ORDER BY id DESC LIMIT 1", (pr["direct"],)).fetchone()
+            view = _card_view(c, pr, rd, uid) if rd else None
+            spicy = {str(k): v for k, v in _cards_spicy(c, pr).items()}
+        await send_to(uid, {"t": "card", "conv": pr["direct"], "pet": pr["pet"], "what": what, "by": by, "round": view, "spicy": spicy})
+
+
+def _card_open_round(c, pr: dict):
+    rd = c.execute("SELECT * FROM card_rounds WHERE conv_id=? AND done=0 ORDER BY id DESC LIMIT 1", (pr["direct"],)).fetchone()
+    if not rd:
+        raise ValueError("There's no card on the table. Draw one first.")
+    return rd
+
+
+@app.get("/api/cards/{cid}")
+def cards_get(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        out = _cards_state(c, pr, u["id"])
+        c.commit()
+    return out
+
+
+@app.post("/api/cards/{cid}/draw")
+async def cards_draw(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        if c.execute("SELECT 1 FROM card_rounds WHERE conv_id=? AND done=0", (pr["direct"],)).fetchone():
+            raise ValueError("There's a card on the table already. Answer it or skip it first.")
+        d = _deck(str(body.get("deck") or ""))
+        if not d or not d["cards"]:
+            raise ValueError("That deck isn't here.")
+        ok, why = _deck_open(d, _cards_when(c, pr)[1], _cards_spicy(c, pr))
+        if not ok:
+            raise ValueError("You both need to turn on Spicier first." if why == "spicy" else "That deck isn't open yet.")
+        mode = "guess" if body.get("mode") == "guess" else "normal"
+        used, _ = _deck_used(c, pr["direct"], d)
+        recent = {r["q"] for r in c.execute("SELECT q FROM card_rounds WHERE conv_id=? AND deck=? AND skipped=1 ORDER BY id DESC LIMIT 3", (pr["direct"], d["id"]))}
+        left = [(i, x) for i, x in enumerate(d["cards"]) if x["q"] not in used] or list(enumerate(d["cards"]))
+        i, card = random.choice([x for x in left if x[1]["q"] not in recent] or left)
+        rid = c.execute("INSERT INTO card_rounds (conv_id, deck, idx, q, t, drawn_by, mode, created) VALUES (?,?,?,?,?,?,?,?)",
+                        (pr["direct"], d["id"], i, card["q"], card["t"], u["id"], mode, time.time())).lastrowid
+        out = _cards_state(c, pr, u["id"])
+        c.commit()
+    await cards_ping(pr, "draw", u["id"], rid)
+    return out
+
+
+def _card_finish(c, pr: dict, rd, uid: int, res: str):
+    """The round is complete: close it, +2 coins into the pet's wallet, and a small chip in the couple's chat. Returns (message, coins).
+    Written by hand instead of _insert_msg so nobody's last_read moves (the chip must not mark other messages as read)."""
+    now = time.time()
+    c.execute("UPDATE card_rounds SET done=? WHERE id=?", (now, rd["id"]))
+    gain = 0
+    if pr["pet_id"]:
+        _coins(c, pr["pet_id"], 2)
+        gain = 2
+    d = _deck(rd["deck"]) or {}
+    att = {"round": rd["id"], "deck": rd["deck"], "emoji": d.get("emoji", "🃏"), "q": rd["q"], "mode": rd["mode"], "t": rd["t"], "res": res}
+    mid = c.execute("INSERT INTO messages (conv_id, sender, kind, text, attachment, created, updated) VALUES (?,?,?,?,?,?,?)",
+                    (pr["direct"], uid, "card", f"{att['emoji']} {rd['q']}"[:8000], json.dumps(att), now, now)).lastrowid
+    c.execute("UPDATE convs SET last_at=? WHERE id=?", (now, pr["direct"]))
+    return msg_view(c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()), gain
+
+
+async def _card_after(pr: dict, rd, uid: int, res: str, msg: dict):
+    await cards_ping(pr, "done", uid, rd["id"])
+    await _bcast_msg(pr["direct"], msg)
+    if res == "both" and pr["pet"]:
+        asyncio.create_task(_card_followup(pr, rd["id"]))
+
+
+@app.post("/api/cards/{cid}/answer")
+async def cards_answer(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    text = str(body.get("text") or "").strip()[:CARD_MAX]
+    if not text:
+        raise ValueError("Write something first.")
+    msg = None
+    gain = 0
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        rd = _card_open_round(c, pr)
+        ans, guesser = _card_roles(rd, pr)
+        rows = {r["user_id"]: r for r in c.execute("SELECT * FROM card_answers WHERE round_id=?", (rd["id"],))}
+        if _card_phase(rd, pr, rows) == "judge":
+            raise ValueError("Both are in. Time to rate the guess.")
+        if u["id"] != guesser and u["id"] not in ans:
+            raise ValueError("This one is for your partner to answer.")
+        col = "guess" if u["id"] == guesser else "text"
+        if u["id"] in rows:
+            c.execute(f"UPDATE card_answers SET {col}=? WHERE round_id=? AND user_id=?", (text, rd["id"], u["id"]))
+        else:
+            c.execute(f"INSERT INTO card_answers (round_id, user_id, {col}, created) VALUES (?,?,?,?)", (rd["id"], u["id"], text, time.time()))
+        rows = {r["user_id"]: r for r in c.execute("SELECT * FROM card_answers WHERE round_id=?", (rd["id"],))}
+        phase = _card_phase(rd, pr, rows)
+        res = "both" if rd["t"] == "both" and not guesser else "one"
+        if phase == "complete":
+            msg, gain = _card_finish(c, pr, rd, u["id"], res)
+        out = _cards_state(c, pr, u["id"])
+        c.commit()
+    if msg:
+        await _card_after(pr, rd, u["id"], res, msg)
+    else:
+        await cards_ping(pr, "answer", u["id"], rd["id"])
+    out["gain"] = gain
+    return out
+
+
+@app.post("/api/cards/{cid}/judge")
+async def cards_judge(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        rd = _card_open_round(c, pr)
+        ans, guesser = _card_roles(rd, pr)
+        rows = {r["user_id"]: r for r in c.execute("SELECT * FROM card_answers WHERE round_id=?", (rd["id"],))}
+        if _card_phase(rd, pr, rows) != "judge":
+            raise ValueError("Nothing to rate yet.")
+        if u["id"] not in ans:
+            raise ValueError("Only the one who answered can rate the guess.")
+        ok = bool(body.get("ok"))
+        c.execute("UPDATE card_answers SET judged=? WHERE round_id=? AND user_id=?", (1 if ok else -1, rd["id"], guesser))
+        res = "yes" if ok else "no"
+        msg, gain = _card_finish(c, pr, rd, u["id"], res)
+        out = _cards_state(c, pr, u["id"])
+        c.commit()
+    await _card_after(pr, rd, u["id"], res, msg)
+    out["gain"] = gain
+    return out
+
+
+@app.post("/api/cards/{cid}/skip")
+async def cards_skip(cid: int, authorization: str = Header(None)):
+    """Skip is always free: the card goes back into the deck."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        rd = _card_open_round(c, pr)
+        rows = {r["user_id"]: r for r in c.execute("SELECT * FROM card_answers WHERE round_id=?", (rd["id"],))}
+        if _card_phase(rd, pr, rows) == "judge":
+            raise ValueError("Rate the guess first.")
+        c.execute("UPDATE card_rounds SET done=?, skipped=1 WHERE id=?", (time.time(), rd["id"]))
+        c.execute("DELETE FROM card_answers WHERE round_id=?", (rd["id"],))
+        out = _cards_state(c, pr, u["id"])
+        c.commit()
+    await cards_ping(pr, "skip", u["id"], rd["id"])
+    return out
+
+
+@app.put("/api/cards/{cid}/spicy")
+async def cards_spicy(cid: int, body: dict, authorization: str = Header(None)):
+    """Your side of the Spicier switch. The deck is open only while BOTH of you have it on; turning off locks it again for both at once."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        c.execute("INSERT OR REPLACE INTO card_prefs (conv_id, user_id, spicy) VALUES (?,?,?)", (pr["direct"], u["id"], 1 if body.get("on") else 0))
+        out = _cards_state(c, pr, u["id"])
+        c.commit()
+    await cards_ping(pr, "spicy", u["id"])
+    return out
+
+
+@app.get("/api/cards/{cid}/archive")
+def cards_archive(cid: int, deck: str = "", before: int = 0, limit: int = 40, authorization: str = Header(None)):
+    """Cards we've played: newest first, 40 at a time (`before` = the id of the last one you have), optionally one deck."""
+    u = auth(authorization)
+    limit = max(1, min(100, limit))
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        q = "SELECT * FROM card_rounds WHERE conv_id=? AND done>0 AND skipped=0"
+        args = [pr["direct"]]
+        if deck:
+            q += " AND deck=?"
+            args.append(deck)
+        if before:
+            q += " AND id<?"
+            args.append(before)
+        rows = c.execute(q + " ORDER BY id DESC LIMIT ?", (*args, limit + 1)).fetchall()
+        items = [_card_view(c, pr, r, u["id"]) for r in rows[:limit]]
+        return {"items": items, "more": len(rows) > limit, "names": _cards_names(c, pr, u["id"]), "me": u["id"],
+                "decks": [{"id": d["id"], "name": d["name"], "emoji": d["emoji"]} for d in cards_bank()]}
+
+
+@app.get("/api/cards/{cid}/round/{rid}")
+def cards_round(cid: int, rid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        rd = c.execute("SELECT * FROM card_rounds WHERE id=? AND conv_id=?", (rid, pr["direct"])).fetchone()
+        if not rd:
+            raise HTTPException(404, "Card not found")
+        return {"round": _card_view(c, pr, rd, u["id"]), "names": _cards_names(c, pr, u["id"]), "me": u["id"]}
+
+
+async def _card_followup(pr: dict, rid: int):
+    """With the pet AI on: after a 'both answer' round the pet may offer ONE follow-up question (at most once a day, logged like the pet's other calls)."""
+    try:
+        if not (OPENROUTER_KEY and pr["pet"] and pet_ai_on()):
+            return
+        with closing(db()) as c:
+            rd = c.execute("SELECT * FROM card_rounds WHERE id=?", (rid,)).fetchone()
+            rows = {r["user_id"]: r["text"] for r in c.execute("SELECT * FROM card_answers WHERE round_id=?", (rid,))}
+            if not rd or len(rows) < 2:
+                return
+            if not c.execute("INSERT OR IGNORE INTO date_sent (conv_id, key) VALUES (?,?)", (pr["direct"], "cardai:" + _day(pr["tz"]))).rowcount:
+                return
+            c.commit()
+            na, nb = (_first(c.execute("SELECT * FROM users WHERE id=?", (x,)).fetchone()) for x in (pr["a"], pr["b"]))
+        sys_ = (f"You are {pr['pet_name'] or 'the pet'}, the sweet little pet of a couple. They just both answered a question card. Offer ONE short follow-up question "
+                "(max 25 words) that builds on what both of them said, in simple warm English, with at most one emoji. Reply with the question only. No markdown.")
+        usr = f"Card: {rd['q']}\n{na} answered: {rows.get(pr['a'], '')[:600]}\n{nb} answered: {rows.get(pr['b'], '')[:600]}"
+        async with httpx.AsyncClient(timeout=60) as h:
+            r = await h.post("https://openrouter.ai/api/v1/chat/completions", json={
+                "model": ASSISTANT_MODEL, "messages": [{"role": "system", "content": sys_}, {"role": "user", "content": usr}],
+                "temperature": 0.8, "max_tokens": 120, "usage": {"include": True}},
+                headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "HTTP-Referer": "https://chat.farmansyah.cloud", "X-Title": "A.F.R.A chat"})
+            r.raise_for_status()
+            data = r.json()
+        log_usage(pr["a"], pr["direct"], "pet", data)
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", (data["choices"][0]["message"].get("content") or "").strip())[:240]
+        if text and "?" in text:
+            await pet_say(pr["pet"], text)
+    except Exception as e:
+        print("card follow-up failed:", repr(e)[:200], flush=True)
+
+
+def _cards_jobs(c, pr: dict, lt) -> list:
+    """What the pet says about cards right now (called from _couple_jobs; `lt` = the pair's local time): a celebration when a deck has just unlocked,
+    and around 20:00 'Card time?' when no card was drawn today. Each is recorded in date_sent, so it happens once."""
+    out = []
+    if not pr["pet"]:
+        return out
+    day = lt.date().isoformat()
+    days = _cards_when(c, pr, lt.date())[1]
+    if days is not None:
+        for d in cards_bank():
+            if d["minDays"] > 0 and not d["locked"] and days >= d["minDays"] and c.execute("INSERT OR IGNORE INTO date_sent (conv_id, key) VALUES (?,?)", (pr["direct"], "carddeck:" + d["id"])).rowcount:
+                if days - d["minDays"] <= 3:  # only when it has just crossed; a date entered long after doesn't replay old unlocks
+                    out.append(f"You've been together {days} days. A new card deck unlocked 💌")
+    if 20 <= lt.hour < 23:
+        start = lt.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        if not c.execute("SELECT 1 FROM card_rounds WHERE conv_id=? AND created>=?", (pr["direct"], start)).fetchone() \
+                and c.execute("INSERT OR IGNORE INTO date_sent (conv_id, key) VALUES (?,?)", (pr["direct"], "cardtime:" + day)).rowcount:
+            out.append("Card time? 🃏")
+    return out
+
+
 COUPLE_CHECK = [0.0]
 
 
@@ -2832,6 +3231,8 @@ async def _couple_jobs():
                 if data and not said:
                     c.execute("UPDATE otd SET said=1 WHERE conv_id=? AND day=?", (pr["direct"], day))
                     acts.append(("otd", pr, data))
+            for line in _cards_jobs(c, pr, lt):  # v25: a new deck unlocked, 'Card time?'
+                acts.append(("card", pr, line))
         c.commit()
     for kind, pr, x in acts:
         try:
@@ -2860,6 +3261,9 @@ async def _couple_jobs():
                     n = _plural(x["n"], "year") if x["type"] == "anniv" else str(x["n"])
                     await pet_say(pr["pet"], random.choice(DATE_PET[x["type"]]).format(w=who, n=n))
                 await home_ping(pr, "dates")
+            elif kind == "card" and pr["pet"]:
+                await pet_say(pr["pet"], x, push=True)
+                await cards_ping(pr, "nudge", 0)
             elif kind == "otd" and pr["pet"]:
                 it = next((i for i in x["items"] if i["kind"] == "text"), None)
                 lead = "A month ago today" if x["label"] == "1 month ago" else x["label"] + " today"
@@ -3131,7 +3535,7 @@ async def push_to(uids: list[int], payload: dict, skip_visible=True):
                 sub = json.loads(r["sub"])
                 with closing(db()) as c:
                     badge = c.execute("""SELECT COUNT(*) FROM messages ms JOIN members mb ON mb.conv_id=ms.conv_id AND mb.user_id=?
-                                         WHERE ms.sender<>? AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact') AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
+                                         WHERE ms.sender<>? AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card') AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
                 body = encrypt_push(sub, json.dumps({**payload, "badge": badge}).encode()[:3800])
                 resp = await h.post(sub["endpoint"], content=body, headers={
                     "Authorization": _vapid_header(sub["endpoint"]), "Content-Encoding": "aes128gcm",
