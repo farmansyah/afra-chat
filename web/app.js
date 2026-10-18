@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 22;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 23;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -259,6 +259,7 @@
 
   function onEvent(e) {
     if (e.t === "hello" || e.t === "update") { if (e.t === "update" || (e.version && String(e.version) !== String(APP_V))) checkUpdate(true); return; }
+    if (e.t === "touch") { onTouchEvent(e); return; }
     if (e.t === "msg" || e.t === "upd") {
       upsert(e.msg);
       const c = conv(e.msg.conv_id);
@@ -269,8 +270,8 @@
         if (e.msg.sender !== S.me.id) {
           delete S.typing[c.id];
           if (S.cur === c.id && isVisible()) markRead(c.id); else c.unread = (c.unread || 0) + 1;
-          if (!isVisible()) toAfra({ type: "message", conv: c.id, from: title(c), text: preview(e.msg) });
-          if (isVisible() && (S.cur === c.id || !isMuted(c))) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
+          if (!isVisible() && e.msg.kind !== "touch") toAfra({ type: "message", conv: c.id, from: title(c), text: preview(e.msg) });
+          if (e.msg.kind !== "touch" && isVisible() && (S.cur === c.id || !isMuted(c))) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
         }
         S.convs.sort((a, b) => (b.last_at || 0) - (a.last_at || 0));
       } else if (c.last && c.last.id === e.msg.id) c.last = e.msg;
@@ -310,7 +311,8 @@
   function inAppNotice(c, m) {  // a banner slides down from the top; tap to open, swipe up (or wait) to dismiss
     $$(".banner-in").forEach((x) => x.remove());
     const b = document.createElement("div"); b.className = "banner-in";
-    b.innerHTML = `${avatar(other(c), "sm", c.kind === "self")}<div class="mid"><b>${esc(title(c))}</b><small>${esc(preview(m))}</small></div>`;
+    const pu = petOf(c) && m.sender !== petOf(c).bot && m.sender !== S.me.id && userById(m.sender);  // in the pet chat: the pet's face, and the owner's name on their own lines
+    b.innerHTML = `${cav(c, "sm")}<div class="mid"><b>${esc(title(c))}</b><small>${pu ? esc(dn(pu).split(" ")[0]) + ": " : ""}${esc(preview(m))}</small></div>`;
     const close = () => { b.classList.add("out"); setTimeout(() => b.remove(), 260); };
     b.onclick = () => { close(); openConv(c.id); };
     let y0 = 0; b.addEventListener("touchstart", (e) => { y0 = e.touches[0].clientY; }, { passive: true });
@@ -431,7 +433,7 @@
     pane.innerHTML = `
       <div class="top"><button class="icon back" id="bBack">‹</button><div id="chatAv"></div>
         <div class="who"><b id="chatName"></b><small id="chatStat"></small></div>
-        <button class="icon dedi-heart" id="bHeartC" title="A little note" aria-label="A little note">♥</button><button class="icon" id="bSearch" title="Search">🔍</button></div>
+        <button class="icon dedi-heart" id="bHeartC" title="A little note" aria-label="A little note">♥</button>${c.kind === "direct" ? '<button class="icon" id="bUs" title="Touch" aria-label="Touch">🫶</button>' : ""}<button class="icon" id="bSearch" title="Search">🔍</button></div>
       <div class="searchbar" id="sbar" hidden><input type="search" id="sq" placeholder="Search in this chat"><button class="cbtn" id="sclose">✕</button></div>
       <div class="home" id="home" hidden></div>
       <div class="log" id="log"></div>
@@ -449,6 +451,7 @@
         </div>
       </div>`;
     $("#bBack").onclick = () => { if (NAV.chat && NAV.depth === NAV.chat) history.back(); else { NAV.chat = 0; leaveChat(); navSync(); } };
+    const bus = $("#bUs"); if (bus) bus.onclick = () => usOpen(c.id);
     $("#bSearch").onclick = () => { $("#sbar").hidden = false; $("#sq").focus(); };
     $("#bHeartC").onclick = heartNotes;
     $("#sclose").onclick = () => { $("#sbar").hidden = true; S.search = ""; drawChat(); };
@@ -610,6 +613,7 @@
     const shown = S.search ? list.filter((m) => (m.text || "").toLowerCase().includes(S.search) || (m.attachment && (m.attachment.name || "").toLowerCase().includes(S.search))) : list;
     let html = S.older[c.id] && !S.search ? `<button class="older" id="bOlder">Show earlier messages</button>` : "", lastDay = "";
     const seen = S.seen[c.id], fresh = new Set();
+    let prevSender = 0;
     for (const m of shown) {
       const day = dayLabel(m.created);
       if (day !== lastDay) { html += `<div class="day">${day}</div>`; lastDay = day; }
@@ -618,10 +622,13 @@
       const ticks = mine && !m.deleted && c.kind !== "self" ? `<span class="ticks ${read ? "read" : ""}">${m.pending ? "🕓" : read ? "✓✓" : "✓"}</span>` : (m.pending ? "🕓" : "");
       const key = m.client_id || m.id; fresh.add(key);
       const pop = seen && !seen.has(key) ? "pop" : "";
-      const ps = c.kind === "pet" && !m.deleted && m.kind === "text" && (userById(m.sender) || {}).bot === 2;  // the pet speaking: a thought cloud instead of a normal bubble
+      const pbot = (petOf(c) || {}).bot, ps = c.kind === "pet" && !m.deleted && m.kind === "text" && (m.sender === pbot || (userById(m.sender) || {}).bot === 2);
+      const who = c.kind === "pet" && !mine && !ps && !m.deleted && m.kind !== "petact" && m.kind !== "petinvite" && m.sender !== pbot && prevSender !== m.sender ? userById(m.sender) : null;  // owners keep their name, never the pet's look
+      prevSender = m.kind === "petact" ? 0 : m.sender;  // the pet speaking: a thought cloud instead of a normal bubble
       if (pop && !atBottom && !S.search && !mine && !m.deleted && m.created >= JUMP.last) JUMP.n++;
+      if (m.kind === "touch" && !m.deleted) { html += touchChip(m, pop); continue; }
       html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""} ${ps ? "petsay" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
-        ${ps ? `<span class="psav" aria-hidden="true">${esc((petOf(c) || {}).emoji || "🐾")}</span>` : ""}<div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
+        ${ps ? `<span class="psav" aria-hidden="true">${esc((petOf(c) || {}).emoji || "🐾")}</span>` : ""}${who ? `<div class="msg-who">${esc(dn(who).split(" ")[0])}</div>` : ""}<div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
         ${rxPill(m)}
         <div class="meta">${S.stars.has(m.id) ? "⭐ " : ""}${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
     }
@@ -630,7 +637,7 @@
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
-    bindVideoNotes(log); bindPetCards(log);
+    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log);
     $$("[data-rxs]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); navigator.vibrate && navigator.vibrate(5); rxSheet(+b.dataset.rxs); });
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
       e.stopPropagation(); const t = $(`.msg[data-id="${q.dataset.goto}"]`); if (!t) return;
@@ -2103,7 +2110,7 @@
           const sync = () => { $("#dlUserGo", el).href = dl(`/api/admin/export/user/${us.value}`); $("#dlChatGo", el).href = dl(`/api/admin/export/chat/${cs.value}`); };
           us.onchange = cs.onchange = sync; sync();
         } else if (t === "notify") {
-          notifyForm(el);
+          notifyForm(el); stormCard(el);
         } else if (t === "ai") {
           aiUsage(el);
         } else if (t === "inv") {
@@ -2349,7 +2356,9 @@
     const otd = o ? `<div class="hm-card pc-otd"><h4>📅 On this day <small>${esc(o.label)}</small>${fresh ? `<b class="pc-new">new</b>` : ""}</h4><div class="otd-grid">${o.items.map((i) => i.kind === "image"
       ? `<button class="otd-it img" data-otd="${i.id}"><img src="${fileUrl(i.file)}" alt="" loading="lazy">${i.text ? `<small>${esc(i.text)}</small>` : ""}</button>`
       : `<button class="otd-it" data-otd="${i.id}"><p>“${esc(i.text)}”</p><small>${esc(pName(i.sender))}</small></button>`).join("")}</div></div>` : "";
-    return `<div class="pc-stack">
+    const dc = S.convs.find((x) => x.kind === "direct" && x.members.some((u) => u.id === oid)), ou = userById(oid);
+    const usCard = dc && ou ? `<button class="hm-card pc-us" id="pcUs" data-cid="${dc.id}"><span class="pcus-blobs"><span class="us-blob" style="--bc:${blobCol(ou)}">${blobFace(ou)}</span><span class="us-blob" style="--bc:${blobCol(S.me)}">${blobFace(S.me)}</span></span><span><b>Us</b><small class="hm-hint">Send ${esc(dn(ou).split(" ")[0])} a hug, a kiss or a little buzz</small></span><em>🫶</em></button>` : "";
+    return `<div class="pc-stack">${usCard}
       <div class="hm-card pc-dq ${q.revealed ? "done" : ""}" id="pcDq"><h4>💭 Today's question ${q.streak ? `<b class="dq-streak">🔥 ${q.streak}</b>` : ""}<button class="sbtn" id="dqPast">Past</button></h4><p class="dq-q">${esc(q.q)}</p>${body}</div>
       <div class="hm-card pc-mood"><h4>🌤️ Moods</h4>${mrow(me)}${mrow(oid)}</div>
       ${dates}${otd}</div>`;
@@ -2372,6 +2381,7 @@
     const ed = $("#dqEdit", box); if (ed) ed.onclick = () => { H.dqEdit = true; homeDraw(); const t = $("#dqText"); if (t) t.focus(); };
     $("#dqPast", box).onclick = pastSheet;
     $("#pcMood", box).onclick = moodSheet;
+    const pu = $("#pcUs", box); if (pu) pu.onclick = () => usOpen(+pu.dataset.cid);
     $("#pcDates", box).onclick = () => datesSheet(d.conv);
     $$("[data-otd]", box).forEach((b) => b.onclick = () => {
       store.set(otdSeenKey(), true); tabBadges();
@@ -2773,6 +2783,7 @@
         <label class="swrow"><span><b>Soft sounds</b><small>When sending and receiving</small></span><input type="checkbox" class="swtog" id="tsound" ${store.get("sound", true) ? "checked" : ""}></label></div>
       <h5>Notifications</h5><div class="sbox">${isIOS && !standalone ? `<div class="note warn" style="margin:10px">📲 On iPhone, notifications work in the Home Screen app: tap <b>Share</b> ⬆ then <b>Add to Home Screen</b>, and open A.F.R.A ♥ from its icon.</div>`
         : `<button class="srow act" id="sPush">${pushOn ? "✓ Notifications are on" : "Turn on notifications"}</button>${pushOn ? `<button class="srow act" id="sTest">Send me a test</button>` : ""}`}</div>
+      <h5>Touches</h5><div class="sbox pad" id="sTouch"><small class="hint">Loading…</small></div>
       <h5>Friends</h5><div class="sbox">${row("sInv", "👋", "Invite a friend", "Make a link just for them")}</div>
       <h5>Assistant</h5><div class="sbox">${row("sBot", "✨", "Open the Assistant", "Reminders, notes, lists and places")}</div>
       ${me.is_admin ? `<h5>Admin</h5><div class="sbox">${row("sAdm", "🛡", "Admin page", "People, invites and data")}${row("sNot", "📣", "Notify everyone", "Send a push to all people")}</div>` : ""}
@@ -2793,6 +2804,7 @@
       catch (x) { toast(x.message); }
     };
     $("#sAcct", box).onclick = profileSheet;
+    touchPrefsInit($("#sTouch", box));
     const pu = $("#sPush", box); if (pu) pu.onclick = async () => { toast(await enablePush(true)); drawSettings(); };
     const te = $("#sTest", box); if (te) te.onclick = () => api("/api/push/test", { body: {} }).then(() => toast("Sent: lock your phone to see it")).catch((x) => toast(x.message));
     $("#sInv", box).onclick = inviteSheet;
@@ -2917,7 +2929,345 @@
   addEventListener("pageshow", (e) => { if (e.persisted) checkUpdate(true); });
   setInterval(() => { if (document.visibilityState === "visible") checkUpdate(true); }, 30 * 60 * 1000);
 
-  // ------------------------------------------------------------------ start
+    // ------------------------------------------------------------------ Touches (v23): the Us screen, hugs, kisses and little buzzes
+  // One touch = one event { action | word, count, strength 1-5, pattern [[ms, duration, strength], ...] }. Live touch (Phase 2) and
+  // achievements (Phase 3) can hang off the same event: hit() below is the one place where taps are collected.
+  const TACT = [
+    { id: "hug", e: "🫂", n: "Hug", lot: "1fac2", vib: [30, 40, 60, 40, 90, 60, 120] },
+    { id: "kiss", e: "💋", n: "Kiss", lot: "1f48b", vib: [25, 50, 25] },
+    { id: "hold", e: "🤝", n: "Hold hands", lot: "1f91d", vib: [60, 80, 60] },
+    { id: "poke", e: "👉", n: "Poke", lot: "1f449", vib: [15] },
+    { id: "tickle", e: "🤭", n: "Tickle", lot: "1f92d", vib: [10, 20, 10, 20, 10, 20, 10] },
+    { id: "stroke", e: "🤲", n: "Stroke", lot: "1f932", vib: [15, 15, 20, 15, 25, 15, 30] },
+    { id: "heartbeat", e: "💓", n: "Heartbeat", lot: "1f493", vib: [40, 90, 70] },
+    { id: "luck", e: "🍀", n: "Good luck", lot: "1f340", vib: [20, 40, 20, 40, 50] },
+    { id: "tomato", e: "🍅", n: "Tomatoes", lot: "1f345", prank: 1, vib: [10, 30, 80] },
+    { id: "pillow", e: "🪶", n: "Pillow", lot: "", prank: 1, vib: [50, 30, 30] },
+    { id: "punch", e: "👊", n: "Punch", lot: "1f44a", prank: 1, vib: [90, 40, 40] }];
+  const TNOUN = { hug: ["hug", "hugs"], kiss: ["kiss", "kisses"], hold: ["hand squeeze", "hand squeezes"], poke: ["poke", "pokes"], tickle: ["tickle", "tickles"],
+    stroke: ["gentle stroke", "gentle strokes"], heartbeat: ["heartbeat", "heartbeats"], luck: ["lucky charm", "lucky charms"], tomato: ["tomato", "tomatoes"],
+    pillow: ["pillow whack", "pillow whacks"], punch: ["playful punch", "playful punches"] };
+  const TBUZZ = [["Thinking of you", "💭"], ["Love you", "💞"], ["Miss you", "🥹"], ["Call me", "📞"], ["Good morning", "☀️"], ["Goodnight", "🌙"], ["On my way", "🚗"], ["Hungry?", "🍜"]];
+  const TSTR = ["feather-light", "gentle", "warm", "strong", "wild"];
+  const tact = (id) => TACT.find((a) => a.id === id) || TACT[0];
+  const reduceMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const T = { prefs: null, overlay: null, queue: [], us: null, shown: new Set(), checking: false };
+
+  // ---- haptics: Android and desktop have navigator.vibrate; iPhone (iOS 18+) ticks when a hidden <input switch> is toggled by a tap
+  const HAP = { el: null };
+  function iosTick() {
+    try {
+      if (!HAP.el) {
+        const l = document.createElement("label"); l.className = "hap-switch"; l.setAttribute("aria-hidden", "true");
+        const i = document.createElement("input"); i.type = "checkbox"; i.setAttribute("switch", ""); i.tabIndex = -1; l.appendChild(i);
+        document.body.appendChild(l); HAP.el = l;
+      }
+      HAP.el.click(); return true;
+    } catch { return false; }
+  }
+  function haptic(pat) {  // -> "vibrate", "ios" or "" (nothing ran)
+    if (navigator.vibrate) { try { if (navigator.vibrate(pat)) return "vibrate"; } catch { } }
+    if (isIOS) {
+      let t = 0, n = 0; [].concat(pat).forEach((d, i) => { if (i % 2 === 0 && n++ < 10) { if (t === 0) iosTick(); else setTimeout(iosTick, t); } t += d; });
+      return "ios";
+    }
+    return "";
+  }
+  function vibFromPattern(p, strength) {  // [[ms, duration, strength]] -> a vibrate() array (vibrate, pause, vibrate, ...)
+    const out = []; let end = 0, total = 0;
+    for (const [t, d, s] of (p || []).slice(0, 60)) {
+      const dur = Math.round(Math.max(18, Math.min(220, d || 40)) * (.6 + .12 * (s || strength || 1)));
+      if (out.length) { const gap = Math.max(20, Math.round(t - end)); out.push(gap); total += gap; }
+      out.push(dur); total += dur; end = t + Math.max(d || 0, 0);
+      if (total > 9000) break;
+    }
+    return out.length ? out : [50 + (strength || 1) * 25];
+  }
+  function pop(f = 1) {  // the soft pop of a buzz
+    if (!store.get("sound", true)) return;
+    try {
+      AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+      const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+      o.type = "sine"; o.frequency.setValueAtTime(560 * f, t); o.frequency.exponentialRampToValueAtTime(190 * f, t + .09);
+      g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(.17, t + .008); g.gain.exponentialRampToValueAtTime(.0001, t + .15);
+      o.connect(g).connect(AC.destination); o.start(t); o.stop(t + .17);
+    } catch { }
+  }
+  const blobFace = (u) => u && u.avatar ? `<img src="${fileUrl(u.avatar)}" alt="">`
+    : `<span>${esc(((u && (u.name || u.username)) || "?").trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase())}</span>`;
+  const blobCol = (u) => COLORS[((u && u.id) || 0) % COLORS.length];
+  const touchLine = (t, who) => t.action
+    ? `${who} sent you ${t.count === 1 ? "a " + TNOUN[t.action][0] : t.count + " " + TNOUN[t.action][1]}`
+    : `${who} says “${t.word}”`;
+  const touchEmoji = (t) => t.action ? tact(t.action).e : (TBUZZ.find((b) => b[0] === t.word) || [0, "💌"])[1];
+
+  // one little burst (a Lottie emoji, or just the emoji when it cannot load / motion is reduced) inside `host`
+  function fxHit(host, a, x, y, s) {
+    if (!host || !host.isConnected || host.querySelectorAll(".us-fx").length > 16) return;
+    const d = document.createElement("div"); d.className = "us-fx fx-" + a.id;
+    d.style.left = x + "px"; d.style.top = y + "px"; d.style.setProperty("--s", String(.8 + s * .2)); d.style.setProperty("--dx", Math.round(Math.random() * 70 - 35) + "px");
+    host.appendChild(d);
+    let an = null; const rm = () => { try { an && an.destroy(); } catch { } d.remove(); };
+    if (a.lot && !reduceMotion()) lotMake(d, a.lot, a.e, false).then((x2) => { an = x2; if (an) { an.addEventListener("complete", rm); an.play(); } });
+    else d.innerHTML = `<span class="pet-fb">${a.e}</span>`;
+    setTimeout(rm, 2000);
+    if (a.id === "tomato") {  // a splat that stays for a moment
+      const sp = document.createElement("i"); sp.className = "us-splat"; sp.style.left = x + "px"; sp.style.top = y + "px"; sp.style.setProperty("--r", Math.round(Math.random() * 360) + "deg");
+      host.appendChild(sp); setTimeout(() => sp.remove(), 3200);
+    }
+  }
+  function wobble(el, x, y) {
+    if (!el) return; el.style.setProperty("--px", x + "%"); el.style.setProperty("--py", y + "%");
+    el.classList.remove("wob"); void el.offsetWidth; el.classList.add("wob");
+  }
+
+  // ---- the Us screen
+  function usOpen(cid, act) {
+    const c = conv(cid), them = c && other(c); if (!c || c.kind !== "direct" || !them || T.us) return;
+    const page = document.createElement("div"); page.className = "page us";
+    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small></div></div>
+      <div class="us-stage" id="usStage">
+        <div class="us-aura"></div>
+        <div class="us-blob them" id="usThem" style="--bc:${blobCol(them)}" role="button" aria-label="Touch ${esc(dn(them))}">${blobFace(them)}</div>
+        <div class="us-blob me" id="usMe" style="--bc:${blobCol(S.me)}">${blobFace(S.me)}</div>
+        <div class="us-count" id="usCount" hidden></div>
+        <div class="us-say" id="usSay" hidden></div>
+        <div class="us-hold" id="usHold">Hold or tap ${esc(dn(them).split(" ")[0])} to send</div>
+      </div>
+      <div class="us-sendrow"><button class="us-send" id="usSend" hidden>Send now</button></div>
+      <div class="us-dock">
+        <div class="us-ring" id="usRing">${TACT.map((a, i) => `${a.prank && !TACT[i - 1].prank ? `<span class="us-sep">Pranks</span>` : ""}<button class="us-act" data-a="${a.id}" aria-label="${a.n}"><i>${a.e}</i><span>${a.n}</span></button>`).join("")}</div>
+        <div class="us-buzz" id="usBuzz">${TBUZZ.map((b) => `<button class="us-chip" data-w="${esc(b[0])}"><i>${b[1]}</i>${esc(b[0])}</button>`).join("")}</div>
+      </div>`;
+    document.body.appendChild(page);
+    const U = T.us = { cid, page, them, stage: $("#usStage", page), act: act && TACT.some((a) => a.id === act) ? act : store.get("usact", "kiss"),
+      count: 0, pat: [], strengths: [], t0: 0, hits: [], timer: 0, hold: 0, holdDelay: 0, downAt: 0, last: null, poll: 0, close: null };
+    const close = U.close = () => {
+      if (page.classList.contains("closing")) return; page.classList.add("closing"); clearInterval(U.poll); clearTimeout(U.timer); clearTimeout(U.holdDelay); clearInterval(U.hold);
+      if (U.count) send(); T.us = null; setTimeout(() => page.remove(), 200);
+    };
+    layer(page, close); $("#usBack", page).onclick = close;
+    const blob = $("#usThem", page), mine = $("#usMe", page), cnt = $("#usCount", page), sbtn = $("#usSend", page), hint = $("#usHold", page);
+    const sync = () => {
+      const u = other(conv(cid)) || them; U.them = u;
+      U.stage.classList.toggle("lean", !!u.online);
+      $("#usStat", page).textContent = u.online ? "here with you" : lastSeen(u);
+    };
+    sync(); U.poll = setInterval(sync, 2500);
+    const selectAct = (id, quiet) => {
+      U.act = id; store.set("usact", id);
+      $$(".us-act", page).forEach((b) => b.classList.toggle("on", b.dataset.a === id));
+      const a = tact(id); hint.innerHTML = a.prank ? `${a.e} ${a.n}: tap ${esc(dn(them).split(" ")[0])} (all in fun)` : `${a.e} Hold or tap ${esc(dn(them).split(" ")[0])} to send ${a.n.toLowerCase()}`;
+      if (!quiet) { haptic([8]); const r = U.stage.getBoundingClientRect(); fxHit(U.stage, a, r.width / 2, r.height * .3, 2); }
+      const on = $(`.us-act[data-a="${id}"]`, page); if (on && on.scrollIntoView) on.scrollIntoView({ inline: "center", block: "nearest", behavior: reduceMotion() ? "auto" : "smooth" });
+    };
+    $("#usRing", page).onclick = (e) => { const b = e.target.closest(".us-act"); if (b) selectAct(b.dataset.a); };
+    selectAct(U.act, true);
+
+    // collecting taps: every tap, and every beat of a hold, is one hit; speed, hold time and touch size/force make it stronger
+    function hit(e) {
+      if (U.count >= 999) return;
+      const t = performance.now(), a = tact(U.act);
+      if (!U.count) { U.t0 = t; U.pat = []; U.strengths = []; U.hits = []; }
+      U.hits = U.hits.filter((x) => t - x < 2000); U.hits.push(t);
+      const rate = U.hits.length / 2, held = U.downAt ? t - U.downAt : 0;
+      const rad = Math.max(e.width || 0, e.height || 0) / 2, force = e.pointerType === "touch" && e.pressure && e.pressure !== .5 ? e.pressure : 0;
+      const s = Math.max(1, Math.min(5, 1 + Math.min(1.6, rate / 3) + Math.min(1, held / 1800) + (force ? Math.min(1, force * 1.2) : Math.min(.8, Math.max(0, rad - 14) / 20))));
+      U.count++; U.strengths.push(s);
+      if (t - U.t0 <= 10000 && U.pat.length < 150) U.pat.push([Math.round(t - U.t0), 120, +s.toFixed(1)]);
+      const r = U.stage.getBoundingClientRect(), br = blob.getBoundingClientRect();
+      const x = Math.max(br.left, Math.min(br.right, e.clientX)) - r.left, y = Math.max(br.top, Math.min(br.bottom, e.clientY)) - r.top;
+      wobble(blob, Math.round(((e.clientX - br.left) / br.width) * 100), Math.round(((e.clientY - br.top) / br.height) * 100));
+      if (a.id === "punch") { blob.classList.remove("punched"); void blob.offsetWidth; blob.classList.add("punched"); }
+      fxHit(U.stage, a, x, y, s);
+      haptic(U.count === 1 ? a.vib : [Math.round(8 + s * 5)]);
+      cnt.hidden = false; cnt.textContent = "×" + U.count; cnt.dataset.s = Math.round(s);
+      cnt.classList.remove("bump"); void cnt.offsetWidth; cnt.classList.add("bump");
+      sbtn.hidden = false; hint.hidden = true;
+    }
+    async function send() {
+      clearTimeout(U.timer); if (!U.count) return;
+      const n = U.count, str = U.strengths, body = { action: U.act, count: n, pattern: U.pat,
+        strength: Math.round(.5 * (str.reduce((x, y) => x + y, 0) / str.length) + .5 * Math.max(...str)) };
+      U.count = 0; U.pat = []; U.strengths = []; U.hits = [];
+      cnt.classList.add("gone"); setTimeout(() => { cnt.hidden = true; cnt.classList.remove("gone"); }, 500); sbtn.hidden = true; if (T.us === U) hint.hidden = false;
+      mine.classList.remove("send"); void mine.offsetWidth; mine.classList.add("send");
+      try { usSent(await api(`/api/touch/${cid}`, { body }), U); } catch (x) { toast(x.message); }
+    }
+    U.send = send;
+    blob.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); try { blob.setPointerCapture(e.pointerId); } catch { }
+      clearTimeout(U.timer); U.downAt = performance.now(); U.last = e; hit(e);
+      U.holdDelay = setTimeout(() => { U.hold = setInterval(() => { if (U.last) hit(U.last); }, 230); }, 420);
+    });
+    blob.addEventListener("pointermove", (e) => { if (U.downAt) U.last = e; });
+    const up = () => {
+      if (!U.downAt) return;
+      clearTimeout(U.holdDelay); clearInterval(U.hold); U.downAt = 0;
+      if (U.pat.length) U.pat[U.pat.length - 1][1] = 160;
+      if (U.count) U.timer = setTimeout(send, 1500);
+    };
+    blob.addEventListener("pointerup", up); blob.addEventListener("pointercancel", up); blob.addEventListener("lostpointercapture", up);
+    blob.addEventListener("contextmenu", (e) => e.preventDefault());
+    sbtn.onclick = send;
+    // the buzz bar: one tap, one buzz
+    let cool = 0;
+    $("#usBuzz", page).onclick = async (e) => {
+      const b = e.target.closest(".us-chip"); if (!b || Date.now() - cool < 350) return; cool = Date.now();
+      pop(1 + Math.random() * .25); haptic([14]); wobble(mine, 50, 50); b.classList.remove("zap"); void b.offsetWidth; b.classList.add("zap");
+      const say = $("#usSay", page); say.textContent = b.textContent.trim(); say.hidden = false; say.classList.remove("show"); void say.offsetWidth; say.classList.add("show");
+      try { usSent(await api(`/api/touch/${cid}`, { body: { word: b.dataset.w, count: 1, strength: 2 } }), U); } catch (x) { toast(x.message); }
+    };
+  }
+  function usSent(r, U) {  // what the server said about a touch we just sent
+    if (r.reason === "limit") toast("Sent. To keep their phone calm, only a few buzzes go out per minute 💛");
+    else if (r.reason === "quiet") toast("Sent. It's quiet hours for them, so it will be waiting 🌙");
+    else if (r.reason === "off") toast("Sent. They've set their phone to quiet touches, so it will be waiting in the app");
+    else if (r.coin && U && T.us === U) { const c = document.createElement("div"); c.className = "us-coin"; c.textContent = "+1 🪙"; U.stage.appendChild(c); setTimeout(() => c.remove(), 1400); }
+  }
+  // a touch from them while the Us screen is open: it happens right here, on my blob
+  function usIncoming(t) {
+    const U = T.us; if (!U) return;
+    const a = t.action ? tact(t.action) : null, line = $("#usSay", U.page);
+    line.textContent = touchLine(t, dn(U.them).split(" ")[0]); line.hidden = false; line.classList.remove("show"); void line.offsetWidth; line.classList.add("show");
+    U.stage.classList.add("incoming"); setTimeout(() => U.stage.classList.remove("incoming"), 2600);
+    haptic(vibFromPattern(t.pattern, t.strength)); if (!a) pop();
+    playPattern(U.stage, $("#usMe", U.page), a, t);
+  }
+  // play a touch's rhythm (squeezed into about 4.5 s) on `target`, inside `host`
+  function playPattern(host, target, a, t) {
+    const pat = (t.pattern && t.pattern.length ? t.pattern : [[0, 100, t.strength || 2]]), span = pat[pat.length - 1][0] || 1, k = Math.min(1, 4500 / span), r = host.getBoundingClientRect();
+    pat.slice(0, 60).forEach(([ms, , s], i) => setTimeout(() => {
+      if (!host.isConnected) return;
+      const tr = target.getBoundingClientRect(), x = tr.left - r.left + tr.width * (.25 + Math.random() * .5), y = tr.top - r.top + tr.height * (.2 + Math.random() * .5);
+      wobble(target, Math.round(30 + Math.random() * 40), Math.round(30 + Math.random() * 40)); if (a) fxHit(host, a, x, y, s || 2);
+    }, 250 + ms * k + i * 6));
+  }
+
+  // ---- receiving: the full-screen replay
+  function touchReplay(t, opts) {
+    opts = opts || {};
+    if (!opts.force && T.shown.has(t.id)) return; T.shown.add(t.id);
+    if (T.overlay) { T.queue.push(t); return; }
+    const c = conv(t.conv), from = userById(t.sender) || other(c) || {}, a = t.action ? tact(t.action) : null, nm = dn(from) || "Someone";
+    const ov = document.createElement("div"); ov.className = "tr-ov str" + Math.max(1, Math.min(5, t.strength || 1));
+    ov.innerHTML = `<div class="tr-card" role="dialog" aria-label="A touch from ${esc(nm)}">
+        <div class="tr-stage" id="trStage"><div class="us-blob them tr-blob" id="trBlob" style="--bc:${blobCol(from)}">${blobFace(from)}</div></div>
+        <p class="tr-line">${esc(touchLine(t, nm))} ${touchEmoji(t)}</p>
+        <small class="tr-sub">${esc(TSTR[Math.max(1, Math.min(5, t.strength || 1)) - 1])} · ${esc(shortTime(t.ts))}${opts.more ? ` · and ${opts.more} more` : ""}</small>
+        <div class="tr-btns"><button class="big-btn" id="trBack">Send one back</button><button class="sbtn" id="trClose">Close</button></div></div>`;
+    document.body.appendChild(ov); T.overlay = ov;
+    let done = false;
+    const close = (after) => {
+      if (done) return; done = true; T.overlay = null; ov.classList.add("closing"); try { navigator.vibrate && navigator.vibrate(0); } catch { }
+      setTimeout(() => { ov.remove(); const n = T.queue.shift(); if (n) touchReplay(n, { force: true }); else if (after && after.back) usOpen(t.conv, t.action); }, 220);
+    };
+    layer(ov, () => close());
+    $("#trClose", ov).onclick = () => close();
+    $("#trBack", ov).onclick = () => close({ back: 1 });
+    ov.addEventListener("click", (e) => { if (e.target === ov) close(); });
+    const stage = $("#trStage", ov), blob = $("#trBlob", ov);
+    haptic(vibFromPattern(t.pattern, t.strength)); if (!a) pop(1.1);
+    setTimeout(() => playPattern(stage, blob, a, t), 450);
+    if (!a) { const w = document.createElement("div"); w.className = "tr-word"; w.textContent = touchEmoji(t); stage.appendChild(w); }
+    if (S.cur !== t.conv && conv(t.conv) && !opts.keep) { /* stay where we are: the chip is in the chat */ }
+  }
+  async function touchOpenById(id) {
+    try { const t = await api(`/api/touch/${id}`); T.shown.add(t.id); touchReplay(t, { force: true }); markTouchSeen(t.id); if (conv(t.conv) && S.cur !== t.conv) openConv(t.conv); } catch { }
+  }
+  const markTouchSeen = (id) => api(`/api/touch/${id}/seen`, { method: "POST", body: {} }).catch(() => { });
+  async function touchUnseenCheck() {  // touches that came while the app was closed (or in quiet hours) play once, now
+    if (!TOKEN || !S.me || !isVisible() || T.checking) return; T.checking = true;
+    try { const l = await api("/api/touch/unseen"); if (l.length) { l.forEach((t) => markTouchSeen(t.id)); touchReplay(l[l.length - 1], { more: l.length - 1 }); } } catch { }
+    T.checking = false;
+  }
+  function onTouchEvent(e) {
+    const t = e.touch; if (!t || e.mine || t.sender === S.me.id || !isVisible()) return;
+    if (T.us && T.us.cid === t.conv) { T.shown.add(t.id); usIncoming(t); markTouchSeen(t.id); return; }
+    touchReplay(t); markTouchSeen(t.id);
+  }
+  // ---- in the chat: a small centered chip
+  function touchChip(m, pop_) {
+    const a = m.attachment || {}, mine = m.sender === S.me.id, act = a.action ? tact(a.action) : null;
+    const n = a.count || 1, s = TSTR[Math.max(1, Math.min(5, a.strength || 1)) - 1];
+    const label = act ? `<i>${act.e}</i> ${n > 1 ? "×" + n : TNOUN[a.action][0]}<em> · ${s}</em>` : `<i>${touchEmoji({ word: a.word })}</i> ${esc(a.word || "")}`;
+    return `<div class="tchip-row ${mine ? "mine" : ""} ${pop_}" data-id="${m.id || ""}"><button class="tchip" data-tc="${a.touch || 0}">${label}</button>
+      <small>${mine ? "You" : esc(dn(userById(m.sender)))} · ${fmtTime(m.created)}${mine ? "" : ` · <button class="tback" data-tb="${esc(a.action || "")}">Send one back</button>`}</small></div>`;
+  }
+  function bindTouchChips(log) {
+    $$(".tchip", log).forEach((b) => b.onclick = async (e) => {
+      e.stopPropagation(); const id = +b.dataset.tc; if (!id) return;
+      try { touchReplay(await api(`/api/touch/${id}`), { force: true }); } catch (x) { toast(x.message); }
+    });
+    $$(".tback", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); usOpen(S.cur, b.dataset.tb); });
+  }
+
+  // ---- Settings: how touches reach me
+  async function touchPrefsInit(root) {
+    const box = $("#sTouch", root); if (!box) return;
+    let p = T.prefs; try { p = T.prefs = await api("/api/touch/prefs"); } catch { if (!p) { box.innerHTML = `<small class="hint">Couldn't load. Try again later.</small>`; return; } }
+    if (!box.isConnected) return;
+    const save = (patch) => api("/api/touch/prefs", { method: "PUT", body: patch }).then((r) => { T.prefs = r; }).catch((x) => toast(x.message));
+    box.innerHTML = `<div class="tseg" id="tpMode" role="radiogroup" aria-label="Storm mode">${[["full", "Full"], ["gentle", "Gentle"], ["off", "Off"]].map(([v, l]) => `<button role="radio" aria-checked="${p.mode === v}" data-m="${v}" class="${p.mode === v ? "on" : ""}">${l}</button>`).join("")}</div>
+      <small class="hint" id="tpHint"></small>
+      <label class="swrow"><span><b>Quiet hours</b><small>Touches wait for you in the app instead of buzzing your phone</small></span><input type="checkbox" class="swtog" id="tpQuiet" ${p.quiet_on ? "checked" : ""}></label>
+      <div class="tpq" id="tpQ" ${p.quiet_on ? "" : "hidden"}><label>From <input type="time" id="tpA" value="${esc(p.quiet_start)}"></label><label>to <input type="time" id="tpB" value="${esc(p.quiet_end)}"></label></div>
+      <label class="swrow"><span><b>Watch mode</b><small>Only the first buzz of a touch reaches your wrist</small></span><input type="checkbox" class="swtog" id="tpWatch" ${p.watch ? "checked" : ""}></label>`;
+    const hints = { full: "Many hugs or kisses arrive as a little storm of buzzes, like the real thing.", gentle: "However many they send, you get one gentle buzz.", off: "Your phone stays quiet. Touches wait for you in the app." };
+    const hint = () => { $("#tpHint", box).textContent = hints[T.prefs.mode]; }; hint();
+    $("#tpMode", box).onclick = async (e) => {
+      const b = e.target.closest("button"); if (!b) return; await save({ mode: b.dataset.m });
+      $$("#tpMode button", box).forEach((x) => { const on = x.dataset.m === T.prefs.mode; x.classList.toggle("on", on); x.setAttribute("aria-checked", on); }); hint();
+    };
+    $("#tpQuiet", box).onchange = async (e) => { $("#tpQ", box).hidden = !e.target.checked; await save({ quiet_on: e.target.checked }); };
+    $("#tpA", box).onchange = (e) => save({ quiet_start: e.target.value }); $("#tpB", box).onchange = (e) => save({ quiet_end: e.target.value });
+    $("#tpWatch", box).onchange = (e) => save({ watch: e.target.checked });
+  }
+
+  // ---- Admin: the touch storm test (Phase 0) and the haptic check
+  function stormCard(root) {
+    const card = document.createElement("div"); card.className = "storm";
+    card.innerHTML = `<h4>Touch storm test</h4>
+      <p class="hint">Sends your phones a burst of numbered pushes (“Test buzz 7/20”). Count how many banners really show up. “Accepted” only means the push service took it.</p>
+      <div class="storm-row"><label>Pushes<select id="stN" class="inp"><option>10</option><option selected>20</option><option>40</option></select></label>
+        <label>Spacing<select id="stG" class="inp"><option value="150">150 ms</option><option value="300" selected>300 ms</option><option value="600">600 ms</option></select></label></div>
+      <button class="big-btn" id="stGo">Send the storm to my phones</button><div class="storm-out" id="stOut" aria-live="polite"></div>
+      <h4>Storm limits</h4><p class="hint">What a real touch may send, per touch.</p>
+      <div class="storm-row"><label>Most pushes<input id="stMax" class="inp" type="number" min="1" max="60"></label><label>Gap (ms)<input id="stGap" class="inp" type="number" min="50" max="5000" step="50"></label></div>
+      <button class="sbtn" id="stSave">Save limits</button>
+      <h4>Haptic check</h4><p class="hint">Tries the vibration of this device. Say what you felt.</p>
+      <button class="sbtn" id="stHap">Try haptics</button><div class="storm-out" id="stHapOut"></div>`;
+    root.appendChild(card);
+    const out = $("#stOut", card);
+    api("/api/admin/storm").then((r) => { $("#stMax", card).value = r.storm_max; $("#stGap", card).value = r.storm_gap_ms; }).catch(() => { });
+    $("#stSave", card).onclick = () => api("/api/admin/storm", { method: "PUT", body: { storm_max: +$("#stMax", card).value, storm_gap_ms: +$("#stGap", card).value } })
+      .then((r) => { $("#stMax", card).value = r.storm_max; $("#stGap", card).value = r.storm_gap_ms; toast("Saved"); }).catch((x) => toast(x.message));
+    const show = (r, exp) => {
+      const dev = r.devices.map((d) => `<li><b>${esc(d.type)}</b> ${d.accepted}/${d.sent} accepted${d.failed ? `, ${d.failed} failed (${Object.entries(d.statuses).map(([k, v]) => `${k}×${v}`).join(", ")})` : ""} · avg ${d.avg_ms} ms, slowest ${d.max_ms} ms</li>`).join("");
+      out.innerHTML = `<b>Sent ${r.sent}${exp ? " of " + exp : ""} · accepted ${r.accepted} · failed ${r.failed}</b> <small>${r.seconds}s${r.running ? " · sending…" : ""}</small><ul>${dev}</ul>${r.errors.length ? `<small class="hint">${esc(r.errors.join(" · "))}</small>` : ""}`;
+    };
+    $("#stGo", card).onclick = async (e) => {
+      const b = e.target; b.disabled = true; out.textContent = "Starting…";
+      try {
+        const r = await api("/api/admin/storm/test", { body: { count: +$("#stN", card).value, gap_ms: +$("#stG", card).value } });
+        for (let i = 0; i < 400 && card.isConnected; i++) {
+          await new Promise((res) => setTimeout(res, 1000));
+          const s = await api(`/api/admin/storm/test/${r.run}`); show(s, r.expected);
+          if (!s.running && s.sent >= r.expected) break;
+        }
+      } catch (x) { out.textContent = x.message; }
+      b.disabled = false;
+    };
+    $("#stHap", card).onclick = () => {
+      const ho = $("#stHapOut", card), rows = [];
+      let v = "not available"; try { v = navigator.vibrate ? (navigator.vibrate([120, 60, 120]) ? "ran" : "refused") : "not available"; } catch { v = "error"; }
+      rows.push(`navigator.vibrate: ${v}`);
+      const sw = iosTick(); rows.push(`iOS switch tick: ${sw ? "ran" : "not available"}${isIOS ? "" : " (only iPhones answer to this one)"}`);
+      ho.innerHTML = `<ul>${rows.map((r) => `<li>${r}</li>`).join("")}</ul><small class="hint">“Ran” means the call worked. Only you can tell whether you felt it.</small>`;
+    };
+  }
+
+// ------------------------------------------------------------------ start
   async function start() {
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(() => { });
     checkUpdate(true);
@@ -2930,6 +3280,9 @@
     let back = null; try { back = JSON.parse(sessionStorage.getItem("afra_resume") || "null"); sessionStorage.removeItem("afra_resume"); } catch { }
     if (back && Date.now() - back.t < 60000) { setTimeout(() => toast("✨ Updated"), 500); if (!want && back.cid && conv(back.cid)) setTimeout(() => openConv(back.cid), 150); }
     if (want) setTimeout(() => conv(want) && openConv(want), 400);
+    const wantT = +(new URLSearchParams(location.hash.slice(1)).get("touch") || 0);
+    if (wantT) { setTimeout(() => touchOpenById(wantT), 700); history.replaceState(null, "", location.pathname + location.search); }
+    setTimeout(touchUnseenCheck, 1500);
     if ("Notification" in window && Notification.permission === "granted") enablePush(false);
   }
   document.addEventListener("visibilitychange", () => {
@@ -2939,9 +3292,9 @@
       autoWhere();
       if (!WS || WS.readyState > 1) connect(); else resync();
       if (S.cur && conv(S.cur) && conv(S.cur).unread) markRead(S.cur);
-      celebrateCheck();
+      celebrateCheck(); touchUnseenCheck();
     }
   });
-  if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (e) => { if (e.data && e.data.open) openConv(+e.data.open); });
+  if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (e) => { if (!e.data) return; if (e.data.open) openConv(+e.data.open); if (e.data.touch) touchOpenById(+e.data.touch); });
   start().catch((e) => { app.innerHTML = `<div class="setup"><h1>A.F.R.A ♥</h1><p>Something went wrong: ${esc(e.message)}</p></div>`; });
 })();

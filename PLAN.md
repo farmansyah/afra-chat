@@ -3,10 +3,12 @@
 ## Done
 - v17 shared pet, v18 unread nudges and touch UX, v19 tabs, pet room game and admin broadcast.
 - v20 profile photo viewer and nicknames. v21 auto-update, jump-to-newest, pet thought bubbles, AI usage monitor and pet AI switch.
+- v22 daily question for two, mood check-in, our dates and countdown, on this day.
+- v23 Touches Phase 0 and 1: the Us screen, actions, buzz words, touch storms and the admin storm test. The pet chat keeps the pet and the owners apart (the pet's face on its lines, owners' names on theirs).
 
-## In progress
-- v22: daily question for two, mood check-in, our dates and countdown, on this day.
-- v23: time capsule letters, couple games that earn pet coins, shared bucket list with album.
+## Next
+- Tune the storm size and spacing from the storm test on your phones, then Touches Phase 2.
+- Time capsule letters, couple games that earn pet coins, shared bucket list with album.
 
 ## Touches (Obimy + tap ME), the long game
 What we take from each:

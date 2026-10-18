@@ -1,7 +1,7 @@
 /* A.F.R.A ♥: works offline (app shell) and shows notifications with the sender's name and message.
    The notification text arrives encrypted for this phone (Web Push, RFC 8291); only this phone can read it. */
-const CACHE = "afra-chat-v22";
-const SHELL = ["./", "index.html", "app.css?v=22", "alive.css?v=22", "theme.css?v=22", "app.js?v=22", "lines.js?v=22", "templates.json", "manifest.webmanifest", "icon-512.png"];
+const CACHE = "afra-chat-v23";
+const SHELL = ["./", "index.html", "app.css?v=23", "alive.css?v=23", "theme.css?v=23", "app.js?v=23", "lines.js?v=23", "templates.json", "manifest.webmanifest", "icon-512.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", (e) => {
@@ -29,15 +29,16 @@ self.addEventListener("push", (e) => {
   e.waitUntil((async () => {
     await self.registration.showNotification(d.title || "A.F.R.A ♥", {
       body: d.body || "💌 New message", icon: iconUrl(d.icon), badge: "icon-512.png",
-      tag: d.tag || ("conv-" + (d.conv || 0)), renotify: true, data: { conv: d.conv || 0 } });
+      tag: d.tag || ("conv-" + (d.conv || 0)), renotify: true, vibrate: Array.isArray(d.vibrate) ? d.vibrate : undefined,
+      data: { conv: d.conv || 0, touch: d.touch || 0 } });
     if (self.navigator && self.navigator.setAppBadge && d.badge !== undefined) { try { await self.navigator.setAppBadge(d.badge); } catch (err) { } }
   })());
 });
 self.addEventListener("notificationclick", (e) => {
   e.notification.close();
-  const conv = (e.notification.data || {}).conv;
+  const conv = (e.notification.data || {}).conv, touch = (e.notification.data || {}).touch;
   e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((cs) => {
-    if (cs.length) { cs[0].postMessage({ open: conv }); return cs[0].focus(); }
-    return self.clients.openWindow(conv ? "./#c=" + conv : "./");
+    if (cs.length) { cs[0].postMessage({ open: conv, touch: touch || 0 }); return cs[0].focus(); }
+    return self.clients.openWindow(touch ? "./#touch=" + touch : conv ? "./#c=" + conv : "./");
   }));
 });

@@ -99,6 +99,16 @@ CREATE TABLE IF NOT EXISTS date_seen (conv_id INTEGER, user_id INTEGER, key TEXT
 CREATE TABLE IF NOT EXISTS otd (conv_id INTEGER, day TEXT, data TEXT DEFAULT '{}', said INTEGER DEFAULT 0, PRIMARY KEY (conv_id, day));
 CREATE INDEX IF NOT EXISTS messages_created ON messages(conv_id, created);
 CREATE TABLE IF NOT EXISTS broadcasts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT, body TEXT, sent INTEGER DEFAULT 0, devices INTEGER DEFAULT 0, created REAL);
+-- v23 touches: one row per touch (a whole storm of taps = one row; live touch and achievements can hang off it later)
+CREATE TABLE IF NOT EXISTS touches (id INTEGER PRIMARY KEY, conv_id INTEGER, sender INTEGER, action TEXT DEFAULT '', word TEXT DEFAULT '', count INTEGER DEFAULT 1,
+  strength INTEGER DEFAULT 1, pattern TEXT DEFAULT '[]', ts REAL, pushes INTEGER DEFAULT 0, delivered INTEGER DEFAULT 0, msg_id INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS touches_conv ON touches(conv_id, ts);
+CREATE INDEX IF NOT EXISTS touches_sender ON touches(sender, ts);
+CREATE TABLE IF NOT EXISTS touch_seen (touch_id INTEGER, user_id INTEGER, ts REAL, PRIMARY KEY (touch_id, user_id));
+CREATE TABLE IF NOT EXISTS touch_prefs (user_id INTEGER PRIMARY KEY, mode TEXT DEFAULT 'full', quiet_on INTEGER DEFAULT 0, quiet_start TEXT DEFAULT '22:00',
+  quiet_end TEXT DEFAULT '07:00', watch INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS storm_log (id INTEGER PRIMARY KEY, run TEXT, idx INTEGER, device TEXT, endpoint_type TEXT, sent_at REAL, status INTEGER, ms INTEGER, err TEXT DEFAULT '');
+CREATE INDEX IF NOT EXISTS storm_run ON storm_log(run);
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
@@ -656,6 +666,8 @@ async def edit_message(mid: int, body: dict, authorization: str = Header(None)):
     def fn(c, m):
         if m["sender"] != u["id"] or m["deleted"]:
             raise HTTPException(403, "You can only edit your own messages.")
+        if m["kind"] == "touch":
+            raise HTTPException(400, "A touch can't be edited.")
         c.execute("UPDATE messages SET text=?, edited=? WHERE id=?", ((body.get("text") or "").strip()[:8000], time.time(), mid))
     return await _changed(mid, u["id"], fn)
 
@@ -1177,10 +1189,10 @@ async def _nudge_unread():
     t = time.time()
     with closing(db()) as c:
         c.execute("""UPDATE members SET nudged=0 WHERE nudged>0 AND NOT EXISTS (SELECT 1 FROM messages ms WHERE ms.conv_id=members.conv_id
-                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.created>members.last_read)""")
+                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.kind<>'touch' AND ms.created>members.last_read)""")
         rows = c.execute("""SELECT m.conv_id, m.user_id, m.nudged, MIN(ms.created) AS oldest FROM members m
                             JOIN convs cv ON cv.id=m.conv_id AND cv.kind='direct'
-                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.created>m.last_read
+                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.kind<>'touch' AND ms.created>m.last_read
                             WHERE m.nudge_on=1 AND m.nudged<2 AND m.muted<=?
                             GROUP BY m.conv_id, m.user_id HAVING MIN(ms.created)<=?""", (t, t - 900)).fetchall()
         todo = []
@@ -1188,7 +1200,7 @@ async def _nudge_unread():
             stage = 2 if t - r["oldest"] >= 2700 and r["nudged"] == 1 else 1 if r["nudged"] == 0 else 0
             if not stage:
                 continue
-            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
+            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind<>'touch' AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
                              ORDER BY id LIMIT 1""", (r["conv_id"], r["user_id"], r["conv_id"], r["user_id"])).fetchone()
             sender = c.execute("SELECT * FROM users WHERE id=?", (m["sender"],)).fetchone() if m else None
             c.execute("UPDATE members SET nudged=? WHERE conv_id=? AND user_id=?", (stage, r["conv_id"], r["user_id"]))
@@ -2872,7 +2884,7 @@ async def push_to(uids: list[int], payload: dict, skip_visible=True):
                 sub = json.loads(r["sub"])
                 with closing(db()) as c:
                     badge = c.execute("""SELECT COUNT(*) FROM messages ms JOIN members mb ON mb.conv_id=ms.conv_id AND mb.user_id=?
-                                         WHERE ms.sender<>? AND ms.deleted=0 AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
+                                         WHERE ms.sender<>? AND ms.deleted=0 AND ms.kind<>'touch' AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
                 body = encrypt_push(sub, json.dumps({**payload, "badge": badge}).encode()[:3800])
                 resp = await h.post(sub["endpoint"], content=body, headers={
                     "Authorization": _vapid_header(sub["endpoint"]), "Content-Encoding": "aes128gcm",
@@ -3083,6 +3095,11 @@ async def admin_delete(uid: int, authorization: str = Header(None)):
                 (FILES / fid).unlink(missing_ok=True)
         c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         c.execute("DELETE FROM pushes WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM touch_prefs WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM touch_seen WHERE user_id=?", (uid,))
+        for tr in c.execute("SELECT id FROM touches WHERE sender=?", (uid,)).fetchall():
+            c.execute("DELETE FROM touch_seen WHERE touch_id=?", (tr[0],))
+        c.execute("DELETE FROM touches WHERE sender=?", (uid,))
         for cid in convs:  # a Home goes with its people: the pet, its days, its hidden account, the shared lists and reminders
             p = c.execute("SELECT * FROM pets WHERE conv_id=?", (cid,)).fetchone()
             if p:
@@ -3625,6 +3642,359 @@ def download_backup(name: str, t: str = "", authorization: str = Header(None)):
     if f.parent != (DATA / "backups").resolve() or not f.is_file():
         raise HTTPException(404)
     return FileResponse(f, media_type="application/octet-stream", filename=name)
+
+
+# ---------------------------------------------------------------- Touches (v23): hugs, kisses and buzzes between two people
+TOUCH_ACTIONS = {"hug": "🫂", "kiss": "💋", "hold": "🤝", "poke": "👉", "tickle": "🤭", "stroke": "🤲", "heartbeat": "💓",
+                 "luck": "🍀", "tomato": "🍅", "pillow": "🪶", "punch": "👊"}
+TOUCH_WORDS = {"Thinking of you": "💭", "Love you": "💞", "Miss you": "🥹", "Call me": "📞", "Good morning": "☀️",
+               "Goodnight": "🌙", "On my way": "🚗", "Hungry?": "🍜"}
+TOUCH_LINES = {  # first, second, "won't stop", and the last one of a storm ({c} = how many in all)
+    "hug": ["hugged you 🫂", "hugged you again", "won't let go of you 🫂", "×{c} hugs!!"],
+    "kiss": ["kissed you 💋", "kissed you again", "won't stop kissing you 💋", "×{c} kisses!!"],
+    "hold": ["is holding your hand 🤝", "is still holding your hand", "won't let go of your hand 🤝", "×{c} hand squeezes!!"],
+    "poke": ["poked you 👉", "poked you again", "keeps poking you 👉", "×{c} pokes!!"],
+    "tickle": ["tickled you 🤭", "is tickling you again", "won't stop tickling you 🤭", "×{c} tickles!!"],
+    "stroke": ["is stroking your hair 🤲", "is still stroking your hair", "won't stop stroking your hair 🤲", "×{c} gentle strokes"],
+    "heartbeat": ["sent you a heartbeat 💓", "is still thinking of you 💓", "has a racing heart for you 💓", "×{c} heartbeats!!"],
+    "luck": ["wished you luck 🍀", "is wishing you even more luck", "is sending you all the luck 🍀", "×{c} lucky charms!!"],
+    "tomato": ["threw a tomato at you 🍅", "threw another tomato", "is pelting you with tomatoes 🍅", "×{c} tomatoes!!"],
+    "pillow": ["hit you with a pillow 🪶", "hit you with the pillow again", "started a pillow fight 🪶", "×{c} pillow whacks!!"],
+    "punch": ["playfully punched you 👊", "punched you again (gently)", "is on a punching spree 👊", "×{c} playful punches!!"]}
+TOUCH_STORMS_PER_MIN = 3
+TOUCH_PUSHES_PER_HOUR = 200
+TOUCH_COIN_CAP = 20
+STORM_RUNNING: set = set()
+
+
+def storm_settings() -> tuple:
+    def num(key, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(float(get_setting(key, str(default))))))
+        except ValueError:
+            return default
+    return num("storm_max", 20, 1, 60), num("storm_gap_ms", 400, 50, 5000)
+
+
+def touch_line(action: str, word: str, i: int, n: int, count: int) -> str:
+    if not action:
+        return f"{TOUCH_WORDS.get(word, '💌')} {word}"
+    lines = TOUCH_LINES[action]
+    k = 0 if i == 0 else 3 if (i == n - 1 and n > 2) else 1 if i == 1 else 2
+    return lines[k].format(c=count)
+
+
+def touch_view(r) -> dict:
+    try:
+        pat = json.loads(r["pattern"] or "[]")
+    except ValueError:
+        pat = []
+    return {"id": r["id"], "conv": r["conv_id"], "sender": r["sender"], "action": r["action"], "word": r["word"], "count": r["count"],
+            "strength": r["strength"], "pattern": pat, "ts": r["ts"]}
+
+
+def touch_prefs(c, uid: int) -> dict:
+    r = c.execute("SELECT * FROM touch_prefs WHERE user_id=?", (uid,)).fetchone()
+    if not r:
+        return {"mode": "full", "quiet_on": False, "quiet_start": "22:00", "quiet_end": "07:00", "watch": False}
+    return {"mode": r["mode"], "quiet_on": bool(r["quiet_on"]), "quiet_start": r["quiet_start"], "quiet_end": r["quiet_end"], "watch": bool(r["watch"])}
+
+
+def _hhmm(s, default: str) -> str:
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", str(s or "").strip())
+    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else default
+
+
+def in_quiet(pr: dict, tz) -> bool:
+    if not pr["quiet_on"]:
+        return False
+    mins = lambda s: int(s[:2]) * 60 + int(s[3:])
+    a, b, now_ = mins(pr["quiet_start"]), mins(pr["quiet_end"]), datetime.now(tz)
+    t = now_.hour * 60 + now_.minute
+    if a == b:
+        return False
+    return a <= t < b if a < b else (t >= a or t < b)
+
+
+def endpoint_type(ep: str) -> str:
+    h = urlparse(ep).hostname or ""
+    return ("Apple" if "apple" in h else "WNS" if "windows" in h else "FCM" if "google" in h else
+            "Mozilla" if "mozilla" in h else h or "unknown")
+
+
+async def push_sub(h, r, payload: dict):
+    """One push to one saved subscription. Returns (HTTP status or 0, milliseconds, error text). Dead subscriptions are forgotten."""
+    t0 = time.time()
+    try:
+        sub = json.loads(r["sub"])
+        body = encrypt_push(sub, json.dumps(payload).encode()[:3800])
+        resp = await h.post(sub["endpoint"], content=body, headers={
+            "Authorization": _vapid_header(sub["endpoint"]), "Content-Encoding": "aes128gcm",
+            "Content-Type": "application/octet-stream", "TTL": "3600", "Urgency": "high"})
+        if resp.status_code in (404, 410):
+            with closing(db()) as c:
+                c.execute("DELETE FROM pushes WHERE endpoint=?", (r["endpoint"],))
+                c.commit()
+        return resp.status_code, round((time.time() - t0) * 1000), ""
+    except Exception as e:
+        return 0, round((time.time() - t0) * 1000), repr(e)[:120]
+
+
+def _buzz(strength: int) -> list:
+    s = max(1, min(5, int(strength)))
+    return [40 + s * 25, 50, 40 + s * 25] + ([50, 40 + s * 20] if s >= 4 else [])
+
+
+async def run_storm(tid: int, sender, rid: int, cid: int, n: int, gap_ms: int, action: str, word: str, count: int, strength: int):
+    """Send n notifications one after the other to every phone of the receiver (a phone with the app open shows it itself)."""
+    try:
+        with closing(db()) as c:
+            nick = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (rid, sender["id"])).fetchone()
+            rows = c.execute("SELECT * FROM pushes WHERE user_id=?", (rid,)).fetchall()
+        title = (nick[0] if nick else None) or sender["name"] or sender["username"]
+        icon = f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"
+        sent = 0
+        async with httpx.AsyncClient(timeout=15) as h:
+            for i in range(n):
+                payload = {"title": title, "body": touch_line(action, word, i, n, count)[:180], "conv": cid, "touch": tid, "tag": f"touch-{tid}-{i}",
+                           "icon": icon, "vibrate": _buzz(strength), "renotify": True}
+                for r in rows:
+                    devs = SOCKETS.get(rid, {})
+                    if any(s_["visible"] for d, s_ in devs.items() if d == r["device"] or d.startswith(r["device"] + ".")):
+                        continue
+                    status, _, _ = await push_sub(h, r, payload)
+                    sent += 1 if 200 <= status < 300 else 0
+                if i < n - 1:
+                    await asyncio.sleep(gap_ms / 1000)
+        with closing(db()) as c:
+            c.execute("UPDATE touches SET delivered=? WHERE id=?", (sent, tid))
+            c.commit()
+    except Exception as e:
+        print("storm failed:", repr(e)[:300], flush=True)
+
+
+@app.get("/api/touch/prefs")
+def touch_prefs_get(authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        return touch_prefs(c, u["id"])
+
+
+@app.put("/api/touch/prefs")
+def touch_prefs_put(body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        p = touch_prefs(c, u["id"])
+        if "mode" in body:
+            if body["mode"] not in ("full", "gentle", "off"):
+                raise ValueError("Storm mode must be full, gentle or off")
+            p["mode"] = body["mode"]
+        if "quiet_on" in body:
+            p["quiet_on"] = bool(body["quiet_on"])
+        if "quiet_start" in body:
+            p["quiet_start"] = _hhmm(body["quiet_start"], p["quiet_start"])
+        if "quiet_end" in body:
+            p["quiet_end"] = _hhmm(body["quiet_end"], p["quiet_end"])
+        if "watch" in body:
+            p["watch"] = bool(body["watch"])
+        c.execute("INSERT OR REPLACE INTO touch_prefs (user_id, mode, quiet_on, quiet_start, quiet_end, watch) VALUES (?,?,?,?,?,?)",
+                  (u["id"], p["mode"], int(p["quiet_on"]), p["quiet_start"], p["quiet_end"], int(p["watch"])))
+        c.commit()
+    return p
+
+
+@app.get("/api/touch/unseen")
+def touch_unseen(authorization: str = Header(None)):
+    """Touches that arrived while the app was closed (or in quiet hours): they replay once on the next open."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        rows = c.execute("""SELECT t.* FROM touches t JOIN members m ON m.conv_id=t.conv_id AND m.user_id=? WHERE t.sender<>? AND t.ts>?
+                            AND NOT EXISTS (SELECT 1 FROM touch_seen s WHERE s.touch_id=t.id AND s.user_id=?) ORDER BY t.id DESC LIMIT 5""",
+                         (u["id"], u["id"], time.time() - 86400, u["id"])).fetchall()
+    return [touch_view(r) for r in rows][::-1]
+
+
+@app.get("/api/touch/{tid}")
+def touch_get(tid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        r = c.execute("SELECT * FROM touches WHERE id=?", (tid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "Touch not found")
+        _member(c, r["conv_id"], u["id"])
+    return touch_view(r)
+
+
+@app.post("/api/touch/{tid}/seen")
+def touch_seen(tid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        r = c.execute("SELECT conv_id FROM touches WHERE id=?", (tid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "Touch not found")
+        _member(c, r["conv_id"], u["id"])
+        c.execute("INSERT OR IGNORE INTO touch_seen (touch_id, user_id, ts) VALUES (?,?,?)", (tid, u["id"], time.time()))
+        c.commit()
+    return {"ok": True}
+
+
+def _clean_pattern(p) -> list:
+    out = []
+    for e in (p if isinstance(p, list) else [])[:150]:
+        try:
+            t, d, s = float(e[0]), float(e[1]), float(e[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if 0 <= t <= 10000:
+            out.append([int(t), int(max(0, min(10000, d))), round(max(1, min(5, s)), 1)])
+    return out
+
+
+@app.post("/api/touch/{cid}")
+async def touch_send(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    if needs_new_pw(u):
+        raise HTTPException(403, "Please choose a stronger password first.")
+    action = str(body.get("action") or "")
+    word = re.sub(r"\s+", " ", str(body.get("word") or "")).strip()[:40]
+    if bool(action) == bool(word) or (action and action not in TOUCH_ACTIONS):
+        raise ValueError("Send one touch or one word")
+    count = 1 if word else int(max(1, min(999, float(body.get("count") or 1))))
+    strength = int(round(max(1, min(5, float(body.get("strength") or 1)))))
+    pattern = _clean_pattern(body.get("pattern"))
+    now = time.time()
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        cv = c.execute("SELECT kind FROM convs WHERE id=?", (cid,)).fetchone()
+        peer = c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>?", (cid, u["id"])).fetchone()
+        if not cv or cv["kind"] != "direct" or not peer or peer["bot"]:
+            raise ValueError("Touches go between two people")
+        smax, gap = storm_settings()
+        # how many notifications: about one per tap (a bit more for a firm touch), within the limits
+        n = 1 if (count <= 1 or word) else max(1, min(smax, math.ceil(count * (0.6 + 0.2 * strength))))
+        pr = touch_prefs(c, peer["id"])
+        reason = ""
+        recent = c.execute("SELECT COUNT(*) FROM touches WHERE sender=? AND ts>? AND pushes>1", (u["id"], now - 60)).fetchone()[0]
+        used = c.execute("SELECT COALESCE(SUM(pushes),0) FROM touches WHERE sender=? AND ts>?", (u["id"], now - 3600)).fetchone()[0]
+        if pr["mode"] == "off":
+            n, reason = 0, "off"
+        elif in_quiet(pr, _tz(c, peer["id"])):
+            n, reason = 0, "quiet"
+        else:
+            if pr["mode"] == "gentle" or pr["watch"]:
+                n = min(n, 1)
+            if n > 1 and recent >= TOUCH_STORMS_PER_MIN:
+                n, reason = 1, "limit"
+            if used + n > TOUCH_PUSHES_PER_HOUR:
+                n, reason = max(0, TOUCH_PUSHES_PER_HOUR - used), "limit"
+        rhythm = 0
+        if len(pattern) > 1 and count > 1:
+            rhythm = int((pattern[-1][0] - pattern[0][0]) / (len(pattern) - 1))
+        spacing = max(gap, min(1500, rhythm))
+        tid = c.execute("INSERT INTO touches (conv_id, sender, action, word, count, strength, pattern, ts, pushes) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (cid, u["id"], action, word, count, strength, json.dumps(pattern), now, n)).lastrowid
+        summary = f"{TOUCH_ACTIONS[action]} ×{count}" if action else f"{TOUCH_WORDS.get(word, '💌')} {word}"
+        m = _insert_msg(c, cid, u["id"], "touch", summary, {"touch": tid, "action": action, "word": word, "count": count, "strength": strength})
+        c.execute("UPDATE touches SET msg_id=? WHERE id=?", (m["id"], tid))
+        coin = False
+        pet = _pet_for(c, u["id"], peer["id"])
+        if pet:  # +1 pet coin per touch sent, up to 20 a day
+            day = _day(_tz(c, u["id"]))
+            d = _day_get(c, pet["id"], day)
+            if d.get("touch_coins", 0) < TOUCH_COIN_CAP:
+                d["touch_coins"] = d.get("touch_coins", 0) + 1
+                _day_put(c, pet["id"], day, d)
+                _coins(c, pet["id"], 1)
+                coin = True
+        view = touch_view(c.execute("SELECT * FROM touches WHERE id=?", (tid,)).fetchone())
+        c.commit()
+    for uid in (u["id"], peer["id"]):
+        await send_to(uid, {"t": "msg", "msg": m})
+        await send_to(uid, {"t": "touch", "touch": view, "mine": uid == u["id"], "limited": reason == "limit"})
+    if n:
+        asyncio.create_task(run_storm(tid, u, peer["id"], cid, n, spacing, action, word, count, strength))
+    if coin and pet:
+        asyncio.create_task(home_event(pet["conv_id"], by=u["id"]))
+    return {"touch": view, "msg": m, "pushes": n, "limited": reason == "limit", "reason": reason, "coin": coin}
+
+
+# ---- Phase 0: the admin's "touch storm test" (how many pushes really arrive, and how fast phones take them)
+@app.get("/api/admin/storm")
+def storm_get(authorization: str = Header(None)):
+    admin(authorization)
+    smax, gap = storm_settings()
+    return {"storm_max": smax, "storm_gap_ms": gap}
+
+
+@app.put("/api/admin/storm")
+def storm_put(body: dict, authorization: str = Header(None)):
+    admin(authorization)
+    if "storm_max" in body:
+        set_setting("storm_max", str(max(1, min(60, int(float(body["storm_max"]))))))
+    if "storm_gap_ms" in body:
+        set_setting("storm_gap_ms", str(max(50, min(5000, int(float(body["storm_gap_ms"]))))))
+    smax, gap = storm_settings()
+    return {"storm_max": smax, "storm_gap_ms": gap}
+
+
+async def _storm_test(run: str, uid: int, n: int, gap_ms: int):
+    STORM_RUNNING.add(uid)
+    try:
+        with closing(db()) as c:
+            rows = c.execute("SELECT * FROM pushes WHERE user_id=?", (uid,)).fetchall()
+        async with httpx.AsyncClient(timeout=15) as h:
+            for i in range(1, n + 1):
+                for r in rows:
+                    sent_at = time.time()
+                    status, ms, err = await push_sub(h, r, {"title": "Touch storm test", "body": f"Test buzz {i}/{n}", "conv": 0, "tag": f"storm-{run}-{i}",
+                                                           "icon": "/icon-512.png", "vibrate": [120, 60, 120], "renotify": True})
+                    with closing(db()) as c:
+                        c.execute("INSERT INTO storm_log (run, idx, device, endpoint_type, sent_at, status, ms, err) VALUES (?,?,?,?,?,?,?,?)",
+                                  (run, i, r["device"], endpoint_type(json.loads(r["sub"])["endpoint"]), sent_at, status, ms, err))
+                        c.commit()
+                if i < n:
+                    await asyncio.sleep(gap_ms / 1000)
+    except Exception as e:
+        print("storm test failed:", repr(e)[:300], flush=True)
+    finally:
+        STORM_RUNNING.discard(uid)
+
+
+@app.post("/api/admin/storm/test")
+async def storm_test(body: dict, authorization: str = Header(None)):
+    u = admin(authorization)
+    n = int(max(1, min(60, float(body.get("count") or 10))))
+    gap = int(max(50, min(5000, float(body.get("gap_ms") or 300))))
+    if u["id"] in STORM_RUNNING:
+        raise HTTPException(409, "A test is still running. Wait for it to finish.")
+    with closing(db()) as c:
+        devices = c.execute("SELECT COUNT(*) FROM pushes WHERE user_id=?", (u["id"],)).fetchone()[0]
+    if not devices:
+        raise ValueError("This account has no phone with notifications on. Turn them on in Settings first.")
+    run = secrets.token_hex(4)
+    asyncio.create_task(_storm_test(run, u["id"], n, gap))
+    return {"run": run, "count": n, "gap_ms": gap, "devices": devices, "expected": n * devices}
+
+
+@app.get("/api/admin/storm/test/{run}")
+def storm_result(run: str, authorization: str = Header(None)):
+    u = admin(authorization)
+    with closing(db()) as c:
+        rows = [dict(r) for r in c.execute("SELECT * FROM storm_log WHERE run=? ORDER BY id", (run,))]
+    per: dict = {}
+    for r in rows:
+        d = per.setdefault(r["endpoint_type"], {"type": r["endpoint_type"], "sent": 0, "accepted": 0, "failed": 0, "statuses": {}, "avg_ms": 0, "max_ms": 0, "_ms": 0})
+        d["sent"] += 1
+        d["accepted" if 200 <= r["status"] < 300 else "failed"] += 1
+        d["statuses"][str(r["status"])] = d["statuses"].get(str(r["status"]), 0) + 1
+        d["_ms"] += r["ms"]
+        d["max_ms"] = max(d["max_ms"], r["ms"])
+    for d in per.values():
+        d["avg_ms"] = round(d.pop("_ms") / max(1, d["sent"]))
+    first, last = (rows[0]["sent_at"], rows[-1]["sent_at"]) if rows else (0, 0)
+    return {"run": run, "running": u["id"] in STORM_RUNNING, "sent": len(rows), "accepted": sum(d["accepted"] for d in per.values()),
+            "failed": sum(d["failed"] for d in per.values()), "seconds": round(last - first, 1), "devices": list(per.values()),
+            "errors": sorted({r["err"] for r in rows if r["err"]})[:3]}
 
 
 # ---------------------------------------------------------------- the app itself + housekeeping
