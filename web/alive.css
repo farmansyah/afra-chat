@@ -119,3 +119,17 @@ button:active { transform: scale(.94); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
+
+/* Appearance: text size, font and accent are set on :root by applyLook() in app.js */
+.bub .txt { font-size: var(--fs, 1em); }
+.bub .txt.big { font-size: calc(40px * var(--fsk, 1)); }
+.bub, .conv { font-family: var(--lookfont, inherit); }
+.conv .row1 b { font-size: calc(1em * var(--fsk, 1)); }
+.conv .row2 { font-size: calc(14px * var(--fsk, 1)); }
+.lookprev { padding: 10px 4px 2px; display: flex; justify-content: flex-end; }
+.lookchips { flex-wrap: wrap; overflow: visible; }
+.lookdots { display: flex; gap: 14px; padding: 4px 2px 8px; }
+.lookdots button { width: 34px; height: 34px; border-radius: 50%; border: 0; box-shadow: inset 0 0 0 1px rgba(127, 127, 127, .35); }
+.lookdots button.on { box-shadow: 0 0 0 3px var(--sheet), 0 0 0 5px var(--ink); }
+.lookchips button.pop, .lookdots button.pop { animation: lookPop .35s var(--spring); }
+@keyframes lookPop { 40% { transform: scale(1.18); } }

@@ -63,7 +63,7 @@ select option { background: var(--sheet); color: var(--ink); }
 @keyframes bump { 30% { background: var(--field); } }
 .conv .row1 b { font-weight: 600; }
 .av-wrap.on::after { border-color: var(--bg); }
-.fab { background: var(--accent); color: #fff; box-shadow: 0 6px 18px rgba(0, 0, 0, .3); }
+.fab { background: var(--accent); color: var(--on-accent); box-shadow: 0 6px 18px rgba(0, 0, 0, .3); }
 
 /* messages: yours in blue, theirs in grey, no shadows */
 .bub { background: var(--theirs); color: var(--theirs-ink); box-shadow: none; border-radius: 22px 22px 22px 6px; }
@@ -75,10 +75,10 @@ select option { background: var(--sheet); color: var(--ink); }
 .flash .bub { outline: 3px solid var(--accent); }
 .typing-bub { background: var(--theirs); box-shadow: none; }
 .cbtn.send { background: transparent; color: var(--accent); font-size: 22px; }
-.cbtn.send[data-mode="send"] { background: var(--accent); color: #fff; font-size: 18px; }
+.cbtn.send[data-mode="send"] { background: var(--accent); color: var(--on-accent); font-size: 18px; }
 .quick { border-top: 0; background: var(--bg); }
 .quick button { background: var(--field); border: 0; color: var(--ink); }
-@keyframes sentFly { 50% { transform: translateY(-8px) scale(1.1); background: var(--accent); color: #fff; } }
+@keyframes sentFly { 50% { transform: translateY(-8px) scale(1.1); background: var(--accent); color: var(--on-accent); } }
 .reply-bar, .compose, .searchbar { background: var(--bg); border-top-color: var(--line); }
 .reply-bar div { border-left-color: var(--accent); }
 

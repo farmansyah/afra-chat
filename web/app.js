@@ -13,6 +13,39 @@
                   set(k, v) { try { localStorage.setItem("afra_" + k, JSON.stringify(v)); } catch { } }, del(k) { try { localStorage.removeItem("afra_" + k); } catch { } } };
   const DEVICE = store.get("device") || (store.set("device", "d" + rid().slice(0, 10)), store.get("device"));
   const TAB = DEVICE + "." + rid().slice(0, 5);  // each open copy (a tab, the copy inside A.F.R.A) has its own connection
+  // ---- Appearance (per device): text size, font, accent colour. Saved as store "look" = { size, font, accent }
+  const LOOK_SIZES = [["small", "Small", .9], ["normal", "Normal", 1], ["large", "Large", 1.15], ["xl", "Extra large", 1.3]];
+  const LOOK_FONTS = [["system", "System", ""], ["rounded", "Rounded", 'ui-rounded, "SF Pro Rounded", system-ui, sans-serif'], ["serif", "Serif", 'Georgia, "Times New Roman", serif'], ["mono", "Mono", 'ui-monospace, "SF Mono", Menlo, Consolas, monospace']];
+  const LOOK_ACCENTS = ["", "#ff3b5c", "#7c5cff", "#34c759", "#ff9500", "#0a84ff"];   // "" = the app's own accent
+  const LOOK_DEFAULT = { size: "normal", font: "system", accent: "" };
+  function applyLook(l) {
+    l = { ...LOOK_DEFAULT, ...(l || {}) };
+    const st = document.documentElement.style, k = (LOOK_SIZES.find((x) => x[0] === l.size) || LOOK_SIZES[1])[2], f = (LOOK_FONTS.find((x) => x[0] === l.font) || LOOK_FONTS[0])[2];
+    st.setProperty("--fs", k + "em"); st.setProperty("--fsk", String(k));
+    f ? st.setProperty("--lookfont", f) : st.removeProperty("--lookfont");
+    const a = LOOK_ACCENTS.includes(l.accent) ? l.accent : "";
+    if (!a) { ["--accent", "--accent-press", "--mine", "--mine-ink", "--on-accent"].forEach((p) => st.removeProperty(p)); return; }
+    const n = parseInt(a.slice(1), 16), lin = (v) => { v /= 255; return v <= .03928 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4); };
+    const lum = .2126 * lin(n >> 16) + .7152 * lin((n >> 8) & 255) + .0722 * lin(n & 255), ink = lum > .4 ? "#000000" : "#ffffff";
+    st.setProperty("--accent", a); st.setProperty("--accent-press", a); st.setProperty("--mine", a); st.setProperty("--mine-ink", ink); st.setProperty("--on-accent", ink);
+  }
+  applyLook(store.get("look"));
+  function lookSheet() {
+    let l = { ...LOOK_DEFAULT, ...(store.get("look") || {}) };
+    const s = sheet(`<h3>Appearance</h3>
+      <div class="lookprev"><div class="msg mine"><div class="bub"><div class="txt">This is how your messages look ✨</div></div></div></div>
+      <h4>Text size</h4><div class="chips lookchips" data-k="size">${LOOK_SIZES.map((x) => `<button data-v="${x[0]}">${x[1]}</button>`).join("")}</div>
+      <h4>Font</h4><div class="chips lookchips" data-k="font">${LOOK_FONTS.map((x) => `<button data-v="${x[0]}" style="${x[2] ? "font-family:" + x[2] : ""}">${x[1]}</button>`).join("")}</div>
+      <h4>Accent colour</h4><div class="lookdots" data-k="accent">${LOOK_ACCENTS.map((c) => `<button data-v="${c}" aria-label="${c || "Default"}" style="background:${c || "#0095f6"}"></button>`).join("")}</div>
+      <div class="row" style="justify-content:center;margin-top:12px"><button class="sbtn" id="lreset">Reset</button></div>`);
+    const mark = () => $$("[data-k]", s).forEach((g) => $$("button", g).forEach((b) => b.classList.toggle("on", b.dataset.v === l[g.dataset.k])));
+    $$("[data-k] button", s).forEach((b) => b.onclick = () => {
+      l[b.parentNode.dataset.k] = b.dataset.v; store.set("look", l); applyLook(l); mark();
+      b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop");
+    });
+    $("#lreset", s).onclick = () => { l = { ...LOOK_DEFAULT }; store.del("look"); applyLook(l); mark(); };
+    mark();
+  }
   // ---- small delights: soft sounds (made on the fly, no files), emoji bursts, a big heart, a greeting
   let AC = null;
   function sound(kind) {
@@ -1211,6 +1244,8 @@
       <h4>Notifications</h4>
       ${isIOS && !standalone ? `<div class="note warn">📲 On iPhone, notifications work in the Home Screen app: tap <b>Share</b> ⬆ → <b>Add to Home Screen</b>, then open A.F.R.A ♥ from its icon.</div>`
         : `<div class="row"><button class="sbtn" id="ppush">${pushOn ? "✓ On" : "Turn on"}</button>${pushOn ? `<button class="sbtn" id="ptest">Send me a test</button>` : ""}</div>`}
+      <h4>Appearance</h4>
+      <button class="item" id="plook">🔤 Appearance</button>
       <h4>Sounds</h4>
       <label class="row" style="font-size:15px"><input type="checkbox" id="psound" ${store.get("sound", true) ? "checked" : ""}> Soft sounds when sending and receiving</label>
       <h4>Password</h4>
@@ -1219,6 +1254,7 @@
       <button class="sbtn" id="ppw" style="margin-top:8px">Change password</button>
       <h4>This device</h4>
       <button class="item danger" id="pout">Log out</button>`);
+    $("#plook", s).onclick = () => { s.remove(); lookSheet(); };
     $("#pav", s).onchange = async (e) => {
       const f = e.target.files[0]; if (!f) return;
       try { e.target.value = ""; const sq = await cropImage(f, 512); if (!sq) return; const fd = new FormData(); fd.append("file", sq, "avatar.jpg"); S.me = await api("/api/me/avatar", { body: fd }); s.remove(); drawAll(); profileSheet(); toast("Photo updated"); }
