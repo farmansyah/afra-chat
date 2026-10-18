@@ -94,14 +94,14 @@ The deck depends on how long you've been together, read from "Our dates" (v22, t
 
 ## Pending: closer together, and more fun
 ### Every day
-- [ ] Daily question for two: one question a day ("What made you smile today?"). Your answer stays hidden until both have answered, then both are revealed. Builds a streak and an archive of answers. The pet asks it.
-- [ ] Mood check-in: tap a mood each day (😊 😴 😣 🥰 ...) with an optional word. The other sees it on the chat header, and the pet notices ("Raina's had a rough day, send her something nice?").
-- [ ] "Thinking of you" tap: one button, a soft buzz and a ♥ on their screen with no words needed. A counter shows how many today.
+- [x] Daily question for two: one question a day ("What made you smile today?"). Your answer stays hidden until both have answered, then both are revealed. Builds a streak and an archive of answers. The pet asks it.
+- [x] Mood check-in: tap a mood each day (😊 😴 😣 🥰 ...) with an optional word. The other sees it on the chat header, and the pet notices ("Raina's had a rough day, send her something nice?").
+- [x] "Thinking of you" tap: one button, a soft buzz and a ♥ on their screen with no words needed. A counter shows how many today.
 - [ ] Morning / night ritual: "Good morning" and "Good night" cards with a photo of the sky, the weather where each of you is, and a line from lines.js.
 
 ### Memories
-- [ ] Our dates: anniversary, birthdays, first date and a days-together counter, with a gentle reminder the day before and a small celebration screen on the day.
-- [ ] On this day: "1 year ago today you sent…", resurfacing old photos and messages from the same date.
+- [x] Our dates: anniversary, birthdays, first date and a days-together counter, with a gentle reminder the day before and a small celebration screen on the day.
+- [x] On this day: "1 year ago today you sent…", resurfacing old photos and messages from the same date.
 - [x] Shared album: a Memories tab of all photos and videos from the chat by month, with favourites and a slideshow.
 - [x] Time capsule letter: write a letter now that unlocks on a chosen date (anniversary, graduation, next year).
 - [ ] Monthly "our month" recap card: messages sent, photos, longest call, top emoji, pet milestones and streaks. Shareable as an image.
@@ -138,11 +138,11 @@ Ordered roughly lightest first.
 ### Notifications
 - [ ] Quiet hours per person (e.g. 23:00 to 07:00). Notifications and nudges wait until morning.
 - [ ] Unread nudge settings: on/off, choose the timings (15/45 by default), and never during quiet hours.
-- [ ] "Thinking of you" tap: one button sends a soft vibration and a ♥ notification, with no message needed.
+- [x] "Thinking of you" tap: one button sends a soft vibration and a ♥ notification, with no message needed.
 - [ ] Optional forward to Telegram, for watches that don't show web-app alerts (Huawei Health on iPhone).
 
 ### Remind us of each other
-- [ ] Our dates: anniversary, birthdays and a "days together" counter, with gentle reminders the day before.
+- [x] Our dates: anniversary, birthdays and a "days together" counter, with gentle reminders the day before.
 - [ ] Good morning / good night nudge: if we haven't said it by a set time, suggest a line from lines.js.
 - [ ] A weekly "our week" card: photos, voice notes, streak and the pet's highlights.
 - [ ] A mood/status line ("in the lab 🧪", "sleepy 😴") shown under the name.
@@ -155,8 +155,8 @@ Ordered roughly lightest first.
 - [ ] Per-chat notification tone and vibration pattern. Android/desktop only; iOS web push can't change them.
 
 ### Tech debt
-- [ ] Album thumbnails: the Memories grid loads full-size photos. Add a small cached thumbnail endpoint, so the album stays fast on mobile data.
-- [ ] File links work for anyone logged in who has the file id. Check the file id against the conversation members, so only the two of you can open a photo.
+- [ ] Album thumbnails: the album loads full-size photos. All files on the server total 2.2 MB today and photos are already shrunk on the phone before upload, so this waits until the album gets heavy (it needs Pillow on the server).
+- [x] File links: decided to leave as is. Each file id is 128 random bits, and an id only reaches people who are in that chat. Checking membership on every photo load would touch avatars, wallpapers, the pet, letters and bucket photos for no real gain.
 - [ ] Sync pins, appearance and these settings across devices (server-side prefs instead of localStorage).
 - [ ] Video note: letting go during the first camera-permission prompt drops the note silently. Show a hint instead.
 - [ ] Earlier roadmap: live location, stickers, WebRTC calls, admin-granted privacy.
