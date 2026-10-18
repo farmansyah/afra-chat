@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 25;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 26;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -263,6 +263,7 @@
     if (e.t === "hello" || e.t === "update") { if (e.t === "update" || (e.version && String(e.version) !== String(APP_V))) checkUpdate(true); return; }
     if (e.t === "touch") { onTouchEvent(e); return; }
     if (e.t === "card") { onCardEvent(e); return; }
+    if (e.t === "capsule") { onCapsuleEvent(e); return; }
     if (e.t === "us_here" || e.t === "us_tap" || e.t === "us_sync" || e.t === "us_invite") { onUsEvent(e); return; }
     if (e.t === "pins") {
       const c = conv(e.conv); if (!c) return; c.pins = e.pins || []; P.k[c.id] = 0; cacheSave();
@@ -641,6 +642,7 @@
       if (pop && !atBottom && !S.search && !mine && !m.deleted && m.created >= JUMP.last) JUMP.n++;
       if (m.kind === "touch" && !m.deleted) { html += touchChip(m, pop); continue; }
       if (m.kind === "card" && !m.deleted) { html += cardChip(m, pop); continue; }
+      if (m.kind === "capsule" && !m.deleted) { html += capsuleChip(m, pop); continue; }
       html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" || m.kind === "pinact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""} ${ps ? "petsay" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
         ${ps ? `<span class="psav" aria-hidden="true">${esc((petOf(c) || {}).emoji || "🐾")}</span>` : ""}${who ? `<div class="msg-who">${esc(dn(who).split(" ")[0])}</div>` : ""}<div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
         ${rxPill(m)}
@@ -651,7 +653,7 @@
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
-    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log); bindCardChips(log);
+    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log); bindCardChips(log); bindCapsuleChips(log);
     $$("[data-rxs]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); navigator.vibrate && navigator.vibrate(5); rxSheet(+b.dataset.rxs); });
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
       e.stopPropagation(); const t = $(`.msg[data-id="${q.dataset.goto}"]`); if (!t) return;
@@ -3232,7 +3234,7 @@
   function usOpen(cid, act) {
     const c = conv(cid), them = c && other(c); if (!c || c.kind !== "direct" || !them || T.us) return;
     const page = document.createElement("div"); page.className = "page us";
-    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small><button class="us-come" id="usCome" hidden>Come to Us 🫶</button></div><button class="us-cardsb" id="usCards">Cards 🃏</button></div>
+    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small><button class="us-come" id="usCome" hidden>Come to Us 🫶</button></div><button class="us-cardsb" id="usLetters">Letters 💌</button><button class="us-cardsb" id="usCards">Cards 🃏</button></div>
       <div class="us-stage" id="usStage">
         <div class="us-aura"></div>
         <div class="us-blob them" id="usThem" style="--bc:${blobCol(them)}" role="button" aria-label="Touch ${esc(dn(them))}">${blobFace(them)}<i class="us-eyes" aria-hidden="true"><b></b><b></b></i></div>
@@ -3256,7 +3258,7 @@
       clearTimeout(U.still); clearTimeout(U.hbT); U.beating = false; usPresence(cid, false);
       if (U.count) send(); T.us = null; setTimeout(() => page.remove(), 200);
     };
-    layer(page, close); $("#usBack", page).onclick = close; $("#usCards", page).onclick = () => cardsOpen(cid);
+    layer(page, close); $("#usBack", page).onclick = close; $("#usCards", page).onclick = () => cardsOpen(cid); $("#usLetters", page).onclick = () => lettersOpen(cid);
     const blob = $("#usThem", page), mine = $("#usMe", page), cnt = $("#usCount", page), sbtn = $("#usSend", page), hint = $("#usHold", page);
     const sync = () => {
       const u = other(conv(cid)) || them; U.them = u;
@@ -3674,6 +3676,199 @@
   }
   function bindCardChips(log) {
     $$(".kchip", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const id = +b.dataset.kr; if (id && S.cur) cardRoundSheet(S.cur, id); });
+  }
+
+  // ---- v26: time capsule letters (the server keeps a sealed letter's words and photos to itself until its time comes)
+  const CP = { page: null, cid: 0, conv: 0, st: null, tab: "wait", tick: 0, read: null };
+  const cpDate = (t) => new Date(t * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  const cpNow = () => Date.now() / 1000;
+  function cpLeft(t) {
+    const s = Math.max(0, t - cpNow()), d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+    return d >= 2 ? `${d} days` : d === 1 ? `1 day ${h}h` : h ? `${h}h ${m}m` : m ? `${m} min` : "a moment";
+  }
+  const cpName = (names, id) => names[String(id)] || "them";
+  const cpInput = (t) => { const d = new Date(t * 1000), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
+  async function lettersOpen(cid) {
+    if (CP.page) return;
+    const page = document.createElement("div"); page.className = "page letters";
+    page.innerHTML = `<div class="kc-top"><button class="icon" id="lpBack" aria-label="Back">‹</button><b>Letters 💌</b><span class="kc-sp"></span><button class="icon" id="lpNew" aria-label="Write a letter">✎</button></div>
+      <div class="lp-tabs" id="lpTabs"></div><div class="kc-body" id="lpBody"><div class="hint">Looking for letters…</div></div>`;
+    document.body.appendChild(page);
+    Object.assign(CP, { page, cid, conv: cid, st: null, tab: "wait" });
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); clearInterval(CP.tick); if (CP.page === page) CP.page = null; setTimeout(() => page.remove(), 200); };
+    layer(page, close); $("#lpBack", page).onclick = close;
+    $("#lpNew", page).onclick = () => CP.st && capsuleCompose(CP.cid, CP.st.names, null, lettersLoad);
+    CP.tick = setInterval(() => CP.page === page && lettersPaint(), 30000);  // the "opens in" lines stay true while it is open
+    await lettersLoad();
+  }
+  async function lettersLoad() {
+    const page = CP.page; if (!page) return;
+    try { CP.st = await api(`/api/capsules/${CP.cid}`); CP.conv = CP.st.conv; } catch (x) { if (CP.page === page && !CP.st) $("#lpBody", page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (CP.page === page) lettersPaint();
+  }
+  function lettersPaint() {
+    const st = CP.st, page = CP.page; if (!st || !page) return;
+    const now = cpNow(), by = { wait: [], open: [], draft: [] };
+    for (const i of st.items) (i.state === "draft" ? by.draft : (i.unlock_at <= now || i.state === "open") ? by.open : by.wait).push(i);
+    by.wait.sort((a, b) => a.unlock_at - b.unlock_at); by.open.sort((a, b) => b.unlock_at - a.unlock_at);
+    const tabs = [["wait", "Waiting"], ["open", "Opened"], ["draft", "Drafts"]];
+    $("#lpTabs", page).innerHTML = tabs.map(([k, n]) => `<button class="${CP.tab === k ? "on" : ""}" data-t="${k}">${n}${by[k].length ? ` <em>${by[k].length}</em>` : ""}</button>`).join("");
+    $$("#lpTabs button", page).forEach((b) => b.onclick = () => { CP.tab = b.dataset.t; lettersPaint(); });
+    const list = by[CP.tab], empty = { wait: "Nothing is waiting yet. Write something for later 💌", open: "No letters have opened yet", draft: "No drafts" }[CP.tab];
+    $("#lpBody", page).innerHTML = list.length ? list.map((i) => {
+      const mine = i.mine, nm = cpName(st.names, mine ? i.to : i.author);
+      const head = mine ? `To ${i.to ? esc(nm) : "both of us"}` : `From ${esc(nm)}${i.to ? "" : " · for both of us"}`;
+      const sub = i.state === "draft" ? "Draft" : i.state === "open" || i.unlock_at <= now ? `Opened ${cpDate(i.opened_at || i.unlock_at)}` : `Opens in ${cpLeft(i.unlock_at)} · ${cpDate(i.unlock_at)}`;
+      return `<button class="lp-i ${i.state}" data-id="${i.id}"><i>${i.state === "open" ? "💌" : i.state === "draft" ? "✏️" : "✉️"}</i><span><b>${head}</b><small>${sub}</small>${i.preview ? `<em>${esc(i.preview)}</em>` : ""}</span>${i.photos ? `<u>📷 ${i.photos}</u>` : ""}</button>`;
+    }).join("") : `<div class="hint">${empty}</div>`;
+    $$("#lpBody .lp-i", page).forEach((b) => b.onclick = async () => {
+      const i = st.items.find((x) => x.id === +b.dataset.id); if (!i) return;
+      if (i.state === "draft") { try { const d = await api(`/api/capsules/${CP.cid}/${i.id}`); capsuleCompose(CP.cid, st.names, d.letter, lettersLoad); } catch (x) { toast(x.message); } }
+      else capsuleRead(CP.cid, i.id);
+    });
+  }
+  async function capsuleCompose(cid, names, ex, done) {  // ex: a letter (full view) being edited, or null for a new one
+    const me = S.me.id, ids = Object.keys(names).map(Number), oid = ids.find((k) => k !== me);
+    const L = { id: ex ? ex.id : 0, to: ex ? ex.to : oid, body: ex ? ex.body : "", att: ex ? [...ex.attachments] : [], at: ex && ex.unlock_at ? ex.unlock_at : 0, busy: false, saved: false };
+    const sealed = !!ex && ex.state === "sealed", min = sealed ? ex.unlock_at : 0;  // a sealed letter can only be moved later
+    let dt = {}; try { dt = (await api(`/api/home/${cid}`)).dates || {}; } catch { }
+    const at9 = (y, m, d) => new Date(y, m, d, 9, 0).getTime() / 1000, now = new Date();
+    const nextOf = (iso) => { const m = /^(\d{4})-(\d\d)-(\d\d)/.exec(iso || ""); if (!m) return 0; let t = at9(now.getFullYear(), +m[2] - 1, +m[3]); if (t <= cpNow() + 60) t = at9(now.getFullYear() + 1, +m[2] - 1, +m[3]); return t; };
+    const yr = new Date(now); yr.setFullYear(yr.getFullYear() + 1);
+    const picks = [dt.together && ["💞 Anniversary", nextOf(dt.together)], ...ids.map((id) => dt.birthdays && dt.birthdays[id] && [`🎂 ${id === me ? "My" : cpName(names, id) + "'s"} birthday`, nextOf(dt.birthdays[id])]),
+      ["🎆 New Year", at9(now.getFullYear() + 1, 0, 1)], ["🗓️ In 1 year", yr.getTime() / 1000]].filter(Boolean);
+    const page = document.createElement("div"); page.className = "page lcompose";
+    page.innerHTML = `<div class="kc-top"><button class="icon" id="lcBack" aria-label="Close">‹</button><b>${ex ? "Edit letter" : "New letter"} ✎</b></div>
+      <div class="kc-body"><div class="lc-sec"><small>To</small><div class="lc-to" id="lcTo"><button data-to="${oid}">${esc(cpName(names, oid))}</button><button data-to="0">Both of us</button></div>
+        <small class="hm-hint" id="lcToHint"></small></div>
+        <textarea id="lcText" rows="9" maxlength="20000" placeholder="Dear future you…"${sealed && !ex.mine ? " readonly" : ""}>${esc(L.body)}</textarea>
+        <div class="lc-photos" id="lcPh"></div><input type="file" id="lcFile" accept="image/*" multiple hidden>
+        <div class="lc-sec"><small>Opens on</small><div class="lc-picks" id="lcPicks">${picks.map((p, i) => `<button data-t="${p[1]}" data-i="${i}">${esc(p[0])}</button>`).join("")}</div>
+          <input type="datetime-local" id="lcAt" aria-label="Pick a date and time"${min ? ` min="${cpInput(min)}"` : ""}><small class="hm-hint" id="lcWhen"></small></div>
+        <div class="kc-act">${ex && ex.state === "draft" ? `<button class="sbtn" id="lcDel">Delete</button>` : ""}${sealed ? "" : `<button class="sbtn" id="lcDraft">Save draft</button>`}<button class="pi-yes" id="lcSeal">${sealed ? "Save changes" : "Seal it 💌"}</button></div></div>`;
+    document.body.appendChild(page);
+    const body = $("#lcText", page), at = $("#lcAt", page);
+    const end = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    const close = async () => {  // leaving a new letter with words in it keeps them as a draft; losing a sealed edit asks first
+      if (L.busy) return; L.body = body.value;
+      if (sealed) { if ((L.body !== ex.body || L.at !== ex.unlock_at || L.att.length !== ex.attachments.length) && !confirm("Leave without saving your changes?")) return; }
+      else if (!L.saved && (L.body.trim() || L.att.length)) { try { await api(L.id ? `/api/capsules/${cid}/${L.id}` : `/api/capsules/${cid}`, { method: L.id ? "PUT" : "POST", body: { to: L.to ? L.to : "both", body: L.body, attachments: L.att, draft: true, unlock_at: L.at || null } }); toast("Kept as a draft ✏️"); } catch { } }
+      end(); done && done();
+    };
+    layer(page, close); $("#lcBack", page).onclick = close;
+    const paintTo = () => {
+      $$("#lcTo button", page).forEach((b) => b.classList.toggle("on", +b.dataset.to === L.to));
+      $("#lcToHint", page).textContent = L.to ? "Only they can read it, once it opens." : "Opens for both of you at once. Until then only you can read it.";
+      if (sealed) $("#lcTo", page).classList.add("fixed");
+    };
+    $$("#lcTo button", page).forEach((b) => b.onclick = () => { if (sealed) return; L.to = +b.dataset.to; paintTo(); });
+    const paintAt = () => {
+      $$("#lcPicks button", page).forEach((b) => { b.classList.toggle("on", Math.abs(+b.dataset.t - L.at) < 61); b.disabled = +b.dataset.t <= Math.max(min, cpNow()); });
+      if (L.at) at.value = cpInput(L.at);
+      $("#lcWhen", page).textContent = L.at ? `Opens on ${cpDate(L.at)}, in ${cpLeft(L.at)}` : "Pick when it should open";
+    };
+    $$("#lcPicks button", page).forEach((b) => b.onclick = () => { L.at = +b.dataset.t; paintAt(); haptic(8); });
+    at.onchange = () => { const t = at.value ? new Date(at.value).getTime() / 1000 : 0; L.at = t; paintAt(); if (t && t <= Math.max(min, cpNow())) toast(min ? "A sealed letter can only be moved later" : "Pick a time in the future"); };
+    const paintPh = () => {
+      $("#lcPh", page).innerHTML = L.att.map((a, i) => `<div class="lc-ph"><img src="${fileUrl(a.id)}" alt=""><button data-i="${i}" aria-label="Remove photo">×</button></div>`).join("") + (L.att.length < 4 ? `<button class="lc-add" id="lcAdd" aria-label="Add photos">📷<small>${L.att.length}/4</small></button>` : "");
+      $$("#lcPh .lc-ph button", page).forEach((b) => b.onclick = () => { L.att.splice(+b.dataset.i, 1); paintPh(); });
+      const add = $("#lcAdd", page); if (add) add.onclick = () => $("#lcFile", page).click();
+    };
+    $("#lcFile", page).onchange = async (e) => {
+      const files = [...e.target.files].slice(0, 4 - L.att.length); e.target.value = "";
+      for (const f of files) {
+        const blob = await editPhoto(f, { title: "Add to your letter", presets: true }); if (!blob) continue;
+        try { L.busy = true; toast("Adding photo…"); const up = await upload(new File([blob], "letter.jpg", { type: "image/jpeg" })); L.att.push({ id: up.id, name: up.name, mime: up.mime, size: up.size }); paintPh(); }
+        catch (x) { toast(x.message); } finally { L.busy = false; }
+      }
+    };
+    const save = async (draft) => {
+      if (L.busy) return; L.body = body.value;
+      if (!L.body.trim()) return toast("Write something first");
+      if (!draft && !L.at) return toast("Pick when it should open");
+      if (!draft && (L.at < min || L.at <= cpNow())) return toast(min ? "A sealed letter can only be moved later" : "Pick a time in the future");
+      L.busy = true;
+      try {
+        const p = { to: L.to ? L.to : "both", body: L.body, attachments: L.att, unlock_at: L.at || null };
+        if (L.id) await api(`/api/capsules/${cid}/${L.id}`, { method: "PUT", body: draft ? { ...p } : { ...p, seal: true } });
+        else await api(`/api/capsules/${cid}`, { method: "POST", body: { ...p, draft } });
+        L.saved = true; toast(draft ? "Saved as a draft ✏️" : sealed ? "Saved 💌" : `Sealed until ${cpDate(L.at)} 💌`); haptic(draft ? 8 : [12, 40, 18]);
+        L.busy = false; end(); done && done();
+      } catch (x) { L.busy = false; toast(x.message); }
+    };
+    $("#lcSeal", page).onclick = () => save(false);
+    if ($("#lcDraft", page)) $("#lcDraft", page).onclick = () => save(true);
+    if ($("#lcDel", page)) $("#lcDel", page).onclick = async () => {
+      if (!confirm("Delete this draft?")) return;
+      try { await api(`/api/capsules/${cid}/${L.id}`, { method: "DELETE" }); L.saved = true; end(); done && done(); } catch (x) { toast(x.message); }
+    };
+    paintTo(); paintAt(); paintPh();
+  }
+  async function capsuleRead(cid, id) {
+    if (CP.read) return;
+    const page = document.createElement("div"); page.className = "page lread";
+    page.innerHTML = `<div class="kc-top"><button class="icon" id="lrBack" aria-label="Back">‹</button><b>Letter 💌</b><span class="kc-sp"></span><span class="lr-act" id="lrAct"></span></div><div class="kc-body" id="lrBody"><div class="hint">Opening…</div></div>`;
+    document.body.appendChild(page);
+    const R = CP.read = { page, cid, id, L: null, names: {}, tick: 0, first: true };
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); clearInterval(R.tick); if (CP.read === R) CP.read = null; setTimeout(() => page.remove(), 200); lettersLoad(); };
+    R.close = close; layer(page, close); $("#lrBack", page).onclick = close;
+    await capsuleLoad(R);
+  }
+  async function capsuleLoad(R) {
+    try { const d = await api(`/api/capsules/${R.cid}/${R.id}`); R.L = d.letter; R.names = d.names; }
+    catch (x) { if (CP.read === R && !R.L) $("#lrBody", R.page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (CP.read === R) capsulePaint(R);
+  }
+  function capsulePaint(R) {
+    const L = R.L, box = $("#lrBody", R.page), act = $("#lrAct", R.page), me = S.me.id; clearInterval(R.tick);
+    const from = L.mine ? "You" : cpName(R.names, L.author), to = L.to ? (L.to === me ? "you" : cpName(R.names, L.to)) : "both of us";
+    act.innerHTML = "";
+    if (!L.readable) {  // sealed envelope: nothing but the date and a countdown
+      const first = from.split(" ")[0];
+      box.innerHTML = `<div class="lr-sealed"><div class="env closed" aria-hidden="true"><i class="env-back"></i><i class="env-front"></i><i class="env-flap"></i><b class="env-wax">💌</b></div>
+        <h3>A letter from ${esc(first)}</h3><p>Opens on <b>${cpDate(L.unlock_at)}</b></p><div class="lr-count" id="lrLeft"></div><small class="hm-hint">Sealed until then. No peeking 🤫</small></div>`;
+      const upd = () => { const e = $("#lrLeft", R.page); if (!e) return; if (cpNow() >= L.unlock_at) { clearInterval(R.tick); capsuleLoad(R); return; } e.textContent = `in ${cpLeft(L.unlock_at)}`; };
+      upd(); R.tick = setInterval(upd, 1000); return;
+    }
+    const open = L.state === "open", seen = store.get("cpseen", []), anim = open && !seen.includes(L.id) && R.first && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (open && !seen.includes(L.id)) store.set("cpseen", [...seen, L.id].slice(-200));
+    R.first = false;
+    if (L.editable) act.innerHTML = `<button class="sbtn" id="lrEdit">Edit</button><button class="sbtn" id="lrDel">Delete</button>`;
+    const photos = (L.attachments || []).map((a, i) => ({ id: "cp" + L.id + "_" + i, conv_id: R.cid, kind: "image", sender: L.author, created: L.created_at, attachment: a }));
+    box.innerHTML = `<article class="lr-paper"><small class="lr-from">${esc(from)} to ${esc(to)}</small><div class="lr-text">${esc(L.body)}</div>
+      ${photos.length ? `<div class="lr-photos n${photos.length}">${photos.map((p, i) => `<button data-i="${i}" aria-label="Photo ${i + 1}"><img src="${fileUrl(p.attachment.id)}" alt="" loading="lazy"></button>`).join("")}</div>` : ""}
+      <footer>${open ? `Written ${cpDate(L.created_at)}, opened ${cpDate(L.opened_at || L.unlock_at)}` : `Written ${cpDate(L.created_at)} · sealed until ${cpDate(L.unlock_at)}${L.to ? "" : ", for both of us"}. Only you can read it now.`}</footer></article>`;
+    $$(".lr-photos button", box).forEach((b) => b.onclick = () => viewMedia(photos[+b.dataset.i], photos));
+    if ($("#lrEdit", R.page)) $("#lrEdit", R.page).onclick = () => capsuleCompose(R.cid, R.names, L, () => capsuleLoad(R));
+    if ($("#lrDel", R.page)) $("#lrDel", R.page).onclick = async () => {
+      if (!confirm(L.state === "draft" ? "Delete this draft?" : "Delete this letter? It can't be brought back.")) return;
+      try { await api(`/api/capsules/${R.cid}/${L.id}`, { method: "DELETE" }); toast("Letter deleted"); R.close(); } catch (x) { toast(x.message); }
+    };
+    if (anim) {  // a light envelope opening: the flap lifts, the paper slides up, then it all fades away (tap to skip)
+      const ov = document.createElement("div"); ov.className = "env-stage";
+      ov.innerHTML = `<div class="env" aria-hidden="true"><i class="env-back"></i><i class="env-paper"></i><i class="env-front"></i><i class="env-flap"></i><b class="env-wax">💌</b></div><small>${L.mine ? "Your letter" : "From " + esc(from.split(" ")[0])}</small>`;
+      R.page.appendChild(ov); haptic([10, 60, 14]);
+      const gone = () => { if (ov._d) return; ov._d = 1; ov.classList.add("out"); setTimeout(() => ov.remove(), 400); };
+      ov.onclick = gone; setTimeout(gone, 2300);
+    }
+  }
+  function onCapsuleEvent(e) {
+    const R = CP.read;
+    if (R && e.id === R.id) {
+      if (e.what === "delete" && e.by !== S.me.id) { toast("That letter was taken back"); R.close(); return; }
+      capsuleLoad(R);
+    }
+    if (CP.page && CP.conv === e.conv) lettersLoad();
+    else if (e.what === "open" && !R && !CP.page && isVisible()) toast("A letter just opened 💌");
+  }
+  function capsuleChip(m, pop_) {  // in the chat, once a letter has opened: tap to read it
+    const a = m.attachment || {}, mine = m.sender === S.me.id, u = userById(m.sender), who = u ? dn(u).split(" ")[0] : "Someone";
+    const t = a.to === 0 ? (mine ? "Your letter to us" : `${who}'s letter to us`) : mine ? "Your letter" : `A letter from ${who}`;
+    return `<div class="tchip-row kchip-row ${pop_}" data-id="${m.id || ""}"><button class="tchip cpchip" data-cp="${a.capsule || 0}"><i>💌</i><span>${esc(t)} just opened</span></button>
+      <small>Tap to read · ${fmtTime(m.created)}</small></div>`;
+  }
+  function bindCapsuleChips(log) {
+    $$(".cpchip", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const id = +b.dataset.cp; if (id && S.cur) capsuleRead(S.cur, id); });
   }
 
   // ---- Settings: how touches reach me

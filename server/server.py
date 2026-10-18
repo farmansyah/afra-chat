@@ -120,6 +120,11 @@ CREATE INDEX IF NOT EXISTS card_rounds_conv ON card_rounds(conv_id, done);
 CREATE TABLE IF NOT EXISTS card_answers (round_id INTEGER, user_id INTEGER, text TEXT DEFAULT '', guess TEXT DEFAULT '', judged INTEGER DEFAULT 0, created REAL,
   PRIMARY KEY (round_id, user_id));
 CREATE TABLE IF NOT EXISTS card_prefs (conv_id INTEGER, user_id INTEGER, spicy INTEGER DEFAULT 0, PRIMARY KEY (conv_id, user_id));
+-- v26: time capsule letters (to_uid NULL = to both of us; the body and photos of a sealed letter never leave the server for the reader before unlock_at)
+CREATE TABLE IF NOT EXISTS capsules (id INTEGER PRIMARY KEY, conv_id INTEGER, author INTEGER, to_uid INTEGER, body TEXT DEFAULT '', attachments TEXT DEFAULT '[]',
+  created_at REAL, unlock_at REAL DEFAULT 0, opened_at REAL DEFAULT 0, notified INTEGER DEFAULT 0, draft INTEGER DEFAULT 0, updated REAL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS capsules_conv ON capsules(conv_id, unlock_at);
+CREATE INDEX IF NOT EXISTS capsules_due ON capsules(notified, unlock_at);
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
@@ -746,7 +751,7 @@ async def edit_message(mid: int, body: dict, authorization: str = Header(None)):
     def fn(c, m):
         if m["sender"] != u["id"] or m["deleted"]:
             raise HTTPException(403, "You can only edit your own messages.")
-        if m["kind"] in ("touch", "card"):
+        if m["kind"] in ("touch", "card", "capsule"):
             raise HTTPException(400, "That can't be edited.")
         c.execute("UPDATE messages SET text=?, edited=? WHERE id=?", ((body.get("text") or "").strip()[:8000], time.time(), mid))
     return await _changed(mid, u["id"], fn)
@@ -786,7 +791,7 @@ async def pin_msg(mid: int, authorization: str = Header(None)):
             raise HTTPException(404, "Message not found")
         cid = m["conv_id"]
         _member(c, cid, u["id"])
-        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite", "card"):
+        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite", "card", "capsule"):
             raise HTTPException(400, "That one can't be pinned.")
         line = None
         if not c.execute("SELECT 1 FROM pinned_msgs WHERE conv_id=? AND msg_id=?", (cid, mid)).fetchone():
@@ -1363,6 +1368,7 @@ async def _reminders():
             await _pet_evening()  # at most once every 5 minutes; the pet's daily nudge
             await _nudge_unread()
             await _couple_jobs()  # v22: the morning question, birthday/anniversary reminders, 'on this day'
+            await _capsule_jobs()  # v26: letters whose time has come
         except Exception as e:
             print("reminders failed:", repr(e)[:300], flush=True)
         await asyncio.sleep(15)
@@ -3272,6 +3278,231 @@ async def _couple_jobs():
                 await home_ping(pr, "otd")
         except Exception as e:
             print("couple job failed:", repr(e)[:300], flush=True)
+
+
+# ---------------------------------------------------------------- v26: time capsule letters
+# A letter is written now and opens at unlock_at. Until then the reader's API answers carry no body and no photos at all (not hidden by the app: not sent).
+CAP_BODY, CAP_PHOTOS, CAP_YEARS = 20000, 4, 25
+
+
+def _cap_state(r, now: float) -> str:
+    return "draft" if r["draft"] else "open" if r["unlock_at"] <= now else "sealed"
+
+
+def _cap_readable(r, uid: int, now: float) -> bool:
+    """The author always (their own words); the reader only once it is sealed AND the time has come. Drafts are nobody else's business."""
+    if r["author"] == uid:
+        return True
+    return not r["draft"] and r["unlock_at"] <= now and (r["to_uid"] is None or r["to_uid"] == uid)
+
+
+def _cap_view(r, uid: int, now: float, full: bool = False) -> dict:
+    ok = _cap_readable(r, uid, now)
+    out = {"id": r["id"], "conv": r["conv_id"], "author": r["author"], "to": r["to_uid"] or 0, "created_at": r["created_at"], "unlock_at": r["unlock_at"],
+           "opened_at": r["opened_at"], "state": _cap_state(r, now), "mine": r["author"] == uid, "readable": ok,
+           "editable": r["author"] == uid and (bool(r["draft"]) or r["unlock_at"] > now)}
+    if ok:
+        att = json.loads(r["attachments"] or "[]")
+        out["photos"] = len(att)
+        if full:
+            out["body"], out["attachments"] = r["body"], att
+        else:
+            out["preview"] = (r["body"] or "").strip().replace("\n", " ")[:90]
+    return out
+
+
+def _cap_photos(c, uid: int, raw) -> list:
+    """Up to 4 photos, each an upload of yours that the files table knows; what is stored is what the server knows, not what the phone said."""
+    raw = raw if isinstance(raw, list) else []
+    if len(raw) > CAP_PHOTOS:
+        raise ValueError(f"Up to {CAP_PHOTOS} photos in a letter.")
+    out = []
+    for a in raw:
+        fid = str(a.get("id") or "") if isinstance(a, dict) else ""
+        f = c.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone() if re.fullmatch(r"[0-9a-f]{24,32}", fid) else None
+        if not f or f["owner"] != uid or not f["mime"].startswith("image/"):
+            raise ValueError("One of the photos isn't available. Add it again.")
+        if fid not in {x["id"] for x in out}:
+            out.append({"id": fid, "name": f["name"], "mime": f["mime"], "size": f["size"]})
+    return out
+
+
+def _cap_when(v, now: float) -> float:
+    try:
+        t = float(v)
+    except (TypeError, ValueError):
+        raise ValueError("Choose when the letter opens.")
+    if t > 1e11:  # milliseconds from a phone
+        t /= 1000
+    if t <= now:
+        raise ValueError("The letter has to open in the future.")
+    if t > now + CAP_YEARS * 366 * 86400:
+        raise ValueError(f"Pick a date within {CAP_YEARS} years.")
+    return t
+
+
+def _cap_to(pr: dict, uid: int, v) -> int | None:
+    """None = to both of us, else the partner."""
+    if v in (None, "", "both", 0, "0"):
+        return None
+    partner = pr["b"] if uid == pr["a"] else pr["a"]
+    if str(v) != str(partner):
+        raise ValueError("A letter goes to your partner, or to both of you.")
+    return partner
+
+
+async def cap_ping(pr: dict, what: str, by: int, cap):
+    """Tell the phones that the list changed (no content). Drafts only matter to the person who wrote them."""
+    for uid in (pr["a"], pr["b"]):
+        if cap["draft"] and uid != cap["author"]:
+            continue
+        await send_to(uid, {"t": "capsule", "conv": pr["direct"], "pet": pr["pet"], "what": what, "by": by, "id": cap["id"]})
+
+
+def _cap_row(c, pr: dict, lid: int, uid: int):
+    r = c.execute("SELECT * FROM capsules WHERE id=? AND conv_id=?", (lid, pr["direct"])).fetchone()
+    if not r or (r["draft"] and r["author"] != uid):
+        raise HTTPException(404, "Letter not found")
+    return r
+
+
+@app.get("/api/capsules/{cid}")
+def cap_list(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    now = time.time()
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        rows = c.execute("SELECT * FROM capsules WHERE conv_id=? AND (draft=0 OR author=?) ORDER BY unlock_at, id", (pr["direct"], u["id"])).fetchall()
+        return {"conv": pr["direct"], "pet": pr["pet"], "me": u["id"], "now": now, "names": _cards_names(c, pr, u["id"]), "items": [_cap_view(r, u["id"], now) for r in rows]}
+
+
+@app.get("/api/capsules/{cid}/{lid}")
+def cap_get(cid: int, lid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    now = time.time()
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        r = _cap_row(c, pr, lid, u["id"])
+        return {"letter": _cap_view(r, u["id"], now, True), "names": _cards_names(c, pr, u["id"]), "me": u["id"], "now": now}
+
+
+@app.post("/api/capsules/{cid}")
+async def cap_create(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    text = str(body.get("body") or "").strip()
+    if len(text) > CAP_BODY:
+        raise ValueError(f"A letter can hold up to {CAP_BODY:,} characters.")
+    draft = 1 if body.get("draft") else 0
+    now = time.time()
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        to = _cap_to(pr, u["id"], body.get("to"))
+        att = _cap_photos(c, u["id"], body.get("attachments"))
+        if not text and not att:
+            raise ValueError("Write something first, or add a photo.")
+        when = _cap_when(body.get("unlock_at"), now) if (body.get("unlock_at") or not draft) else 0
+        lid = c.execute("INSERT INTO capsules (conv_id, author, to_uid, body, attachments, created_at, unlock_at, draft, updated) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (pr["direct"], u["id"], to, text, json.dumps(att), now, when, draft, now)).lastrowid
+        r = c.execute("SELECT * FROM capsules WHERE id=?", (lid,)).fetchone()
+        out = _cap_view(r, u["id"], now, True)
+        c.commit()
+    await cap_ping(pr, "new", u["id"], r)
+    return out
+
+
+@app.put("/api/capsules/{cid}/{lid}")
+async def cap_update(cid: int, lid: int, body: dict, authorization: str = Header(None)):
+    """The author, until it opens. Once sealed, the date can only move later. `seal: true` turns a draft into a sealed letter."""
+    u = auth(authorization)
+    now = time.time()
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        r = _cap_row(c, pr, lid, u["id"])
+        if r["author"] != u["id"]:
+            raise HTTPException(403, "Only the one who wrote it can change a letter.")
+        if not r["draft"] and r["unlock_at"] <= now:
+            raise ValueError("This letter has opened already.")
+        text, att, to, when, draft = r["body"], json.loads(r["attachments"] or "[]"), r["to_uid"], r["unlock_at"], r["draft"]
+        if "body" in body:
+            text = str(body.get("body") or "").strip()
+            if len(text) > CAP_BODY:
+                raise ValueError(f"A letter can hold up to {CAP_BODY:,} characters.")
+        if "attachments" in body:
+            att = _cap_photos(c, u["id"], body.get("attachments"))
+        if "to" in body:
+            to = _cap_to(pr, u["id"], body.get("to"))
+        if not text and not att:
+            raise ValueError("Write something first, or add a photo.")
+        if body.get("unlock_at"):
+            nw = _cap_when(body["unlock_at"], now)
+            if not draft and nw < when:
+                raise ValueError("A sealed letter can only open later, never sooner.")
+            when = nw
+        if draft and body.get("seal"):
+            if when <= now:
+                raise ValueError("Choose when the letter opens.")
+            draft = 0
+        c.execute("UPDATE capsules SET body=?, attachments=?, to_uid=?, unlock_at=?, draft=?, updated=? WHERE id=?", (text, json.dumps(att), to, when, draft, now, lid))
+        r2 = c.execute("SELECT * FROM capsules WHERE id=?", (lid,)).fetchone()
+        out = _cap_view(r2, u["id"], now, True)
+        c.commit()
+    await cap_ping(pr, "edit", u["id"], r2)
+    return out
+
+
+@app.delete("/api/capsules/{cid}/{lid}")
+async def cap_delete(cid: int, lid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    now = time.time()
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        r = _cap_row(c, pr, lid, u["id"])
+        if r["author"] != u["id"]:
+            raise HTTPException(403, "Only the one who wrote it can delete a letter.")
+        if not r["draft"] and r["unlock_at"] <= now:
+            raise ValueError("This letter has opened already. It stays with you both.")
+        c.execute("DELETE FROM capsules WHERE id=?", (lid,))
+        c.commit()
+    await cap_ping(pr, "delete", u["id"], r)
+    return {"ok": True}
+
+
+async def _capsule_jobs():
+    """Letters whose time has come (every loop; one indexed query). Each is claimed with `notified` first, so a letter opens once even if two loops overlap:
+    +2 coins for the author, a chip in the couple's chat, a push for the reader (for 'both of us' also the author), and the pet may say a line."""
+    now = time.time()
+    with closing(db()) as c:
+        due = [r["id"] for r in c.execute("SELECT id FROM capsules WHERE draft=0 AND notified=0 AND unlock_at<=? ORDER BY unlock_at LIMIT 50", (now,))]
+    for lid in due:
+        try:
+            with closing(db()) as c:
+                if not c.execute("UPDATE capsules SET notified=1, opened_at=? WHERE id=? AND notified=0 AND draft=0", (now, lid)).rowcount:
+                    continue
+                r = c.execute("SELECT * FROM capsules WHERE id=?", (lid,)).fetchone()
+                ids = sorted(x["user_id"] for x in c.execute("SELECT user_id FROM members WHERE conv_id=?", (r["conv_id"],)))
+                if len(ids) != 2:
+                    c.commit()
+                    continue
+                pr = _pair_build(c, ids[0], ids[1], _pet_for(c, ids[0], ids[1]))
+                if pr["pet_id"]:
+                    _coins(c, pr["pet_id"], 2)
+                att = {"capsule": lid, "from": r["author"], "to": r["to_uid"] or 0, "written": r["created_at"], "unlock": r["unlock_at"]}
+                mid = c.execute("INSERT INTO messages (conv_id, sender, kind, text, attachment, created, updated) VALUES (?,?,?,?,?,?,?)",
+                                (pr["direct"], r["author"], "capsule", "💌 A letter just opened", json.dumps(att), now, now)).lastrowid
+                c.execute("UPDATE convs SET last_at=? WHERE id=?", (now, pr["direct"]))
+                msg = msg_view(c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
+                readers = [x for x in ids if x != r["author"]] + ([r["author"]] if r["to_uid"] is None else [])
+                names = {x: _first_name(c, x, r["author"]) for x in readers}
+                c.commit()
+            await cap_ping(pr, "open", r["author"], r)
+            await _bcast_msg(pr["direct"], msg)
+            for x in readers:
+                title = f"💌 A letter from {names[x]} just opened" if x != r["author"] else "💌 Your letter to us just opened"
+                await push_to([x], {"title": title, "body": "Tap to read it", "conv": pr["direct"], "icon": "/icon-512.png"})
+            if pr["pet"]:
+                await pet_say(pr["pet"], "A letter from the past just opened 💌 +2 ♥")
+        except Exception as e:
+            print("capsule job failed:", repr(e)[:300], flush=True)
 
 
 # ---------------------------------------------------------------- live updates (one WebSocket per device)
