@@ -10,12 +10,12 @@
   - A photo editor (pinch zoom, crop, rotate) for every photo picker.
   - The partner is told about a new nickname.
 - v25 Question cards: 8 decks that unlock with time together, guess mode, and a Spicier deck both must switch on.
+- v26 Time capsule letters: write now, open on a chosen date, sealed on the server until then. Up to 4 photos, "both of us" letters, drafts.
 
 ## Next
 1. Tune the storm size and spacing from the storm test on your phones.
-2. v26: Time capsule letters.
-3. v27: Couple games that earn pet coins.
-4. v28: Shared bucket list with album.
+2. v27: Couple games that earn pet coins.
+3. v28: Shared bucket list with album.
 
 ## Touches (Obimy + tap ME), the long game
 What we take from each:
