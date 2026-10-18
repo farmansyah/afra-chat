@@ -5,12 +5,17 @@
 - v20 profile photo viewer and nicknames. v21 auto-update, jump-to-newest, pet thought bubbles, AI usage monitor and pet AI switch.
 - v22 daily question for two, mood check-in, our dates and countdown, on this day.
 - v23 Touches Phase 0 and 1: the Us screen, actions, buzz words, touch storms and the admin storm test. The pet chat keeps the pet and the owners apart (the pet's face on its lines, owners' names on theirs).
+- v24 Live touch, plus:
+  - Pinned bubbles (several per chat).
+  - A photo editor (pinch zoom, crop, rotate) for every photo picker.
+  - The partner is told about a new nickname.
+- v25 Question cards: 8 decks that unlock with time together, guess mode, and a Spicier deck both must switch on.
 
 ## Next
 1. Tune the storm size and spacing from the storm test on your phones.
-2. v24: Live touch (Touches Phase 2, below).
-3. v25: Question cards (below).
-4. Time capsule letters, couple games that earn pet coins, shared bucket list with album.
+2. v26: Time capsule letters.
+3. v27: Couple games that earn pet coins.
+4. v28: Shared bucket list with album.
 
 ## Touches (Obimy + tap ME), the long game
 What we take from each:
