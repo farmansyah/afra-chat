@@ -1307,3 +1307,15 @@ body:has(.page:not(.closing)) #tabbar { transform: translate(-50%, 170%); }
 @media (prefers-reduced-motion: reduce) {
   .bk-bar i, .ms-s { transition: none !important; } .mm-show { animation: none; }
 }
+
+/* privacy + notification settings, archive */
+.sfoot { margin: 6px 16px 0; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.sbox + .sfoot + .sbox, .sbox + .sbox { margin-top: 14px; }
+.page.prefs .sbox .tseg { margin: 4px 14px 12px; }
+.page.prefs .tseg button:disabled { opacity: .35; }
+.srow.lab { padding-bottom: 0; } .srow.lab > span { display: flex; flex-direction: column; color: inherit; } .srow.lab small { color: var(--muted); font-size: 12px; }
+.srow input[type="time"] { flex: none; width: auto; text-align: right; }
+.archrow { display: flex; align-items: center; gap: 12px; width: 100%; padding: 12px 16px; border: 0; background: none; color: var(--ink); text-align: left; font: 500 15px var(--sans); }
+.archrow i { font-style: normal; width: 44px; text-align: center; font-size: 22px; } .archrow b { font-weight: 600; }
+.archrow small { margin-left: auto; color: var(--muted); } .archrow u { text-decoration: none; color: var(--muted); font-size: 20px; }
+.conv.swiping { background: color-mix(in srgb, var(--accent) 16%, transparent); }

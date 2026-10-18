@@ -1,7 +1,7 @@
 /* A.F.R.A ♥: works offline (app shell) and shows notifications with the sender's name and message.
    The notification text arrives encrypted for this phone (Web Push, RFC 8291); only this phone can read it. */
-const CACHE = "afra-chat-v28";
-const SHELL = ["./", "index.html", "app.css?v=28", "alive.css?v=28", "theme.css?v=28", "app.js?v=28", "lines.js?v=28", "cards.js?v=28", "games.js?v=28", "templates.json", "manifest.webmanifest", "icon-512.png"];
+const CACHE = "afra-chat-v29";
+const SHELL = ["./", "index.html", "app.css?v=29", "alive.css?v=29", "theme.css?v=29", "app.js?v=29", "lines.js?v=29", "cards.js?v=29", "games.js?v=29", "templates.json", "manifest.webmanifest", "icon-512.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", (e) => {
@@ -29,7 +29,7 @@ self.addEventListener("push", (e) => {
   e.waitUntil((async () => {
     await self.registration.showNotification(d.title || "A.F.R.A ♥", {
       body: d.body || "💌 New message", icon: iconUrl(d.icon), badge: "icon-512.png",
-      tag: d.tag || ("conv-" + (d.conv || 0)), renotify: true, vibrate: Array.isArray(d.vibrate) ? d.vibrate : undefined,
+      tag: d.tag || ("conv-" + (d.conv || 0)), renotify: !d.silent, silent: !!d.silent, vibrate: !d.silent && Array.isArray(d.vibrate) ? d.vibrate : undefined,  // quiet hours: no sound, no buzz
       data: { conv: d.conv || 0, touch: d.touch || 0, us: d.us || 0 } });
     if (self.navigator && self.navigator.setAppBadge && d.badge !== undefined) { try { await self.navigator.setAppBadge(d.badge); } catch (err) { } }
   })());

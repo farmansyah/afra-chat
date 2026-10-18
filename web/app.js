@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 28;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 29;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -154,7 +154,13 @@
   const fileUrl = (id) => `/api/files/${id}?t=${encodeURIComponent(TOKEN)}`;
 
   // ------------------------------------------------------------------ state
-  const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {}, seen: {}, stars: new Set(), nicks: {}, nickFor: {} };
+  const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {}, seen: {}, stars: new Set(), nicks: {}, nickFor: {}, prefs: null, archOpen: false };
+  // Privacy and notification settings: saved per person on the server, cached here so the first screen is right
+  const PD = { read_receipts: true, last_seen: "everyone", typing: true, hide_text: false, hide_sender: false, quiet_on: false, quiet_start: "23:00", quiet_end: "07:00", quiet_touch: true, nudge_on: true, nudge1: 15, nudge2: 45, enter_send: null };
+  const prefs = () => ({ ...PD, ...(S.prefs || store.get("prefs", null) || {}) });
+  async function loadPrefs() { try { S.prefs = await api("/api/me/prefs"); store.set("prefs", S.prefs); } catch { } }
+  const coarse = () => matchMedia("(pointer: coarse)").matches;
+  const enterSends = () => !coarse() && prefs().enter_send !== false;  // touch keyboards always keep Enter as a new line
   const app = $("#app");
   const REACTIONS = ["❤️", "🥰", "😂", "😮", "😢", "🙏", "👍", "🔥"];
   const EMOJIS = "❤️ 🥰 😘 😍 🤗 😊 😁 😂 🥹 😭 😢 🥺 😴 🤔 😮 😎 🙈 🙏 👍 👏 💪 🎉 ✨ 🔥 💯 🌹 🌸 🌙 ☀️ ☕ 🍜 🍦 📚 ✍️ 🎓 💌 💖 💕 💞 💗 🤍 💛 💙 🫶 👀 😅 🙃 😌".split(" ");
@@ -233,6 +239,7 @@
   async function resync() {
     try {
       S.me = await api("/api/me"); pwGate();
+      loadPrefs();
       try { const nk = await api("/api/nicknames"); S.nicks = nk.my_nicks || {}; S.nickFor = nk.nicks_for_me || {}; } catch { }
       S.convs = await api("/api/convs");
       try { S.stars = new Set((await api("/api/stars")).map((m) => m.id)); } catch { }
@@ -294,6 +301,10 @@
       const c = conv(e.conv); if (!c) return;
       if (e.user !== S.me.id) { c.other_read = Math.max(c.other_read || 0, e.at); if (S.cur === c.id) drawChat(); }
       else { c.unread = 0; drawList(); badge(); }
+    } else if (e.t === "prefs") {
+      S.prefs = { ...(S.prefs || {}), ...e.prefs }; store.set("prefs", S.prefs);
+    } else if (e.t === "peer_prefs") {  // someone changed what they share: refetch the chats so ticks and online dots match
+      api("/api/convs").then((cs) => { S.convs = cs; drawAll(); }).catch(() => { });
     } else if (e.t === "typing") {
       S.typing[e.conv] = now() + 5; drawList(); if (S.cur === e.conv) drawHeader();
     } else if (e.t === "presence") {
@@ -398,7 +409,8 @@
   function pinSheet(cid) {
     const c = conv(cid); if (!c) return;
     const pins = pinList(), on = pins.includes(cid);
-    const s = sheet(`<h3>${esc(title(c))}</h3><div class="menu"><button data-p>${on ? "📌 Unpin chat" : "📌 Pin chat"}</button></div>`);
+    const s = sheet(`<h3>${esc(title(c))}</h3><div class="menu"><button data-p>${on ? "📌 Unpin chat" : "📌 Pin chat"}</button><button data-a>${c.archived ? "📤 Unarchive chat" : "📥 Archive chat"}</button></div>`);
+    $("[data-a]", s).onclick = () => { s.remove(); archive(cid, !c.archived); };
     $("[data-p]", s).onclick = () => {
       s.remove();
       if (!on && pins.length >= 3) return toast("You can pin up to 3 chats");
@@ -406,15 +418,39 @@
     };
   }
 
+  async function archive(cid, on) {
+    const c = conv(cid); if (!c) return;
+    c.archived = on; if (on && S.cur === cid) leaveChat(); drawList();  // optimistic
+    try { const v = await api(`/api/convs/${cid}/archive`, { method: "PUT", body: { on } }); const i = S.convs.findIndex((x) => x.id === cid); if (i >= 0) S.convs[i] = { ...S.convs[i], ...v }; cacheSave(); drawList(); toast(on ? "Archived" : "Moved back to your chats"); }
+    catch (e) { c.archived = !on; drawList(); toast(e.message); }
+  }
+  function bindSwipe(d) {  // swipe a chat left (touch) to archive or unarchive it
+    let x0 = 0, y0 = 0, dx = 0, on = false;
+    d.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse") return; x0 = e.clientX; y0 = e.clientY; dx = 0; on = true; });
+    d.addEventListener("pointermove", (e) => {
+      if (!on) return; dx = e.clientX - x0;
+      if (Math.abs(e.clientY - y0) > 14 && Math.abs(dx) < 30) { on = false; d.style.transform = ""; return; }
+      if (dx < -10) { d.style.transition = "none"; d.style.transform = `translateX(${Math.max(dx, -120)}px)`; d.classList.add("swiping"); }
+    });
+    const end = () => {
+      if (!on) return; on = false; d.style.transition = ""; d.style.transform = ""; d.classList.remove("swiping");
+      if (dx < -80) { d._lp = 1; setTimeout(() => { d._lp = 0; }, 400); const c = conv(+d.dataset.c); if (c) archive(c.id, !c.archived); }
+    };
+    d.addEventListener("pointerup", end); d.addEventListener("pointercancel", end);
+  }
+
   function drawList(bumpId) {
     const el = $("#convs"); if (!el) return;
     const before = {}; $$(".conv", el).forEach((d) => { before[d.dataset.c] = d.getBoundingClientRect().top; });
     if (!S.convs.length && !LOADED) { el.innerHTML = [1, 2, 3, 4].map(() => `<div class="skeleton"><i style="width:44px;height:44px;border-radius:50%"></i><span style="flex:1"><i style="width:45%;height:13px;margin-bottom:8px"></i><i style="width:75%;height:11px"></i></span></div>`).join(""); return; }
     const t = now();
-    const pins = pinList(), items = S.convs.filter((c) => !S.filter || title(c).toLowerCase().includes(S.filter) || (other(c) && other(c).username.includes(S.filter)));
+    const pins = pinList(), nArch = S.convs.filter((c) => c.archived).length, nUnr = S.convs.reduce((n, c) => n + (c.archived ? c.unread || 0 : 0), 0);
+    if (!nArch) S.archOpen = false;
+    const items = S.convs.filter((c) => S.filter ? title(c).toLowerCase().includes(S.filter) || (other(c) && other(c).username.includes(S.filter)) : !!c.archived === S.archOpen);  // searching looks through archived chats too
     const rank = (id) => { const i = pins.indexOf(id); return i < 0 ? 99 : i; };
     items.sort((x, y) => rank(x.id) - rank(y.id));  // pinned chats first (the sort keeps everything else in order)
-    el.innerHTML = items.map((c) => {
+    const archRow = S.filter ? "" : S.archOpen ? `<button class="archrow" data-arch="0"><i>‹</i><b>Archived chats</b><small>Back to chats</small></button>` : nArch ? `<button class="archrow" data-arch="1"><i>📥</i><b>Archived</b><small>${nArch}</small>${nUnr ? `<span class="badge quiet">${nUnr}</span>` : ""}<u>›</u></button>` : "";
+    el.innerHTML = archRow + items.map((c) => {
       const u = other(c), typing = (S.typing[c.id] || 0) > t;
       const last = c.kind === "pet" && c.pet ? petSub(c) : c.last ? (c.last.sender === S.me.id && c.kind !== "self" ? "You: " : "") + preview(c.last) : c.kind === "self" ? "Keep notes, links and photos for yourself" : c.kind === "bot" ? "Reminders, notes, lists, questions" : "Say hi 👋";
       return `<div class="conv ${S.cur === c.id ? "on" : ""} ${c.kind === "pet" && c.pet && c.pet.needs_care ? "needs" : ""}" data-c="${c.id}">
@@ -422,9 +458,10 @@
         <div class="mid"><div class="row1"><b>${esc(title(c))}</b>${pins.includes(c.id) ? `<i class="pin" title="Pinned">📌</i>` : ""}<small>${c.last ? shortTime(c.last.created) : ""}</small></div>
           <div class="row2"><span class="${typing ? "typing" : ""}">${typing ? "typing…" : esc(last)}</span>${isMuted(c) ? `<i class="muted">🔕</i>` : ""}${c.unread ? `<span class="badge ${isMuted(c) ? "quiet" : ""}">${c.unread}</span>` : ""}</div></div></div>`;
     }).join("") || `<div class="empty">No chats yet.<br><small>Tap 💬 at the bottom right to start one.</small></div>`;
+    $$(".archrow", el).forEach((b) => { b.onclick = () => { S.archOpen = b.dataset.arch === "1"; drawList(); }; });
     $$(".conv", el).forEach((d) => {
       d.onclick = () => { if (d._lp) { d._lp = 0; return; } openConv(+d.dataset.c); };
-      bindPin(d);
+      bindPin(d); bindSwipe(d);
       const was = before[d.dataset.c], top = d.getBoundingClientRect().top;
       if (was !== undefined && Math.abs(was - top) > 2 && d.animate) d.animate([{ transform: `translateY(${was - top}px)` }, { transform: "none" }], { duration: 320, easing: "cubic-bezier(.2,.8,.2,1)" });
       if (+d.dataset.c === bumpId) d.classList.add("bump");
@@ -481,8 +518,8 @@
       $("#quick").classList.toggle("hide", typed);
     };
     let lastTyping = 0;
-    txt.oninput = () => { grow(); if (txt.value && now() - lastTyping > 3 && c.kind !== "self" && c.kind !== "bot") { lastTyping = now(); api(`/api/convs/${c.id}/typing`, { body: {} }).catch(() => { }); } };
-    txt.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); sendText(); } if (e.key === "Escape") { S.reply = S.edit = null; drawReply(); } };
+    txt.oninput = () => { grow(); if (txt.value && prefs().typing && now() - lastTyping > 3 && c.kind !== "self" && c.kind !== "bot") { lastTyping = now(); api(`/api/convs/${c.id}/typing`, { body: {} }).catch(() => { }); } };
+    txt.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && enterSends()) { e.preventDefault(); sendText(); } if (e.key === "Escape") { S.reply = S.edit = null; drawReply(); } };
     $("#bsend").onclick = () => (txt.value.trim() || S.edit) ? sendText() : toggleVoice();
     $("#battach").onclick = attachMenu;
     $(".top .who", pane).onclick = infoPage; $("#chatAv").onclick = infoPage;
@@ -1139,7 +1176,7 @@
       URL.revokeObjectURL(it.url); it.f = new File([b], (it.f.name || "photo").replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" }); it.url = URL.createObjectURL(it.f); paint();
     };
     cap.oninput = () => { cap.style.height = "auto"; cap.style.height = Math.min(cap.scrollHeight, 120) + "px"; };
-    cap.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); go(); } };
+    cap.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && enterSends()) { e.preventDefault(); go(); } };
     paint();
   }
   function videoInfo(file) {  // size, length and a poster frame for a video (best effort: some phones say no)
@@ -2507,7 +2544,7 @@
   }
   function logout(expired) {
     if (!expired) api("/api/logout", { body: {}, noLogout: true }).catch(() => { });
-    TOKEN = ""; store.del("token"); store.del("cache"); store.del("outbox"); store.del("lastsync"); lastSync = 0;
+    TOKEN = ""; store.del("token"); store.del("cache"); store.del("outbox"); store.del("prefs"); S.prefs = null; S.archOpen = false; store.del("lastsync"); lastSync = 0;
     if (WS) { const w = WS; WS = null; w.close(); }
     unmountTabs(); S.me = null; S.convs = []; S.msgs = {}; S.cur = null; $$("#pwgate").forEach((g) => g.remove());
     authScreen("login"); if (expired) toast("Please log in again");
@@ -2996,6 +3033,59 @@
     $("#lreset", s).onclick = () => { l = { ...LOOK_DEFAULT }; store.del("look"); applyLook(l); mark(); };
     mark();
   }
+  // ---- Privacy and Notifications pages (Settings): grouped lists, each change is saved at once and follows you to every device
+  async function setPref(patch) {
+    const old = S.prefs; S.prefs = { ...prefs(), ...patch };
+    try { S.prefs = await api("/api/me/prefs", { method: "PUT", body: patch }); store.set("prefs", S.prefs); return true; }
+    catch (e) { S.prefs = old; toast(e.message); return false; }
+  }
+  function prefsPage(kind) {
+    const priv = kind === "privacy", page = document.createElement("div"); page.className = "page prefs";
+    page.innerHTML = `<div class="top"><button class="icon" id="pBack">‹</button><h1>${priv ? "🔒 Privacy" : "🔔 Notifications"}</h1></div><div class="page-body"><div class="st" id="pf"></div></div>`;
+    document.body.appendChild(page);
+    const pclose = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    layer(page, pclose); $("#pBack", page).onclick = pclose;
+    const box = $("#pf", page), MIN = [10, 15, 30, 45, 60];
+    const sw = (k, label, sub, on) => `<label class="swrow"><span><b>${label}</b>${sub ? `<small>${sub}</small>` : ""}</span><input type="checkbox" class="swtog" data-k="${k}" ${on ? "checked" : ""}></label>`;
+    const seg = (k, opts, cur, off) => `<div class="tseg">${opts.map(([v, t]) => `<button data-k="${k}" data-v="${v}" class="${v === cur ? "on" : ""}" ${off && off(v) ? "disabled" : ""}>${t}</button>`).join("")}</div>`;
+    const foot = (t) => `<p class="sfoot">${t}</p>`;
+    const draw = () => {
+      const p = prefs(), sy = $(".page-body", page).scrollTop;
+      if (priv) box.innerHTML = `
+        <h5>Seen and typing</h5><div class="sbox">${sw("read_receipts", "Read receipts", "Show when you have read a message", p.read_receipts)}</div>
+        ${foot("If you turn this off, you won't see when others have read your messages either. Delivered ticks stay, and unread reminders still work.")}
+        <div class="sbox"><div class="srow lab"><span><b>Last seen and online</b><small>Who can see them</small></span></div>${seg("last_seen", [["everyone", "Everyone"], ["nobody", "Nobody"]], p.last_seen)}</div>
+        ${foot("If you pick Nobody, you won't see anyone else's last seen or online status either.")}
+        <div class="sbox">${sw("typing", "Typing indicator", "Show when you are typing", p.typing)}</div>
+        ${foot("If you turn this off, you won't see when others are typing either.")}
+        <h5>In notifications</h5><div class="sbox">${sw("hide_text", "Hide message text", "Notifications just say \u201CNew message\u201D, with no text or photo", p.hide_text)}${sw("hide_sender", "Hide sender", "Notifications say \u201CAFRA chat\u201D instead of the name", p.hide_sender)}</div>
+        ${foot("Touches and storms keep their short text.")}`;
+      else {
+        const gap = (v) => v <= p.nudge1;
+        box.innerHTML = `
+        <h5>Quiet hours</h5><div class="sbox">${sw("quiet_on", "Quiet hours", "No sound or buzz while you sleep", p.quiet_on)}
+          ${p.quiet_on ? `<label class="srow"><span>From</span><input type="time" data-k="quiet_start" value="${p.quiet_start}"></label><label class="srow"><span>Until</span><input type="time" data-k="quiet_end" value="${p.quiet_end}"></label>${sw("quiet_touch", "Let touches through", "Touches and buzzes still vibrate", p.quiet_touch)}` : ""}</div>
+        ${foot(p.quiet_on ? `Messages still arrive, but silently. Unread reminders are skipped, and a storm becomes one gentle notification. Uses your time zone${p.tz ? " (" + esc(p.tz) + ")" : ""}${p.quiet_now ? ". It is quiet for you right now." : "."}` : "Turn on to make notifications silent at night.")}
+        <h5>Unread reminders</h5><div class="sbox">${sw("nudge_on", "Remind me", "A gentle push when a message to you is still unread", p.nudge_on)}
+          ${p.nudge_on ? `<div class="srow lab"><span><b>First reminder</b><small>after</small></span></div>${seg("nudge1", MIN.map((m) => [m, m + " min"]), p.nudge1, (v) => v >= 60)}<div class="srow lab"><span><b>Second reminder</b><small>after</small></span></div>${seg("nudge2", MIN.map((m) => [m, m + " min"]), p.nudge2, gap)}` : ""}</div>
+        ${foot("Never during quiet hours.")}
+        ${coarse() ? "" : `<h5>Typing</h5><div class="sbox">${sw("enter_send", "Enter to send", "Off: Enter adds a new line", p.enter_send !== false)}</div>${foot("Shift+Enter always adds a new line. On a phone, Enter is always a new line.")}`}
+        ${foot("Touches have their own quiet hours too: see Touches in Settings.")}`;
+      }
+      $(".page-body", page).scrollTop = sy;
+      $$("input[type=checkbox][data-k]", box).forEach((i) => { i.onchange = async () => { await setPref({ [i.dataset.k]: i.checked }); draw(); }; });
+      $$("input[type=time][data-k]", box).forEach((i) => { i.onchange = async () => { if (i.value) await setPref({ [i.dataset.k]: i.value }); draw(); }; });
+      $$("button[data-k]", box).forEach((b) => {
+        b.onclick = async () => {
+          const k = b.dataset.k, v = k === "last_seen" ? b.dataset.v : +b.dataset.v, patch = { [k]: v };
+          if (k === "nudge1" && v >= p.nudge2) patch.nudge2 = MIN.find((m) => m > v);
+          await setPref(patch); draw();
+        };
+      });
+    };
+    draw(); loadPrefs().then(draw);
+  }
+
   function drawSettings() {
     const box = $(".tabpage[data-tp=settings] .tp-scroll"); if (!box) return;
     const sy = box.scrollTop, me = S.me, pushOn = "Notification" in window && Notification.permission === "granted", bot = S.convs.find((c) => c.kind === "bot");
@@ -3011,6 +3101,7 @@
         <label class="swrow"><span><b>Soft sounds</b><small>When sending and receiving</small></span><input type="checkbox" class="swtog" id="tsound" ${store.get("sound", true) ? "checked" : ""}></label></div>
       <h5>Notifications</h5><div class="sbox">${isIOS && !standalone ? `<div class="note warn" style="margin:10px">📲 On iPhone, notifications work in the Home Screen app: tap <b>Share</b> ⬆ then <b>Add to Home Screen</b>, and open A.F.R.A ♥ from its icon.</div>`
         : `<button class="srow act" id="sPush">${pushOn ? "✓ Notifications are on" : "Turn on notifications"}</button>${pushOn ? `<button class="srow act" id="sTest">Send me a test</button>` : ""}`}</div>
+      <h5>Privacy and alerts</h5><div class="sbox">${row("sPriv", "🔒", "Privacy", "Read receipts, last seen, typing")}${row("sNotif", "🔔", "Notifications", "Quiet hours, reminders, Enter to send")}</div>
       <h5>Touches</h5><div class="sbox pad" id="sTouch"><small class="hint">Loading…</small></div>
       <h5>Friends</h5><div class="sbox">${row("sInv", "👋", "Invite a friend", "Make a link just for them")}</div>
       <h5>Assistant</h5><div class="sbox">${row("sBot", "✨", "Open the Assistant", "Reminders, notes, lists and places")}</div>
@@ -3032,6 +3123,7 @@
       catch (x) { toast(x.message); }
     };
     $("#sAcct", box).onclick = profileSheet;
+    $("#sPriv", box).onclick = () => prefsPage("privacy"); $("#sNotif", box).onclick = () => prefsPage("notif");
     touchPrefsInit($("#sTouch", box));
     const pu = $("#sPush", box); if (pu) pu.onclick = async () => { toast(await enablePush(true)); drawSettings(); };
     const te = $("#sTest", box); if (te) te.onclick = () => api("/api/push/test", { body: {} }).then(() => toast("Sent: lock your phone to see it")).catch((x) => toast(x.message));
@@ -4569,7 +4661,7 @@
     if (!TOKEN) return authScreen();
     S.me = S.me || store.get("cache", {}).me || null;
     if (!S.me) { try { S.me = await api("/api/me"); } catch (e) { if (!TOKEN) return; return authScreen(); } }
-    cacheLoad(); shell(); connect(); pwGate(); reportDevice();
+    cacheLoad(); shell(); connect(); pwGate(); reportDevice(); loadPrefs();
     toAfra({ type: "ready", me: { username: S.me.username, name: S.me.name } });
     const want = +(new URLSearchParams(location.hash.slice(1)).get("c") || 0);
     let back = null; try { back = JSON.parse(sessionStorage.getItem("afra_resume") || "null"); sessionStorage.removeItem("afra_resume"); } catch { }

@@ -138,6 +138,9 @@ CREATE TABLE IF NOT EXISTS bucket (id INTEGER PRIMARY KEY, conv_id INTEGER, titl
   photos TEXT DEFAULT '[]', paid INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS bucket_conv ON bucket(conv_id, done, created);
 CREATE TABLE IF NOT EXISTS mem_fav (conv_id INTEGER, file_id TEXT, fav_by INTEGER, at REAL, PRIMARY KEY (conv_id, file_id));
+-- v29: privacy and notification settings (one JSON per person, follows them across devices) and per-person archived chats
+CREATE TABLE IF NOT EXISTS user_prefs (user_id INTEGER PRIMARY KEY, data TEXT DEFAULT '{}');
+CREATE TABLE IF NOT EXISTS chat_archive (user_id INTEGER, conv_id INTEGER, at REAL, PRIMARY KEY (user_id, conv_id));
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
@@ -190,6 +193,44 @@ US_INVITED: dict[int, float] = {}  # user id -> last "Come to Us" push
 NICK_WAIT: dict[tuple, "asyncio.Task"] = {}  # (who named, who was named) -> the notice that goes out once the name stops changing
 NICK_DEBOUNCE = float(os.environ.get("AFRA_NICK_DEBOUNCE", 45))  # seconds
 PIN_MAX = 20
+
+
+# ---------------------------------------------------------------- v29: privacy and notification settings (server side, so they follow you across devices)
+PREF_DEFAULTS = {"read_receipts": True, "last_seen": "everyone", "typing": True, "hide_text": False, "hide_sender": False,
+                 "quiet_on": False, "quiet_start": "23:00", "quiet_end": "07:00", "quiet_touch": True,
+                 "nudge_on": True, "nudge1": 15, "nudge2": 45, "enter_send": None}  # enter_send None = Enter sends on a computer, not on a phone
+PREF_BOOLS = ("read_receipts", "typing", "hide_text", "hide_sender", "quiet_on", "quiet_touch", "nudge_on")
+NUDGE_MINUTES = (10, 15, 30, 45, 60)
+PREFS: dict[int, dict] = {}  # user id -> prefs (this is one process, so a cache here is always current)
+
+
+def prefs_of(uid: int) -> dict:
+    p = PREFS.get(uid)
+    if p is None:
+        with closing(db()) as c:
+            r = c.execute("SELECT data FROM user_prefs WHERE user_id=?", (uid,)).fetchone()
+        try:
+            saved = json.loads(r["data"]) if r else {}
+        except ValueError:
+            saved = {}
+        p = PREFS[uid] = {**PREF_DEFAULTS, **{k: v for k, v in saved.items() if k in PREF_DEFAULTS}}
+    return p
+
+
+def _relay_ok(t: str, frm: int, to: int) -> bool:
+    """Reciprocal like WhatsApp: a read tick, typing or last seen only travels when BOTH people allow it."""
+    if frm == to:
+        return True
+    a, b = prefs_of(frm), prefs_of(to)
+    if t == "read":
+        return a["read_receipts"] and b["read_receipts"]
+    if t == "typing":
+        return a["typing"] and b["typing"]
+    return a["last_seen"] == "everyone" and b["last_seen"] == "everyone"  # presence
+
+
+def shows_presence(viewer: int, uid: int) -> bool:
+    return _relay_ok("presence", uid, viewer)
 
 
 @app.exception_handler(ValueError)
@@ -286,10 +327,14 @@ def throttle(key: str):
     ATTEMPTS[key] = tries + [now]
 
 
-def public(u) -> dict:
+def public(u, viewer: int = 0) -> dict:
+    """With `viewer`, online and last seen are left out when either of you hides them (the admin lists pass no viewer)."""
     online = bool(SOCKETS.get(u["id"]))
-    return {"id": u["id"], "username": u["username"], "name": u["name"], "avatar": u["avatar"], "is_admin": bool(u["is_admin"]),
-            "online": online, "last_seen": time.time() if online else u["last_seen"], "bio": u["bio"] or "", "bot": int(u["bot"] or 0)}
+    d = {"id": u["id"], "username": u["username"], "name": u["name"], "avatar": u["avatar"], "is_admin": bool(u["is_admin"]),
+         "online": online, "last_seen": time.time() if online else u["last_seen"], "bio": u["bio"] or "", "bot": int(u["bot"] or 0)}
+    if viewer and viewer != u["id"] and not d["bot"] and not shows_presence(viewer, u["id"]):
+        d["online"], d["last_seen"] = False, 0
+    return d
 
 
 def make_code(c, kind="invite", admin_=0, by=None, note="", for_name="") -> str:
@@ -515,17 +560,17 @@ def search_users(q: str = "", authorization: str = Header(None)):
     with closing(db()) as c:
         rows = c.execute("""SELECT * FROM users WHERE disabled=0 AND id<>? AND (username LIKE ? OR lower(name) LIKE ?)
                             ORDER BY (username LIKE ?) DESC, username LIMIT 8""", (u["id"], f"%{q}%", f"%{q}%", f"{q}%")).fetchall()
-    return [public(r) for r in rows]
+    return [public(r, u["id"]) for r in rows]
 
 
 @app.get("/api/users/{username}")
 def find_user(username: str, authorization: str = Header(None)):
-    auth(authorization)
+    me = auth(authorization)
     with closing(db()) as c:
         u = c.execute("SELECT * FROM users WHERE username=? AND disabled=0", (username.strip().lower().lstrip("@"),)).fetchone()
     if not u:
         raise HTTPException(404, f"Nobody is called @{username.strip().lstrip('@')} here.")
-    return public(u)
+    return public(u, me["id"])
 
 
 # ---------------------------------------------------------------- conversations
@@ -563,14 +608,16 @@ def pins_of(c, cid: int) -> list:
 
 def conv_view(c, cid: int, uid: int) -> dict:
     cv = c.execute("SELECT * FROM convs WHERE id=?", (cid,)).fetchone()
-    others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>? AND (u.bot<>2 OR ?<>'pet')", (cid, uid, cv["kind"]))]
+    others = [public(r, uid) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>? AND (u.bot<>2 OR ?<>'pet')", (cid, uid, cv["kind"]))]
     mine = c.execute("SELECT last_read, style, muted, nudge_on FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
     last = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
     unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('pinact','card','game') AND created>?",
                        (cid, uid, mine["last_read"] if mine else 0)).fetchone()[0]
-    other_read = max([r["last_read"] for r in c.execute("SELECT last_read FROM members WHERE conv_id=? AND user_id<>?", (cid, uid))] or [0])
+    other_read = max([r["last_read"] for r in c.execute("SELECT last_read, user_id FROM members WHERE conv_id=? AND user_id<>?", (cid, uid))
+                      if _relay_ok("read", r["user_id"], uid)] or [0])  # read ticks only when both of you share them
     return {"id": cid, "kind": cv["kind"], "members": others, "last": msg_view(last) if last else None, "unread": unread,
             "last_at": cv["last_at"], "other_read": other_read,
+            "archived": bool(c.execute("SELECT 1 FROM chat_archive WHERE user_id=? AND conv_id=?", (uid, cid)).fetchone()),
             "pins": pins_of(c, cid),
             "style": json.loads(cv["style"] or "{}"), "my_style": json.loads((mine["style"] if mine else "") or "{}"),
             "muted": (mine["muted"] or 0) if mine and (mine["muted"] or 0) > time.time() else 0,
@@ -928,6 +975,74 @@ def conv_media(cid: int, type: str = "media", before: int = 0, authorization: st
         for m in out:
             m["links"] = LINK.findall(m["text"])[:5]
     return out
+
+
+@app.put("/api/convs/{cid}/archive")
+async def set_archive(cid: int, body: dict, authorization: str = Header(None)):
+    """Archive a chat for me: {"on": true|false}. A new message keeps it archived (it still notifies, unless muted)."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        if body.get("on"):
+            c.execute("INSERT OR IGNORE INTO chat_archive (user_id, conv_id, at) VALUES (?,?,?)", (u["id"], cid, time.time()))
+        else:
+            c.execute("DELETE FROM chat_archive WHERE user_id=? AND conv_id=?", (u["id"], cid))
+        c.commit()
+        view = conv_view(c, cid, u["id"])
+    await send_to(u["id"], {"t": "conv", "conv": view})
+    return view
+
+
+@app.get("/api/me/prefs")
+def prefs_get(authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        tz = _tz(c, u["id"])
+    return {**prefs_of(u["id"]), "tz": getattr(tz, "key", str(tz)), "quiet_now": quiet_now(u["id"])}
+
+
+@app.put("/api/me/prefs")
+async def prefs_put(body: dict, authorization: str = Header(None)):
+    """Privacy and notification settings, saved per person (so they follow you to every device). Send only what changed."""
+    u = auth(authorization)
+    old = prefs_of(u["id"])
+    p = dict(old)
+    for k in PREF_BOOLS:
+        if k in body:
+            p[k] = bool(body[k])
+    if "last_seen" in body:
+        if body["last_seen"] not in ("everyone", "nobody"):
+            raise ValueError("Last seen is for everyone or nobody")
+        p["last_seen"] = body["last_seen"]
+    for k in ("quiet_start", "quiet_end"):
+        if k in body:
+            if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", str(body[k]).strip()):
+                raise ValueError("Use a time like 23:00")
+            p[k] = _hhmm(body[k], p[k])
+    for k in ("nudge1", "nudge2"):
+        if k in body:
+            try:
+                p[k] = int(body[k])
+            except (TypeError, ValueError):
+                raise ValueError("Pick one of 10, 15, 30, 45 or 60 minutes")
+            if p[k] not in NUDGE_MINUTES:
+                raise ValueError("Pick one of 10, 15, 30, 45 or 60 minutes")
+    if p["nudge2"] <= p["nudge1"]:
+        raise ValueError("The second reminder has to come after the first")
+    if "enter_send" in body:
+        p["enter_send"] = None if body["enter_send"] is None else bool(body["enter_send"])
+    with closing(db()) as c:
+        c.execute("INSERT OR REPLACE INTO user_prefs (user_id, data) VALUES (?,?)", (u["id"], json.dumps(p)))
+        c.commit()
+        peers = {r[0] for r in c.execute("""SELECT DISTINCT m2.user_id FROM members m1 JOIN members m2 ON m1.conv_id=m2.conv_id
+                                            WHERE m1.user_id=? AND m2.user_id<>?""", (u["id"], u["id"]))}
+        tz = _tz(c, u["id"])
+    PREFS[u["id"]] = p
+    await send_to(u["id"], {"t": "prefs", "prefs": p})  # my other devices
+    if any(old[k] != p[k] for k in ("read_receipts", "last_seen", "typing")):
+        for x in peers:
+            await send_to(x, {"t": "peer_prefs"})  # they reload their chats: what they may see of me just changed
+    return {**p, "tz": getattr(tz, "key", str(tz)), "quiet_now": quiet_now(u["id"])}
 
 
 @app.post("/api/convs/{cid}/read")
@@ -1338,7 +1453,9 @@ async def fire_reminder(r):
 
 
 async def _nudge_unread():
-    """1:1 chats: when the other person's message is still unread, nudge at 15 and again at 45 minutes after the OLDEST unread one."""
+    """1:1 chats: when the other person's message is still unread, nudge at their first timing (15 min) and again at their second (45)
+    after the OLDEST unread one. "Unread" is the server's own last_read, so it works whatever read receipts are shown.
+    Never in the receiver's quiet hours: those nudges are dropped, not held until morning."""
     t = time.time()
     with closing(db()) as c:
         c.execute("""UPDATE members SET nudged=0 WHERE nudged>0 AND NOT EXISTS (SELECT 1 FROM messages ms WHERE ms.conv_id=members.conv_id
@@ -1347,11 +1464,18 @@ async def _nudge_unread():
                             JOIN convs cv ON cv.id=m.conv_id AND cv.kind='direct'
                             JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card','game') AND ms.created>m.last_read
                             WHERE m.nudge_on=1 AND m.nudged<2 AND m.muted<=?
-                            GROUP BY m.conv_id, m.user_id HAVING MIN(ms.created)<=?""", (t, t - 900)).fetchall()
+                            GROUP BY m.conv_id, m.user_id HAVING MIN(ms.created)<=?""", (t, t - 600)).fetchall()
         todo = []
         for r in rows:
-            stage = 2 if t - r["oldest"] >= 2700 and r["nudged"] == 1 else 1 if r["nudged"] == 0 else 0
+            pf = prefs_of(r["user_id"])
+            if not pf["nudge_on"]:
+                continue
+            age, n1, n2 = t - r["oldest"], pf["nudge1"] * 60, pf["nudge2"] * 60
+            stage = (1 if age < n2 else 2) if r["nudged"] == 0 and age >= n1 else 2 if r["nudged"] == 1 and age >= n2 else 0
             if not stage:
+                continue
+            if in_quiet(pf, _tz(c, r["user_id"]), t):
+                c.execute("UPDATE members SET nudged=2 WHERE conv_id=? AND user_id=?", (r["conv_id"], r["user_id"]))
                 continue
             m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('touch','pinact','card','game') AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
                              ORDER BY id LIMIT 1""", (r["conv_id"], r["user_id"], r["conv_id"], r["user_id"])).fetchone()
@@ -1365,10 +1489,11 @@ async def _nudge_unread():
         with closing(db()) as c:
             _n = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (uid, sender["id"])).fetchone()
         first = _n[0] if _n else first
+        icon = f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"
         if stage == 1:
-            await push_to([uid], {"title": f"💌 {first} is waiting for you", "body": _push_body(m)[:180], "conv": m["conv_id"], "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
+            await push_to([uid], {"title": f"💌 {first} is waiting for you", "body": _push_body(m)[:180], "conv": m["conv_id"], "icon": icon})
         else:
-            await push_to([uid], {"title": "Still there?", "body": f"{first}'s message from 45 min ago is unread", "conv": m["conv_id"], "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
+            await push_to([uid], {"title": "Still there?", "body": f"{first}'s message is still unread", "conv": m["conv_id"], "icon": icon})
 
 
 async def _reminders():
@@ -4467,6 +4592,8 @@ async def mem_fav_set(cid: int, body: dict, authorization: str = Header(None)):
 
 # ---------------------------------------------------------------- live updates (one WebSocket per device)
 async def send_to(uid: int, msg: dict):
+    if msg.get("t") in ("read", "typing", "presence") and not _relay_ok(msg["t"], msg.get("user") or 0, uid):
+        return  # v29: this is the one place read ticks, typing and online status leave the server
     for dev, s in list(SOCKETS.get(uid, {}).items()):
         try:
             await s["ws"].send_text(json.dumps(msg))
@@ -4490,7 +4617,7 @@ async def announce_profile(u):
         peers = {r[0] for r in c.execute("""SELECT DISTINCT m2.user_id FROM members m1 JOIN members m2 ON m1.conv_id=m2.conv_id
                                             WHERE m1.user_id=?""", (u["id"],))}
     for p in peers:
-        await send_to(p, {"t": "profile", "user": public(u)})
+        await send_to(p, {"t": "profile", "user": public(u, p)})
 
 
 def _app_version() -> str:
@@ -4671,7 +4798,7 @@ async def us_invite(cid: int, authorization: str = Header(None)):
     push = pr["mode"] != "off" and not quiet
     if push:
         asyncio.create_task(push_to([peer], {"title": (nick[0] if nick else None) or u["name"] or u["username"], "body": "Come to Us 🫶", "conv": cid, "us": cid,
-                                             "tag": f"us-{cid}", "icon": f"/api/avatar/{u['id']}" if u["avatar"] else "/icon-512.png", "vibrate": [80, 50, 80]}))
+                                             "tag": f"us-{cid}", "icon": f"/api/avatar/{u['id']}" if u["avatar"] else "/icon-512.png", "vibrate": [80, 50, 80], "k": "touch"}))
     return {"here": False, "sent": True, "push": push}
 
 
@@ -4719,9 +4846,34 @@ def encrypt_push(sub: dict, payload: bytes) -> bytes:
     return salt + (4096).to_bytes(4, "big") + bytes([len(eph_pub)]) + eph_pub + AESGCM(cek).encrypt(nonce, payload + b"\x02", None)
 
 
+def quiet_now(uid: int, at: float = 0) -> bool:
+    p = prefs_of(uid)
+    if not p["quiet_on"]:
+        return False
+    with closing(db()) as c:
+        return in_quiet(p, _tz(c, uid), at)
+
+
+def shape_push(uid: int, payload: dict, at: float = 0) -> dict:
+    """What THIS person's notification may say, from their own settings. payload["k"] says what it is: "" (carries private content),
+    "touch" (a short touch line: nothing to hide, may buzz in quiet hours), "sys" (an announcement or test: shown as is)."""
+    p, pf = dict(payload), prefs_of(uid)
+    k = p.pop("k", "")
+    if k != "sys":
+        if pf["hide_text"] and k != "touch":
+            p["body"] = "New message"
+        if pf["hide_sender"]:
+            p["title"], p["icon"] = "AFRA chat", "/icon-512.png"
+    if quiet_now(uid, at) and not (k == "touch" and pf["quiet_touch"]):
+        p["silent"], p["renotify"] = True, False  # quiet hours: it still arrives, without sound or vibration (nothing is held back or lost)
+        p.pop("vibrate", None)
+    return p
+
+
 async def push_to(uids: list[int], payload: dict, skip_visible=True):
     with closing(db()) as c:
         rows = c.execute(f"SELECT * FROM pushes WHERE user_id IN ({','.join('?' * len(uids))})", uids).fetchall() if uids else []
+    shaped: dict[int, dict] = {}
     async with httpx.AsyncClient(timeout=15) as h:
         for r in rows:
             devs = SOCKETS.get(r["user_id"], {})
@@ -4732,7 +4884,8 @@ async def push_to(uids: list[int], payload: dict, skip_visible=True):
                 with closing(db()) as c:
                     badge = c.execute("""SELECT COUNT(*) FROM messages ms JOIN members mb ON mb.conv_id=ms.conv_id AND mb.user_id=?
                                          WHERE ms.sender<>? AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card','game') AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
-                body = encrypt_push(sub, json.dumps({**payload, "badge": badge}).encode()[:3800])
+                pl = shaped.get(r["user_id"]) or shaped.setdefault(r["user_id"], shape_push(r["user_id"], payload))
+                body = encrypt_push(sub, json.dumps({**pl, "badge": badge}).encode()[:3800])
                 resp = await h.post(sub["endpoint"], content=body, headers={
                     "Authorization": _vapid_header(sub["endpoint"]), "Content-Encoding": "aes128gcm",
                     "Content-Type": "application/octet-stream", "TTL": "86400", "Urgency": "high"})
@@ -4787,7 +4940,7 @@ def add_push(body: dict, authorization: str = Header(None)):
 @app.post("/api/push/test")
 async def test_push(authorization: str = Header(None)):
     u = auth(authorization)
-    await push_to([u["id"]], {"title": "A.F.R.A ♥", "body": "Notifications work! 💌", "conv": 0, "icon": "/icon-512.png"}, skip_visible=False)
+    await push_to([u["id"]], {"title": "A.F.R.A ♥", "body": "Notifications work! 💌", "conv": 0, "icon": "/icon-512.png", "k": "sys"}, skip_visible=False)
     return {"ok": True}
 
 
@@ -4943,6 +5096,9 @@ async def admin_delete(uid: int, authorization: str = Header(None)):
         c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         c.execute("DELETE FROM pushes WHERE user_id=?", (uid,))
         c.execute("DELETE FROM touch_prefs WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM user_prefs WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM chat_archive WHERE user_id=?", (uid,))
+        PREFS.pop(uid, None)
         c.execute("DELETE FROM touch_seen WHERE user_id=?", (uid,))
         for tr in c.execute("SELECT id FROM touches WHERE sender=?", (uid,)).fetchall():
             c.execute("DELETE FROM touch_seen WHERE touch_id=?", (tr[0],))
@@ -5073,7 +5229,7 @@ async def admin_broadcast(body: dict, authorization: str = Header(None)):
         uids = [r["id"] for r in c.execute("SELECT id FROM users WHERE bot=0 AND disabled=0")]
         devices = c.execute(f"SELECT COUNT(*) FROM pushes WHERE user_id IN ({','.join('?' * len(uids))})", uids).fetchone()[0] if uids else 0
     refresh = bool(body.get("refresh"))
-    await push_to(uids, {"title": title, "body": text, "conv": 0, "tag": "broadcast", "icon": "/icon-512.png", **({"update": 1} if refresh else {})}, skip_visible=False)
+    await push_to(uids, {"title": title, "body": text, "conv": 0, "tag": "broadcast", "icon": "/icon-512.png", "k": "sys", **({"update": 1} if refresh else {})}, skip_visible=False)
     if refresh:
         for uid in uids:
             await send_to(uid, {"t": "update", "version": APP_VERSION})
@@ -5552,11 +5708,11 @@ def _hhmm(s, default: str) -> str:
     return f"{int(m.group(1)):02d}:{m.group(2)}" if m else default
 
 
-def in_quiet(pr: dict, tz) -> bool:
+def in_quiet(pr: dict, tz, at: float = 0) -> bool:
     if not pr["quiet_on"]:
         return False
     mins = lambda s: int(s[:2]) * 60 + int(s[3:])
-    a, b, now_ = mins(pr["quiet_start"]), mins(pr["quiet_end"]), datetime.now(tz)
+    a, b, now_ = mins(pr["quiet_start"]), mins(pr["quiet_end"]), datetime.fromtimestamp(at, tz) if at else datetime.now(tz)
     t = now_.hour * 60 + now_.minute
     if a == b:
         return False
@@ -5606,8 +5762,8 @@ async def run_storm(tid: int, sender, rid: int, cid: int, n: int, gap_ms: int, a
                 t_step = time.time()
                 if us_present(cid, rid):
                     break  # they came into the Us screen meanwhile: they feel it live now
-                payload = {"title": title, "body": touch_line(action, word, i, n, count)[:180], "conv": cid, "touch": tid, "tag": f"touch-{tid}-{i}",
-                           "icon": icon, "vibrate": _buzz(strength), "renotify": True}
+                payload = shape_push(rid, {"title": title, "body": touch_line(action, word, i, n, count)[:180], "conv": cid, "touch": tid, "tag": f"touch-{tid}-{i}",
+                                           "icon": icon, "vibrate": _buzz(strength), "renotify": True, "k": "touch"})
                 devs = SOCKETS.get(rid, {})
                 targets = [r for r in rows if not any(s_["visible"] for d, s_ in devs.items() if d == r["device"] or d.startswith(r["device"] + "."))]
                 # every phone gets this step at the same moment (a slow service must not delay the others)
@@ -5721,6 +5877,8 @@ async def touch_send(cid: int, body: dict, authorization: str = Header(None)):
         smax, gap = storm_settings()
         # how many notifications: about one per tap (a bit more for a firm touch), within the limits
         n = 1 if (count <= 1 or word) else max(1, min(smax, math.ceil(count * (0.6 + 0.2 * strength))))
+        if quiet_now(peer["id"]):
+            n = 1  # their quiet hours (Settings > Notifications): a storm becomes one gentle notification
         pr = touch_prefs(c, peer["id"])
         reason = ""
         live = us_present(cid, peer["id"])  # they are in the Us screen right now: they felt it live, so no storm
