@@ -12,6 +12,35 @@
   const store = { get(k, d) { try { const v = localStorage.getItem("afra_" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
                   set(k, v) { try { localStorage.setItem("afra_" + k, JSON.stringify(v)); } catch { } }, del(k) { try { localStorage.removeItem("afra_" + k); } catch { } } };
   const DEVICE = store.get("device") || (store.set("device", "d" + rid().slice(0, 10)), store.get("device"));
+  // ---- small delights: soft sounds (made on the fly, no files), emoji bursts, a big heart, a greeting
+  let AC = null;
+  function sound(kind) {
+    if (!store.get("sound", true)) return;
+    try {
+      AC = AC || new (window.AudioContext || window.webkitAudioContext)();
+      const t = AC.currentTime, o = AC.createOscillator(), g = AC.createGain();
+      const [f1, f2, len] = kind === "send" ? [520, 880, .12] : kind === "recv" ? [880, 660, .18] : [700, 1050, .08];
+      o.type = "sine"; o.frequency.setValueAtTime(f1, t); o.frequency.exponentialRampToValueAtTime(f2, t + len);
+      g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(.12, t + .015); g.gain.exponentialRampToValueAtTime(.0001, t + len + .08);
+      o.connect(g).connect(AC.destination); o.start(t); o.stop(t + len + .1);
+    } catch { }
+  }
+  function burstAt(el, emoji, n = 7) {
+    if (!el) return; const r = el.getBoundingClientRect();
+    for (let i = 0; i < n; i++) {
+      const b = document.createElement("div"); b.className = "burst"; b.textContent = emoji;
+      b.style.left = r.left + r.width / 2 - 13 + "px"; b.style.top = r.top + r.height / 2 - 13 + "px";
+      b.style.setProperty("--dx", (Math.random() * 120 - 60) + "px"); b.style.setProperty("--dy", (-60 - Math.random() * 90) + "px");
+      b.style.setProperty("--rot", (Math.random() * 60 - 30) + "deg"); b.style.animationDelay = i * 30 + "ms";
+      document.body.appendChild(b); setTimeout(() => b.remove(), 1300);
+    }
+  }
+  function bigHeart(x, y) { const h = document.createElement("div"); h.className = "bigheart"; h.textContent = "❤️"; h.style.left = x + "px"; h.style.top = y + "px"; document.body.appendChild(h); setTimeout(() => h.remove(), 900); }
+  function greeting() {
+    const h = new Date().getHours(), n = (S.me && (S.me.name || "").split(" ")[0]) || "";
+    const g = h < 5 ? ["Still up", "🌙"] : h < 11 ? ["Good morning", "☀️"] : h < 15 ? ["Good afternoon", "🌤"] : h < 19 ? ["Good evening", "🌇"] : ["Good night", "🌙"];
+    return `${g[0]}${n ? ", " + esc(n) : ""} ${g[1]}`;
+  }
   function toast(msg) { const t = document.createElement("div"); t.className = "toast"; t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 2800); }
 
   // ------------------------------------------------------------------ server
@@ -29,7 +58,7 @@
   const fileUrl = (id) => `/api/files/${id}?t=${encodeURIComponent(TOKEN)}`;
 
   // ------------------------------------------------------------------ state
-  const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {} };
+  const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {}, seen: {} };
   const app = $("#app");
   const REACTIONS = ["❤️", "🥰", "😂", "😮", "😢", "🙏", "👍", "🔥"];
   const EMOJIS = "❤️ 🥰 😘 😍 🤗 😊 😁 😂 🥹 😭 😢 🥺 😴 🤔 😮 😎 🙈 🙏 👍 👏 💪 🎉 ✨ 🔥 💯 🌹 🌸 🌙 ☀️ ☕ 🍜 🍦 📚 ✍️ 🎓 💌 💖 💕 💞 💗 🤍 💛 💙 🫶 👀 😅 🙃 😌".split(" ");
@@ -90,7 +119,7 @@
   }
   setInterval(() => { if (WS && WS.readyState === 1) WS.send('{"t":"ping"}'); }, 25000);
   const sendVis = () => { if (WS && WS.readyState === 1) WS.send(JSON.stringify({ t: "vis", v: document.visibilityState === "visible" })); };
-  let LIVE = false;
+  let LIVE = false, LOADED = false;
   function setLive(v) { LIVE = v; drawHeader(); drawList(); }
 
   async function resync() {
@@ -105,7 +134,7 @@
           r.messages.forEach((m) => upsert(m));
         }
       }
-      lastSync = t0; store.set("lastsync", t0);
+      lastSync = t0; store.set("lastsync", t0); LOADED = true;
       cacheSave(); drawAll();
     } catch (e) { console.warn(e); }
   }
@@ -130,11 +159,11 @@
         if (e.msg.sender !== S.me.id) {
           delete S.typing[c.id];
           if (S.cur === c.id && document.visibilityState === "visible") markRead(c.id); else c.unread = (c.unread || 0) + 1;
-          if (document.visibilityState !== "visible" || S.cur !== c.id) inAppNotice(c, e.msg);
+          if (document.visibilityState === "visible") { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
         }
         S.convs.sort((a, b) => (b.last_at || 0) - (a.last_at || 0));
       } else if (c.last && c.last.id === e.msg.id) c.last = e.msg;
-      cacheSave(); drawList(); if (S.cur === e.msg.conv_id) drawChat();
+      cacheSave(); drawList(e.t === "msg" && e.msg.sender !== S.me.id ? c.id : 0); if (S.cur === e.msg.conv_id) drawChat();
     } else if (e.t === "read") {
       const c = conv(e.conv); if (!c) return;
       if (e.user !== S.me.id) { c.other_read = Math.max(c.other_read || 0, e.at); if (S.cur === c.id) drawChat(); }
@@ -152,11 +181,15 @@
       drawList();
     }
   }
-  function inAppNotice(c, m) {
-    if (document.visibilityState !== "visible") return;  // the phone shows a notification instead
-    const t = document.createElement("div"); t.className = "toast"; t.style.cursor = "pointer";
-    t.textContent = `${title(c)}: ${preview(m).slice(0, 70)}`; t.onclick = () => { t.remove(); openConv(c.id); };
-    document.body.appendChild(t); setTimeout(() => t.remove(), 4000);
+  function inAppNotice(c, m) {  // a banner slides down from the top; tap to open, swipe up (or wait) to dismiss
+    $$(".banner-in").forEach((x) => x.remove());
+    const b = document.createElement("div"); b.className = "banner-in";
+    b.innerHTML = `${avatar(other(c), "sm", c.kind === "self")}<div class="mid"><b>${esc(title(c))}</b><small>${esc(preview(m))}</small></div>`;
+    const close = () => { b.classList.add("out"); setTimeout(() => b.remove(), 260); };
+    b.onclick = () => { close(); openConv(c.id); };
+    let y0 = 0; b.addEventListener("touchstart", (e) => { y0 = e.touches[0].clientY; }, { passive: true });
+    b.addEventListener("touchmove", (e) => { if (e.touches[0].clientY - y0 < -20) close(); }, { passive: true });
+    document.body.appendChild(b); setTimeout(close, 4200);
   }
   function badge() {
     const n = S.convs.reduce((a, c) => a + (c.unread || 0), 0);
@@ -173,7 +206,7 @@
   async function send(fields) {
     const cid = S.cur, m = { id: 0, conv_id: cid, sender: S.me.id, client_id: rid(), kind: "text", text: "", reply_to: null, attachment: null,
       reactions: {}, created: now(), edited: 0, deleted: false, pending: true, ...fields };
-    upsert(m); OUTBOX.set([...OUTBOX.get(), m]); drawChat(); scrollEnd(true);
+    upsert(m); OUTBOX.set([...OUTBOX.get(), m]); drawChat(); scrollEnd(true); sound("send");
     const c = conv(cid); if (c) { c.last = m; c.last_at = m.created; S.convs.sort((a, b) => (b.last_at || 0) - (a.last_at || 0)); drawList(); }
     flushOutbox();
   }
@@ -194,22 +227,25 @@
   function shell() {
     app.innerHTML = `
       <section class="pane-list">
-        <div class="top"><div id="meAv" style="cursor:pointer"></div><h1>Chats</h1>
-          <button class="icon" id="bAdmin" title="Admin" hidden>🛡</button><button class="icon" id="bNew" title="New chat">✏️</button></div>
+        <div class="top"><div id="meAv" style="cursor:pointer"></div><h1>Chats<small class="greet" id="greet"></small></h1>
+          <button class="icon" id="bAdmin" title="Admin" hidden>🛡</button></div>
         <div id="banner"></div>
         <div class="list-tools"><input type="search" id="lq" placeholder="Search chats"></div>
         <div class="convs" id="convs"></div>
+        <button class="fab" id="bNew" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 21l2.1-5.7A8.4 8.4 0 1 1 21 11.5z"/><path d="M12 8v7M8.5 11.5h7"/></svg></button>
       </section>
       <section class="pane-chat" id="chatPane"></section>`;
-    $("#bNew").onclick = newChat; $("#bAdmin").onclick = adminSheet; $("#meAv").onclick = profileSheet;
+    $("#bNew").onclick = newChat; $("#bAdmin").onclick = adminPage; $("#meAv").onclick = profileSheet;
     $("#lq").oninput = (e) => { S.filter = e.target.value.trim().toLowerCase(); drawList(); };
     setView(S.view); drawAll(); drawBanner();
   }
-  function setView(v) { S.view = v; app.dataset.view = v; }
-  function drawAll() { if (!$("#convs")) return; $("#meAv").innerHTML = avatar(S.me, "sm"); $("#bAdmin").hidden = !S.me.is_admin; drawList(); drawChatPane(); badge(); }
+  function setView(v) { if (S.view !== v) { app.classList.remove("slide"); void app.offsetWidth; app.classList.add("slide"); } S.view = v; app.dataset.view = v; }
+  function drawAll() { if (!$("#convs")) return; $("#greet").innerHTML = greeting(); $("#meAv").innerHTML = avatar(S.me, "sm"); $("#bAdmin").hidden = !S.me.is_admin; drawList(); drawChatPane(); badge(); }
 
-  function drawList() {
+  function drawList(bumpId) {
     const el = $("#convs"); if (!el) return;
+    const before = {}; $$(".conv", el).forEach((d) => { before[d.dataset.c] = d.getBoundingClientRect().top; });
+    if (!S.convs.length && !LOADED) { el.innerHTML = [1, 2, 3, 4].map(() => `<div class="skeleton"><i style="width:44px;height:44px;border-radius:50%"></i><span style="flex:1"><i style="width:45%;height:13px;margin-bottom:8px"></i><i style="width:75%;height:11px"></i></span></div>`).join(""); return; }
     const t = now();
     const items = S.convs.filter((c) => !S.filter || title(c).toLowerCase().includes(S.filter) || (other(c) && other(c).username.includes(S.filter)));
     el.innerHTML = items.map((c) => {
@@ -219,8 +255,13 @@
         <div class="av-wrap ${u && u.online ? "on" : ""}">${avatar(u, "", c.kind === "self")}</div>
         <div class="mid"><div class="row1"><b>${esc(title(c))}</b><small>${c.last ? shortTime(c.last.created) : ""}</small></div>
           <div class="row2"><span class="${typing ? "typing" : ""}">${typing ? "typing…" : esc(last)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ""}</div></div></div>`;
-    }).join("") || `<div class="empty">No chats yet.<br><small>Tap ✏️ and type a username to start one.</small></div>`;
-    $$(".conv", el).forEach((d) => d.onclick = () => openConv(+d.dataset.c));
+    }).join("") || `<div class="empty">No chats yet.<br><small>Tap 💬 at the bottom right to start one.</small></div>`;
+    $$(".conv", el).forEach((d) => {
+      d.onclick = () => openConv(+d.dataset.c);
+      const was = before[d.dataset.c], top = d.getBoundingClientRect().top;
+      if (was !== undefined && Math.abs(was - top) > 2 && d.animate) d.animate([{ transform: `translateY(${was - top}px)` }, { transform: "none" }], { duration: 320, easing: "cubic-bezier(.2,.8,.2,1)" });
+      if (+d.dataset.c === bumpId) d.classList.add("bump");
+    });
   }
 
   async function openConv(cid) {
@@ -234,7 +275,7 @@
   function drawChatPane(focus) {
     const pane = $("#chatPane"); if (!pane) return;
     const c = conv(S.cur);
-    if (!c) { pane.innerHTML = `<div class="blank"><div><div style="font-size:48px">💌</div>Choose a chat, or tap ✏️ to start one.</div></div>`; return; }
+    if (!c) { pane.innerHTML = `<div class="blank"><div><div style="font-size:48px">💌</div>Choose a chat, or tap 💬 to start one.</div></div>`; return; }
     pane.innerHTML = `
       <div class="top"><button class="icon back" id="bBack">‹</button><div id="chatAv"></div>
         <div class="who"><b id="chatName"></b><small id="chatStat"></small></div>
@@ -243,6 +284,7 @@
       <div class="log" id="log"></div>
       <div class="typing-line" id="typing"></div>
       <div id="replybar"></div>
+      <div class="quick" id="quick"></div>
       <div class="compose">
         <button class="cbtn" id="btpl" title="Love notes">💌</button>
         <button class="cbtn" id="bemoji" title="Emoji">😊</button>
@@ -256,7 +298,12 @@
     $("#sclose").onclick = () => { $("#sbar").hidden = true; S.search = ""; drawChat(); };
     $("#sq").oninput = (e) => { S.search = e.target.value.trim().toLowerCase(); drawChat(); };
     const txt = $("#txt");
-    const grow = () => { txt.style.height = "auto"; txt.style.height = Math.min(txt.scrollHeight, 140) + "px"; $("#bsend").textContent = txt.value.trim() || S.edit ? "➤" : "🎤"; };
+    const grow = () => {
+      txt.style.height = "auto"; txt.style.height = Math.min(txt.scrollHeight, 140) + "px";
+      const typed = !!(txt.value.trim() || S.edit), b = $("#bsend");
+      if (b.dataset.mode !== (typed ? "send" : "mic")) { b.dataset.mode = typed ? "send" : "mic"; b.textContent = typed ? "➤" : "🎤"; b.classList.remove("swap"); void b.offsetWidth; b.classList.add("swap"); }
+      $("#quick").classList.toggle("hide", typed);
+    };
     let lastTyping = 0;
     txt.oninput = () => { grow(); if (txt.value && now() - lastTyping > 3 && c.kind !== "self") { lastTyping = now(); api(`/api/convs/${c.id}/typing`, { body: {} }).catch(() => { }); } };
     txt.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); sendText(); } if (e.key === "Escape") { S.reply = S.edit = null; drawReply(); } };
@@ -264,9 +311,23 @@
     $("#battach").onclick = () => $("#file").click();
     $("#file").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) sendFile(f); };
     $("#btpl").onclick = openTemplates; $("#bemoji").onclick = openEmoji;
-    window.growComposer = grow; grow();
+    window.growComposer = grow; grow(); drawQuick();
     drawHeader(); drawChat(); scrollEnd(true);
     if (focus && !matchMedia("(pointer: coarse)").matches) txt.focus();
+  }
+
+  async function drawQuick() {  // one tap sends: a heart, a hug, a few love notes (new ones each time), surprise
+    const el = $("#quick"); if (!el) return;
+    const tpl = await loadTemplates(), all = (tpl.categories || []).flatMap((c) => c.items).filter((t) => t.length <= 46);
+    const picks = all.sort(() => Math.random() - .5).slice(0, 4);
+    const chips = ["❤️", "🥰", "🤗", ...picks];
+    el.innerHTML = chips.map((t, i) => `<button data-q="${i}" class="${t.length <= 3 ? "emo" : ""}">${esc(t)}</button>`).join("") + `<button data-q="more" title="More love notes">💌 More</button>`;
+    $$("[data-q]", el).forEach((b) => b.onclick = () => {
+      if (b.dataset.q === "more") return openTemplates();
+      b.classList.add("sent"); setTimeout(() => b.classList.remove("sent"), 400);
+      send({ text: chips[+b.dataset.q], reply_to: S.reply ? S.reply.id : null }); S.reply = null; drawReply();
+      if (chips[+b.dataset.q].length > 3) setTimeout(drawQuick, 500);  // fresh suggestions
+    });
   }
 
   function drawHeader() {
@@ -277,7 +338,9 @@
     const st = $("#chatStat");
     st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : [lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
     st.className = typing || (u && u.online) ? "live" : "";
-    $("#typing").textContent = typing ? `${title(c)} is typing…` : "";
+    const tl = $("#typing");
+    if (typing && !tl.firstChild) { tl.innerHTML = `<div class="typing-bub" title="${esc(title(c))} is typing"><i></i><i></i><i></i></div>`; scrollEnd(); }
+    else if (!typing && tl.firstChild) tl.innerHTML = "";
   }
   setInterval(() => { drawHeader(); const t = now(); if (Object.values(S.typing).some((x) => x < t && x > t - 2)) drawList(); }, 2000);
 
@@ -307,6 +370,7 @@
     const list = S.msgs[c.id] || [];
     const shown = S.search ? list.filter((m) => (m.text || "").toLowerCase().includes(S.search) || (m.attachment && (m.attachment.name || "").toLowerCase().includes(S.search))) : list;
     let html = S.older[c.id] && !S.search ? `<button class="older" id="bOlder">Show earlier messages</button>` : "", lastDay = "";
+    const seen = S.seen[c.id], fresh = new Set();
     for (const m of shown) {
       const day = dayLabel(m.created);
       if (day !== lastDay) { html += `<div class="day">${day}</div>`; lastDay = day; }
@@ -314,7 +378,9 @@
       const rx = Object.entries(m.reactions || {});
       const read = c.kind !== "self" && (c.other_read || 0) >= m.created;
       const ticks = mine && !m.deleted && c.kind !== "self" ? `<span class="ticks ${read ? "read" : ""}">${m.pending ? "🕓" : read ? "✓✓" : "✓"}</span>` : (m.pending ? "🕓" : "");
-      html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
+      const key = m.client_id || m.id; fresh.add(key);
+      const pop = seen && !seen.has(key) ? "pop" : "";
+      html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
         <div class="bub ${m.deleted ? "deleted" : ""}">${bubbleBody(m, list)}</div>
         ${rx.length ? `<div class="reacts">${rx.map(([uid, e]) => `<span title="${esc((userById(+uid) || {}).name || "")}">${esc(e)}</span>`).join("")}</div>` : ""}
         <div class="meta">${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
@@ -327,7 +393,8 @@
       t.scrollIntoView({ behavior: "smooth", block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 1400);
     });
     $$(".msg", log).forEach(bindPress);
-    if (atBottom) scrollEnd(true);
+    S.seen[c.id] = fresh;
+    if (atBottom) log.scrollTo({ top: log.scrollHeight, behavior: seen ? "smooth" : "auto" });
     drawHeader();
   }
   async function loadOlder() {
@@ -339,24 +406,40 @@
   }
 
   function bindPress(el) {  // long-press (phone) or right-click (computer): menu. Double-tap: ❤️
-    let timer = null, lastTap = 0;
+    let timer = null, lastTap = 0, x0 = 0, y0 = 0, dx = 0;
     const id = +el.dataset.id; if (!id) return;
-    el.addEventListener("touchstart", () => { timer = setTimeout(() => { timer = null; navigator.vibrate && navigator.vibrate(10); msgMenu(id); }, 450); }, { passive: true });
-    el.addEventListener("touchmove", () => { clearTimeout(timer); timer = null; }, { passive: true });
-    el.addEventListener("touchend", () => { if (timer) clearTimeout(timer); });
+    el.addEventListener("touchstart", (e) => {
+      x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; el.style.transition = "none";
+      timer = setTimeout(() => { timer = null; navigator.vibrate && navigator.vibrate(10); msgMenu(id); }, 450);
+    }, { passive: true });
+    el.addEventListener("touchmove", (e) => {  // swipe right to reply
+      const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
+      if (Math.abs(mx) > 6 || Math.abs(my) > 6) { clearTimeout(timer); timer = null; }
+      if (mx > 0 && Math.abs(my) < 30) { dx = Math.min(mx, 90); el.style.transform = `translateX(${dx}px)`; el.classList.toggle("swipe-ready", dx > 60); }
+    }, { passive: true });
+    el.addEventListener("touchend", () => {
+      if (timer) clearTimeout(timer);
+      el.style.transition = "transform .2s ease"; el.style.transform = ""; el.classList.remove("swipe-ready");
+      if (dx > 60) { const m = findMsg(id); if (m && !m.deleted) { navigator.vibrate && navigator.vibrate(8); S.reply = m; S.edit = null; drawReply(); $("#txt").focus(); } }
+      dx = 0;
+    });
     el.addEventListener("contextmenu", (e) => { e.preventDefault(); msgMenu(id); });
     el.addEventListener("click", (e) => {
       if (e.target.closest("a,audio,img,.quote")) return;
-      const t = Date.now(); if (t - lastTap < 320) { react(id, "❤️"); lastTap = 0; } else lastTap = t;
+      const t = Date.now(); if (t - lastTap < 320) { bigHeart(e.clientX, e.clientY); if ((findMsg(id) || {}).reactions?.[S.me.id] !== "❤️") react(id, "❤️"); lastTap = 0; } else lastTap = t;
     });
   }
   const findMsg = (id) => (S.msgs[S.cur] || []).find((m) => m.id === id);
-  const react = (id, e) => api(`/api/messages/${id}/react`, { body: { emoji: e } }).then(upsert).then(drawChat).catch((x) => toast(x.message));
+  const react = (id, e) => {
+    const m = findMsg(id), removing = m && (m.reactions || {})[S.me.id] === e;
+    if (!removing) burstAt($(`.msg[data-id="${id}"] .bub`), e);
+    return api(`/api/messages/${id}/react`, { body: { emoji: e } }).then(upsert).then(drawChat).catch((x) => toast(x.message));
+  };
 
   function sheet(html) {
     const bg = document.createElement("div"); bg.className = "sheet-bg";
     bg.innerHTML = `<div class="sheet"><div class="grab"></div>${html}</div>`;
-    bg.onclick = (e) => { if (e.target === bg) bg.remove(); };
+    bg.onclick = (e) => { if (e.target === bg) { bg.classList.add("closing"); setTimeout(() => bg.remove(), 180); } };
     document.body.appendChild(bg); return bg;
   }
 
@@ -434,8 +517,12 @@
   }
 
   let TEMPLATES = null;
-  async function openTemplates() {
+  async function loadTemplates() {
     if (!TEMPLATES) { try { TEMPLATES = await (await fetch("templates.json", { cache: "no-cache" })).json(); } catch { TEMPLATES = { categories: [] }; } }
+    return TEMPLATES;
+  }
+  async function openTemplates() {
+    await loadTemplates();
     const cats = TEMPLATES.categories || [], all = cats.flatMap((c) => c.items.map((t) => [c, t]));
     let cur = store.get("tplcat", cats[0] && cats[0].id), q = "";
     const s = sheet(`<h3>💌 Love notes</h3><input class="inp" type="search" id="tq" placeholder="Search ${all.length} notes" style="margin-bottom:8px">
@@ -461,17 +548,31 @@
 
   // ------------------------------------------------------------------ new chat, profile, admin
   function newChat() {
-    const s = sheet(`<h3>New chat</h3><div class="field"><label>Their username</label><input class="inp" id="nu" placeholder="e.g. raina" autocapitalize="none" autocorrect="off"></div>
-      <button class="big-btn" id="ngo">Start chatting</button><div class="err" id="nerr"></div>
-      <button class="item" id="nself">📝 Notes to self</button>
-      <div class="note" style="margin-top:8px">Ask them for their username: it's under their photo in the app (tap your photo at the top left). No request to accept: you can chat right away.</div>`);
-    const go = async () => {
-      try { const c = await api("/api/convs", { body: { username: $("#nu", s).value } }); s.remove(); addConv(c); openConv(c.id); }
-      catch (e) { $("#nerr", s).textContent = e.message; }
+    const s = sheet(`<h3>New chat</h3><input class="inp" id="nu" placeholder="Search a name or @username" autocapitalize="none" autocorrect="off" autocomplete="off">
+      <div id="nres" class="people"></div>
+      <button class="item" id="nself">${avatar(null, "sm", true)} <span><b>Notes to self</b><br><small style="color:var(--muted)">Only you can see it</small></span></button>`);
+    const start = async (username) => {
+      try { const c = await api("/api/convs", { body: { username } }); s.remove(); addConv(c); openConv(c.id); }
+      catch (e) { toast(e.message); }
     };
-    $("#ngo", s).onclick = go; $("#nu", s).onkeydown = (e) => { if (e.key === "Enter") go(); };
+    let timer = null, last = "";
+    const look = async () => {
+      const q = $("#nu", s).value.trim(); if (q === last) return; last = q;
+      const el = $("#nres", s);
+      if (!q) { el.innerHTML = recent(); bindRes(); return; }
+      let res = []; try { res = await api(`/api/users/search?q=${encodeURIComponent(q)}`); } catch { }
+      if (q !== last) return;
+      el.innerHTML = res.length ? res.map((u) => personRow(u)).join("") : `<div class="hint">Nobody called “${esc(q)}” yet. Usernames are under each person's photo in their app.</div>`;
+      bindRes();
+    };
+    const personRow = (u) => `<button class="item person" data-u="${esc(u.username)}"><div class="av-wrap ${u.online ? "on" : ""}">${avatar(u, "sm")}</div><span><b>${esc(u.name)}</b><br><small style="color:var(--muted)">@${esc(u.username)}</small></span></button>`;
+    const recent = () => { const people = S.convs.filter((c) => c.kind === "direct").map(other).filter(Boolean).slice(0, 6); return people.length ? `<div class="hint">Recent</div>` + people.map(personRow).join("") : ""; };
+    const bindRes = () => $$("[data-u]", s).forEach((b) => b.onclick = () => start(b.dataset.u));
+    $("#nu", s).oninput = () => { clearTimeout(timer); timer = setTimeout(look, 180); };
+    $("#nu", s).onkeydown = (e) => { if (e.key === "Enter") { const first = $("[data-u]", s); start(first ? first.dataset.u : $("#nu", s).value); } };
     $("#nself", s).onclick = async () => { const c = await api("/api/convs", { body: { self: true } }); s.remove(); addConv(c); openConv(c.id); };
-    setTimeout(() => $("#nu", s).focus(), 100);
+    $("#nres", s).innerHTML = recent(); bindRes();
+    setTimeout(() => $("#nu", s).focus(), 150);
   }
   function addConv(c) { const i = S.convs.findIndex((x) => x.id === c.id); if (i >= 0) S.convs[i] = c; else S.convs.unshift(c); }
 
@@ -487,6 +588,8 @@
       <h4>Notifications</h4>
       ${isIOS && !standalone ? `<div class="note warn">📲 On iPhone, notifications work in the Home Screen app: tap <b>Share</b> ⬆ → <b>Add to Home Screen</b>, then open A.F.R.A ♥ from its icon.</div>`
         : `<div class="row"><button class="sbtn" id="ppush">${pushOn ? "✓ On" : "Turn on"}</button>${pushOn ? `<button class="sbtn" id="ptest">Send me a test</button>` : ""}</div>`}
+      <h4>Sounds</h4>
+      <label class="row" style="font-size:15px"><input type="checkbox" id="psound" ${store.get("sound", true) ? "checked" : ""}> Soft sounds when sending and receiving</label>
       <h4>Password</h4>
       <div class="field"><input class="inp" type="password" id="pold" placeholder="Current password" autocomplete="current-password"></div>
       <div class="field"><input class="inp" type="password" id="pnew" placeholder="New password (6+ characters)" autocomplete="new-password"></div>
@@ -508,59 +611,78 @@
     };
     const pp = $("#ppush", s); if (pp) pp.onclick = async () => { const r = await enablePush(true); toast(r); s.remove(); profileSheet(); };
     const pt = $("#ptest", s); if (pt) pt.onclick = () => api("/api/push/test", { body: {} }).then(() => toast("Sent: lock your phone to see it")).catch((x) => toast(x.message));
+    $("#psound", s).onchange = (e) => { store.set("sound", e.target.checked); if (e.target.checked) sound("send"); };
     $("#pout", s).onclick = () => { if (confirm("Log out on this device?")) logout(); };
   }
 
-  async function adminSheet() {
-    const s = sheet(`<h3>🛡 Admin</h3><div class="chips"><button data-t="inv" class="on">Invites</button><button data-t="users">People</button></div><div id="adm"></div>`);
+  async function adminPage() {
+    const page = document.createElement("div"); page.className = "page";
+    page.innerHTML = `<div class="top"><button class="icon" id="pBack">‹</button><h1>🛡 Admin</h1></div>
+      <div class="chips tabs"><button data-t="home" class="on">Overview</button><button data-t="users">People</button><button data-t="inv">Invites</button></div>
+      <div class="page-body" id="adm"></div>`;
+    document.body.appendChild(page);
+    $("#pBack", page).onclick = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    const dl = (path) => `${path}?t=${encodeURIComponent(TOKEN)}`;
     const tab = async (t) => {
-      $$("[data-t]", s).forEach((b) => b.classList.toggle("on", b.dataset.t === t));
-      const el = $("#adm", s);
-      if (t === "inv") {
-        const inv = await api("/api/admin/invites");
-        el.innerHTML = `<div class="note">Make an invite code and send it to the person (or send the link). They choose their own username and password, and their chat with you starts right away.</div>
-          <div class="field" style="margin-top:10px"><label>Who is it for? (just a note for you)</label><input class="inp" id="inote" placeholder="e.g. Raina"></div>
-          <label class="row" style="font-size:14px;margin-bottom:10px"><input type="checkbox" id="iadm"> Make them an admin too</label>
-          <button class="big-btn" id="igo">Make invite code</button><div id="inew"></div>
-          <h4>Invites</h4>${inv.map((i) => `<div class="urow"><div class="mid"><b style="font-family:monospace">${esc(i.code)}</b>${i.admin ? ` <span class="pill gold">admin</span>` : ""}
-            <small>${esc(i.note || "")} · ${i.used_by ? "used by @" + esc(i.used_name || "?") : "not used yet"}</small></div>
-            ${i.used_by ? "" : `<button class="sbtn" data-copy="${esc(i.code)}">Copy link</button><button class="sbtn" data-del="${esc(i.code)}">✕</button>`}</div>`).join("") || `<div class="empty">No invites yet.</div>`}`;
-        $("#igo", el).onclick = async () => {
-          const r = await api("/api/admin/invites", { body: { note: $("#inote", el).value, admin: $("#iadm", el).checked } });
-          const link = `${location.origin}/#invite=${r.code}`;
-          $("#inew", el).innerHTML = `<div class="code" style="margin-top:10px">${esc(r.code)}</div><div class="row" style="margin-top:8px"><button class="big-btn gold" id="icopy" style="flex:1">Copy invite link</button></div>
-            <div class="note" style="margin-top:8px;font-size:13px">Send the link: it opens the app with the code filled in. Each code works once.</div>`;
-          $("#icopy", el).onclick = () => copy(link, "Invite link copied");
-        };
-        $$("[data-copy]", el).forEach((b) => b.onclick = () => copy(`${location.origin}/#invite=${b.dataset.copy}`, "Invite link copied"));
-        $$("[data-del]", el).forEach((b) => b.onclick = async () => { await api(`/api/admin/invites/${b.dataset.del}`, { method: "DELETE" }); tab("inv"); });
-      } else {
-        const users = await api("/api/admin/users");
-        el.innerHTML = users.map((u) => `<div class="urow">${avatar(u, "sm")}<div class="mid"><b>${esc(u.name)}</b> <span style="color:var(--muted)">@${esc(u.username)}</span>${u.is_admin ? ` <span class="pill gold">admin</span>` : ""}${u.disabled ? ` <span class="pill">off</span>` : ""}
-            <small>${u.online ? "online" : esc(lastSeen(u))} · ${u.devices} device${u.devices === 1 ? "" : "s"}</small></div>
-            ${u.id === S.me.id ? "" : `<button class="sbtn" data-chat="${esc(u.username)}">💬</button><button class="sbtn" data-more="${u.id}">⋯</button>`}</div>`).join("");
-        $$("[data-chat]", el).forEach((b) => b.onclick = async () => { const c = await api("/api/convs", { body: { username: b.dataset.chat } }); s.remove(); addConv(c); openConv(c.id); });
-        $$("[data-more]", el).forEach((b) => b.onclick = () => {
-          const u = users.find((x) => x.id === +b.dataset.more);
-          const m = sheet(`<h3>${esc(u.name)} <small style="color:var(--muted)">@${esc(u.username)}</small></h3><div class="menu">
-            <button data-x="reset">🔑 Password reset code</button><button data-x="admin">${u.is_admin ? "Remove admin" : "🛡 Make admin"}</button>
-            <button data-x="off" class="${u.disabled ? "" : "danger"}">${u.disabled ? "✓ Switch account back on" : "Switch account off (logs them out)"}</button></div><div id="mout"></div>`);
-          $$("[data-x]", m).forEach((x) => x.onclick = async () => {
-            try {
-              if (x.dataset.x === "reset") {
-                const r = await api(`/api/admin/users/${u.id}/reset`, { body: {} }); const link = `${location.origin}/#reset=${r.code}`;
-                $("#mout", m).innerHTML = `<div class="code">${esc(r.code)}</div><button class="big-btn gold" id="rc" style="width:100%;margin-top:8px">Copy reset link</button><div class="note" style="margin-top:8px;font-size:13px">Valid for 7 days. They open it and choose a new password.</div>`;
-                $("#rc", m).onclick = () => copy(link, "Reset link copied"); return;
-              }
-              await api(`/api/admin/users/${u.id}`, { method: "PATCH", body: x.dataset.x === "admin" ? { is_admin: !u.is_admin } : { disabled: !u.disabled } });
-              m.remove(); tab("users");
-            } catch (e) { toast(e.message); }
+      $$("[data-t]", page).forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+      const el = $("#adm", page); el.innerHTML = `<div class="hint">Loading…</div>`;
+      try {
+        if (t === "home") {
+          const st = await api("/api/admin/stats");
+          const card = (n, label) => `<div class="stat"><b>${n}</b><span>${label}</span></div>`;
+          el.innerHTML = `<div class="stats">${card(st.users, "people")}${card(st.online, "online now")}${card(st.chats, "chats")}${card(st.messages, "messages")}${card(st.today, "in the last 24 h")}${card(st.push_devices, "phones with notifications")}${card(st.files, `files (${st.files_mb} MB)`)}${card(st.invites_open, "unused invites")}</div>
+            <h4>Download the data</h4>
+            <a class="dl" href="${dl("/api/admin/export/users.csv")}" download><span>👥</span><span><b>People (spreadsheet)</b><small>Everyone with username, name, joined, last seen, messages sent. Opens in Excel, Numbers or Google Sheets. No passwords.</small></span></a>
+            <a class="dl" href="${dl("/api/admin/export/chats.json")}" download><span>💬</span><span><b>All chats (JSON)</b><small>Every person, chat and message, readable. No passwords.</small></span></a>
+            <a class="dl" href="${dl("/api/admin/export/db")}" download><span>🗄</span><span><b>Complete database (${st.db_mb} MB, .db)</b><small>Everything, for a full copy or a move. Open it with “DB Browser for SQLite”. Passwords inside are scrambled (hashed).</small></span></a>
+            <h4>Automatic daily backups (on the server)</h4>
+            ${st.backups.map((b) => `<a class="dl small" href="${dl("/api/admin/backups/" + encodeURIComponent(b.name))}" download><span>📦</span><span><b>${esc(b.name)}</b><small>${b.mb} MB · ${shortTime(b.at)}</small></span></a>`).join("") || `<div class="hint">The first one is made within a few hours.</div>`}`;
+        } else if (t === "inv") {
+          const inv = await api("/api/admin/invites");
+          el.innerHTML = `<div class="note">Make an invite code and send the link. They choose their own username and password, and their chat with you starts right away.</div>
+            <div class="field" style="margin-top:10px"><label>Who is it for? (a note for you)</label><input class="inp" id="inote" placeholder="e.g. Raina"></div>
+            <label class="row" style="font-size:14px;margin-bottom:10px"><input type="checkbox" id="iadm"> Make them an admin too</label>
+            <button class="big-btn" id="igo">Make invite code</button><div id="inew"></div>
+            <h4>Invites</h4>${inv.map((i) => `<div class="urow"><div class="mid"><b style="font-family:monospace">${esc(i.code)}</b>${i.admin ? ` <span class="pill gold">admin</span>` : ""}
+              <small>${esc(i.note || "")} · ${i.used_by ? "used by @" + esc(i.used_name || "?") : "not used yet"}</small></div>
+              ${i.used_by ? "" : `<button class="sbtn" data-copy="${esc(i.code)}">Copy link</button><button class="sbtn" data-del="${esc(i.code)}">✕</button>`}</div>`).join("") || `<div class="hint">No invites yet.</div>`}`;
+          $("#igo", el).onclick = async () => {
+            const r = await api("/api/admin/invites", { body: { note: $("#inote", el).value, admin: $("#iadm", el).checked } });
+            const link = `${location.origin}/#invite=${r.code}`;
+            $("#inew", el).innerHTML = `<div class="code pop" style="margin-top:10px">${esc(r.code)}</div><button class="big-btn gold" id="icopy" style="width:100%;margin-top:8px">Send / copy invite link</button>
+              <div class="hint">The link opens the app with the code filled in. Each code works once.</div>`;
+            $("#icopy", el).onclick = () => copy(link, "Invite link copied");
+          };
+          $$("[data-copy]", el).forEach((b) => b.onclick = () => copy(`${location.origin}/#invite=${b.dataset.copy}`, "Invite link copied"));
+          $$("[data-del]", el).forEach((b) => b.onclick = async () => { await api(`/api/admin/invites/${b.dataset.del}`, { method: "DELETE" }); tab("inv"); });
+        } else {
+          const users = await api("/api/admin/users");
+          el.innerHTML = users.map((u) => `<div class="urow"><div class="av-wrap ${u.online ? "on" : ""}">${avatar(u, "sm")}</div><div class="mid"><b>${esc(u.name)}</b> <span style="color:var(--muted)">@${esc(u.username)}</span>${u.is_admin ? ` <span class="pill gold">admin</span>` : ""}${u.disabled ? ` <span class="pill">off</span>` : ""}
+              <small>${u.online ? "online" : esc(lastSeen(u) || "never online")} · ${u.devices} device${u.devices === 1 ? "" : "s"}</small></div>
+              ${u.id === S.me.id ? "" : `<button class="sbtn" data-chat="${esc(u.username)}">💬</button><button class="sbtn" data-more="${u.id}">⋯</button>`}</div>`).join("");
+          $$("[data-chat]", el).forEach((b) => b.onclick = async () => { const c = await api("/api/convs", { body: { username: b.dataset.chat } }); page.remove(); addConv(c); openConv(c.id); });
+          $$("[data-more]", el).forEach((b) => b.onclick = () => {
+            const u = users.find((x) => x.id === +b.dataset.more);
+            const m = sheet(`<h3>${esc(u.name)} <small style="color:var(--muted)">@${esc(u.username)}</small></h3><div class="menu">
+              <button data-x="reset">🔑 Password reset code</button><button data-x="admin">${u.is_admin ? "Remove admin" : "🛡 Make admin"}</button>
+              <button data-x="off" class="${u.disabled ? "" : "danger"}">${u.disabled ? "✓ Switch account back on" : "Switch account off (logs them out)"}</button></div><div id="mout"></div>`);
+            $$("[data-x]", m).forEach((x) => x.onclick = async () => {
+              try {
+                if (x.dataset.x === "reset") {
+                  const r = await api(`/api/admin/users/${u.id}/reset`, { body: {} }); const link = `${location.origin}/#reset=${r.code}`;
+                  $("#mout", m).innerHTML = `<div class="code">${esc(r.code)}</div><button class="big-btn gold" id="rc" style="width:100%;margin-top:8px">Send / copy reset link</button><div class="hint">Valid for 7 days. They open it and choose a new password.</div>`;
+                  $("#rc", m).onclick = () => copy(link, "Reset link copied"); return;
+                }
+                await api(`/api/admin/users/${u.id}`, { method: "PATCH", body: x.dataset.x === "admin" ? { is_admin: !u.is_admin } : { disabled: !u.disabled } });
+                m.remove(); tab("users");
+              } catch (e) { toast(e.message); }
+            });
           });
-        });
-      }
+        }
+      } catch (e) { el.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
     };
-    $$("[data-t]", s).forEach((b) => b.onclick = () => tab(b.dataset.t));
-    tab("inv");
+    $$("[data-t]", page).forEach((b) => b.onclick = () => tab(b.dataset.t));
+    tab("home");
   }
   function copy(text, msg) {
     if (navigator.share && matchMedia("(pointer: coarse)").matches) navigator.share({ text }).catch(() => navigator.clipboard.writeText(text).then(() => toast(msg)));

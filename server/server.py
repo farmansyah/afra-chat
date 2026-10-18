@@ -11,6 +11,9 @@ Admin invite:  python server.py invite --admin        (also printed at first sta
 """
 import asyncio
 import base64
+import csv
+import io
+import tempfile
 import hashlib
 import hmac
 import json
@@ -275,6 +278,19 @@ async def set_avatar(file: UploadFile = File(...), authorization: str = Header(N
         nu = c.execute("SELECT * FROM users WHERE id=?", (u["id"],)).fetchone()
     await announce_profile(nu)
     return public(nu)
+
+
+@app.get("/api/users/search")
+def search_users(q: str = "", authorization: str = Header(None)):
+    """People whose username or name matches what you type (for starting a chat)."""
+    u = auth(authorization)
+    q = q.strip().lower().lstrip("@")
+    if len(q) < 1:
+        return []
+    with closing(db()) as c:
+        rows = c.execute("""SELECT * FROM users WHERE disabled=0 AND id<>? AND (username LIKE ? OR lower(name) LIKE ?)
+                            ORDER BY (username LIKE ?) DESC, username LIMIT 8""", (u["id"], f"%{q}%", f"%{q}%", f"{q}%")).fetchall()
+    return [public(r) for r in rows]
 
 
 @app.get("/api/users/{username}")
@@ -751,6 +767,96 @@ def admin_del_invite(code: str, authorization: str = Header(None)):
         c.execute("DELETE FROM invites WHERE code=? AND used_by IS NULL", (code.upper(),))
         c.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- admin: overview and downloads
+def admin_q(t: str, authorization: str | None):
+    """Downloads open as plain links, so they may carry the session in ?t= instead of a header."""
+    u = user_for(t or (authorization or "").removeprefix("Bearer ").strip())
+    if not u["is_admin"]:
+        raise HTTPException(403, "Admins only")
+    return u
+
+
+@app.get("/api/admin/stats")
+def admin_stats(authorization: str = Header(None)):
+    admin(authorization)
+    with closing(db()) as c:
+        n = lambda q: c.execute(q).fetchone()[0]
+        stats = {"users": n("SELECT COUNT(*) FROM users"), "online": len(SOCKETS), "chats": n("SELECT COUNT(*) FROM convs WHERE kind='direct'"),
+                 "messages": n("SELECT COUNT(*) FROM messages WHERE deleted=0"), "today": c.execute("SELECT COUNT(*) FROM messages WHERE created>?", (time.time() - 86400,)).fetchone()[0],
+                 "files": n("SELECT COUNT(*) FROM files"), "files_mb": round((n("SELECT COALESCE(SUM(size),0) FROM files")) / 1048576, 1),
+                 "push_devices": n("SELECT COUNT(*) FROM pushes"), "invites_open": n("SELECT COUNT(*) FROM invites WHERE kind='invite' AND used_by IS NULL")}
+    stats["db_mb"] = round(DB.stat().st_size / 1048576, 2)
+    stats["backups"] = [{"name": f.name, "mb": round(f.stat().st_size / 1048576, 2), "at": f.stat().st_mtime}
+                        for f in sorted((DATA / "backups").glob("chat-*.db"), reverse=True)]
+    return stats
+
+
+@app.get("/api/admin/export/db")
+def export_db(t: str = "", authorization: str = Header(None)):
+    """The whole database as one SQLite file (open it with "DB Browser for SQLite"). Passwords inside are hashed."""
+    admin_q(t, authorization)
+    fd, name = tempfile.mkstemp(suffix=".db", dir=DATA)
+    os.close(fd)
+    tmp = Path(name)
+    src, dst = sqlite3.connect(DB), sqlite3.connect(tmp)
+    with dst:
+        src.backup(dst)
+    src.close(); dst.close()
+    data = tmp.read_bytes()
+    tmp.unlink()
+    return Response(data, media_type="application/octet-stream",
+                    headers={"Content-Disposition": f'attachment; filename="afra-chat-{time.strftime("%Y%m%d-%H%M")}.db"'})
+
+
+@app.get("/api/admin/export/users.csv")
+def export_users(t: str = "", authorization: str = Header(None)):
+    """Everyone in a spreadsheet (opens in Excel / Numbers / Google Sheets). No passwords."""
+    admin_q(t, authorization)
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["id", "username", "name", "admin", "switched off", "joined", "last seen", "messages sent", "devices logged in", "notifications"])
+    fmt = lambda x: time.strftime("%Y-%m-%d %H:%M", time.localtime(x)) if x else ""
+    with closing(db()) as c:
+        for u in c.execute("SELECT * FROM users ORDER BY id"):
+            msgs = c.execute("SELECT COUNT(*) FROM messages WHERE sender=? AND deleted=0", (u["id"],)).fetchone()[0]
+            devs = c.execute("SELECT COUNT(*) FROM sessions WHERE user_id=?", (u["id"],)).fetchone()[0]
+            push = c.execute("SELECT COUNT(*) FROM pushes WHERE user_id=?", (u["id"],)).fetchone()[0]
+            seen = time.time() if SOCKETS.get(u["id"]) else u["last_seen"]
+            w.writerow([u["id"], u["username"], u["name"], "yes" if u["is_admin"] else "", "yes" if u["disabled"] else "",
+                        fmt(u["created"]), fmt(seen), msgs, devs, push])
+    return Response("\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="afra-chat-users-{time.strftime("%Y%m%d")}.csv"'})
+
+
+@app.get("/api/admin/export/chats.json")
+def export_chats(t: str = "", authorization: str = Header(None)):
+    """Every person, chat and message as readable JSON (no passwords, no sessions)."""
+    admin_q(t, authorization)
+    with closing(db()) as c:
+        users = [{k: r[k] for k in ("id", "username", "name", "is_admin", "disabled", "created", "last_seen", "avatar")} for r in c.execute("SELECT * FROM users")]
+        names = {u["id"]: u["username"] for u in users}
+        chats = []
+        for cv in c.execute("SELECT * FROM convs ORDER BY id"):
+            members = [names.get(r[0]) for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cv["id"],))]
+            msgs = [{"id": m["id"], "from": names.get(m["sender"]), "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m["created"])),
+                     "kind": m["kind"], "text": m["text"], "reply_to": m["reply_to"], "attachment": json.loads(m["attachment"]) if m["attachment"] else None,
+                     "reactions": {names.get(int(k), k): v for k, v in json.loads(m["reactions"] or "{}").items()}, "edited": bool(m["edited"]), "deleted": bool(m["deleted"])}
+                    for m in c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id", (cv["id"],))]
+            chats.append({"id": cv["id"], "kind": cv["kind"], "members": members, "messages": msgs})
+    body = json.dumps({"exported": time.strftime("%Y-%m-%d %H:%M"), "users": users, "chats": chats}, ensure_ascii=False, indent=1)
+    return Response(body, media_type="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="afra-chat-export-{time.strftime("%Y%m%d")}.json"'})
+
+
+@app.get("/api/admin/backups/{name}")
+def download_backup(name: str, t: str = "", authorization: str = Header(None)):
+    admin_q(t, authorization)
+    f = (DATA / "backups" / name).resolve()
+    if f.parent != (DATA / "backups").resolve() or not f.is_file():
+        raise HTTPException(404)
+    return FileResponse(f, media_type="application/octet-stream", filename=name)
 
 
 # ---------------------------------------------------------------- the app itself + housekeeping

@@ -1,0 +1,122 @@
+/* A.F.R.A ♥ alive: motion, presence and small delights. Everything respects "Reduce Motion". */
+:root { --spring: cubic-bezier(.2, .9, .3, 1.25); --ease: cubic-bezier(.2, .8, .2, 1); }
+button { transition: transform .12s var(--ease), background-color .15s, opacity .15s; }
+button:active { transform: scale(.94); }
+
+/* the round "new chat" button */
+.pane-list { position: relative; }
+.fab { position: absolute; right: 18px; bottom: calc(18px + env(safe-area-inset-bottom)); width: 60px; height: 60px; border-radius: 50%; border: 0;
+  background: linear-gradient(145deg, #ffd479, var(--gold)); color: var(--navy); display: grid; place-items: center; z-index: 5;
+  box-shadow: 0 8px 22px rgba(20, 33, 61, .28), 0 2px 6px rgba(20, 33, 61, .18); animation: fabIn .5s var(--spring) .15s both; }
+.fab:hover { transform: translateY(-2px) rotate(-4deg); }
+.fab:active { transform: scale(.9) rotate(-8deg); }
+@keyframes fabIn { from { transform: scale(0) rotate(-90deg); } }
+.convs { padding-bottom: 90px; }
+
+/* greeting under "Chats" */
+.top .greet { display: block; font: 400 12px var(--sans); color: #b9c6e0; margin-top: 1px; animation: fadeUp .5s var(--ease) both .1s; }
+
+/* screens and sheets slide, never jump */
+@media (max-width: 759px) {
+  #app.slide[data-view="chat"] .pane-chat { animation: slideIn .28s var(--ease); }
+  #app.slide[data-view="list"] .pane-list { animation: slideBack .26s var(--ease); }
+}
+@keyframes slideIn { from { transform: translateX(30%); opacity: .3; } }
+@keyframes slideBack { from { transform: translateX(-12%); opacity: .5; } }
+.sheet-bg { animation: fade .2s ease both; }
+.sheet { animation: sheetUp .32s var(--spring) both; }
+.sheet-bg.closing { animation: fadeOut .18s ease both; }
+.sheet-bg.closing .sheet { animation: sheetDown .18s ease both; }
+@keyframes fade { from { opacity: 0; } }
+@keyframes fadeOut { to { opacity: 0; } }
+@keyframes sheetUp { from { transform: translateY(70px); opacity: .2; } }
+@keyframes sheetDown { to { transform: translateY(90px); opacity: 0; } }
+@keyframes fadeUp { from { transform: translateY(6px); opacity: 0; } }
+
+/* full-screen pages (admin) */
+.page { position: fixed; inset: 0; z-index: 15; background: var(--bg); display: flex; flex-direction: column; animation: slideIn .3s var(--ease); }
+.page.closing { animation: slideOut .2s ease both; }
+@keyframes slideOut { to { transform: translateX(30%); opacity: 0; } }
+.page .tabs { padding: 10px 12px 0; background: var(--panel); border-bottom: 1px solid var(--line); margin: 0; }
+.page-body { flex: 1; overflow-y: auto; padding: 14px 14px calc(30px + env(safe-area-inset-bottom)); max-width: 720px; width: 100%; margin: 0 auto; }
+.page-body > * { animation: fadeUp .35s var(--ease) both; }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 14px; display: flex; flex-direction: column; animation: fadeUp .4s var(--ease) both; }
+.stat:nth-child(2) { animation-delay: .04s; } .stat:nth-child(3) { animation-delay: .08s; } .stat:nth-child(4) { animation-delay: .12s; }
+.stat:nth-child(5) { animation-delay: .16s; } .stat:nth-child(6) { animation-delay: .2s; } .stat:nth-child(7) { animation-delay: .24s; } .stat:nth-child(8) { animation-delay: .28s; }
+.stat b { font: 600 28px var(--serif); }
+.stat span { color: var(--muted); font-size: 13px; }
+.dl { display: flex; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--line); background: var(--panel); border-radius: 14px; margin-bottom: 8px; color: inherit; text-decoration: none; transition: transform .15s var(--ease), box-shadow .15s; }
+.dl:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+.dl:active { transform: scale(.98); }
+.dl > span:first-child { font-size: 26px; }
+.dl small { display: block; color: var(--muted); font-size: 13px; }
+.dl.small > span:first-child { font-size: 20px; }
+.hint { color: var(--muted); font-size: 13px; padding: 8px 4px; }
+.people { display: flex; flex-direction: column; margin: 8px 0; min-height: 10px; }
+.people .item { animation: fadeUp .25s var(--ease) both; }
+
+/* chat list: rows glide when the order changes, badges bounce, online dots breathe */
+.conv { transition: background .2s; }
+.conv.bump { animation: bump .7s var(--ease); }
+@keyframes bump { 30% { background: var(--mine); } }
+.badge { animation: badgePop .35s var(--spring); }
+@keyframes badgePop { from { transform: scale(0); } }
+.av-wrap.on::after { animation: breathe 2.4s ease-in-out infinite; }
+@keyframes breathe { 50% { box-shadow: 0 0 0 4px rgba(47, 158, 91, .2); } }
+.skeleton { display: flex; gap: 12px; align-items: center; padding: 12px; }
+.skeleton i { display: block; border-radius: 8px; background: linear-gradient(90deg, var(--hover) 25%, var(--line) 50%, var(--hover) 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+/* messages: pop in, swipe to reply, reactions bounce */
+.msg.pop { animation: msgPop .32s var(--spring) both; transform-origin: bottom left; }
+.msg.mine.pop { transform-origin: bottom right; }
+@keyframes msgPop { from { opacity: 0; transform: translateY(14px) scale(.9); } }
+.msg { touch-action: pan-y; }
+.msg::before { content: "↩️"; position: absolute; left: -34px; top: 50%; transform: translateY(-50%) scale(.4); opacity: 0; transition: .15s; font-size: 18px; }
+.msg.swipe-ready::before { opacity: 1; transform: translateY(-50%) scale(1); }
+.reacts span { animation: badgePop .35s var(--spring); }
+.burst { position: fixed; pointer-events: none; z-index: 50; font-size: 26px; animation: burst 1s var(--ease) forwards; }
+@keyframes burst { 0% { transform: translate(0, 0) scale(.4); opacity: 0; } 15% { opacity: 1; } 100% { transform: translate(var(--dx), var(--dy)) scale(1.3) rotate(var(--rot)); opacity: 0; } }
+.bigheart { position: fixed; pointer-events: none; z-index: 50; font-size: 72px; animation: bigheart .8s var(--spring) forwards; }
+@keyframes bigheart { 0% { transform: translate(-50%, -50%) scale(0); } 40% { transform: translate(-50%, -50%) scale(1.25); opacity: 1; } 100% { transform: translate(-50%, -120%) scale(1); opacity: 0; } }
+.code.pop { animation: msgPop .4s var(--spring) both; }
+
+/* "typing…" as a bubble with bouncing dots */
+.typing-line { min-height: 0; padding: 0 12px; }
+.typing-bub { display: inline-flex; gap: 4px; align-items: center; background: var(--theirs); border-radius: 18px 18px 18px 6px; padding: 10px 14px; box-shadow: var(--shadow); margin: 2px 0 6px; animation: msgPop .3s var(--spring) both; }
+.typing-bub i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); animation: dot 1.2s infinite ease-in-out; }
+.typing-bub i:nth-child(2) { animation-delay: .15s; } .typing-bub i:nth-child(3) { animation-delay: .3s; }
+@keyframes dot { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-5px); opacity: 1; } }
+
+/* one-tap messages above the keyboard */
+.quick { display: flex; gap: 6px; overflow-x: auto; padding: 8px 10px 2px; background: var(--panel); border-top: 1px solid var(--line); scrollbar-width: none; max-height: 60px; transition: max-height .25s var(--ease), padding .25s, opacity .2s; }
+.quick::-webkit-scrollbar { display: none; }
+.quick.hide { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; overflow: hidden; }
+.quick button { flex: none; border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 7px 12px; font-size: 14px; white-space: nowrap; max-width: 70vw; overflow: hidden; text-overflow: ellipsis; animation: fadeUp .3s var(--ease) both; }
+.quick button.emo { font-size: 20px; padding: 3px 10px; }
+.quick button:nth-child(2) { animation-delay: .03s; } .quick button:nth-child(3) { animation-delay: .06s; } .quick button:nth-child(4) { animation-delay: .09s; }
+.quick button:nth-child(5) { animation-delay: .12s; } .quick button:nth-child(6) { animation-delay: .15s; } .quick button:nth-child(7) { animation-delay: .18s; }
+.quick button.sent { animation: sentFly .4s var(--ease); }
+@keyframes sentFly { 50% { transform: translateY(-8px) scale(1.1); background: var(--mine); } }
+.compose { border-top: 0; }
+.cbtn.send.swap { animation: swap .25s var(--spring); }
+@keyframes swap { from { transform: scale(.4) rotate(-60deg); } }
+.compose textarea { transition: border-color .2s, box-shadow .2s; }
+.compose textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(31, 78, 121, .12); }
+
+/* message banner from the top (another chat) */
+.banner-in { position: fixed; left: 50%; top: calc(10px + env(safe-area-inset-top)); transform: translateX(-50%); z-index: 45; width: min(420px, calc(100vw - 20px));
+  display: flex; gap: 10px; align-items: center; padding: 10px 12px; border-radius: 18px; background: var(--panel); color: var(--ink); box-shadow: 0 12px 34px rgba(0,0,0,.22);
+  cursor: pointer; animation: dropIn .4s var(--spring) both; }
+.banner-in.out { animation: dropOut .25s ease both; }
+.banner-in .mid { flex: 1; min-width: 0; }
+.banner-in small { display: block; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@keyframes dropIn { from { transform: translate(-50%, -140%); } }
+@keyframes dropOut { to { transform: translate(-50%, -140%); opacity: 0; } }
+.toast { animation: toastIn .3s var(--spring) both; }
+@keyframes toastIn { from { transform: translate(-50%, 20px); opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
