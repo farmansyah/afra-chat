@@ -77,6 +77,8 @@ def db():
 with closing(db()) as _c:
     _c.execute("PRAGMA journal_mode=WAL")
     _c.executescript(SCHEMA)
+    if "info" not in [r[1] for r in _c.execute("PRAGMA table_info(sessions)")]:  # what each logged-in device is (added later)
+        _c.execute("ALTER TABLE sessions ADD COLUMN info TEXT DEFAULT ''")
     _c.commit()
 
 app = FastAPI(title="A.F.R.A chat", docs_url=None, redoc_url=None, openapi_url=None)
@@ -139,7 +141,7 @@ def _th(token: str) -> str:
 
 def new_session(c, user_id: int, device: str) -> str:
     token = secrets.token_urlsafe(32)
-    c.execute("INSERT INTO sessions VALUES (?,?,?,?,?)", (_th(token), user_id, device[:60], time.time(), time.time()))
+    c.execute("INSERT INTO sessions (token, user_id, device, created, last_used) VALUES (?,?,?,?,?)", (_th(token), user_id, device[:60], time.time(), time.time()))
     return token
 
 
@@ -747,13 +749,78 @@ def avatar_public(uid: int):
 
 
 # ---------------------------------------------------------------- admin
+# ---------------------------------------------------------------- devices (shown to the admin)
+IPHONES = {(375, 667): "SE / 6–8", (414, 736): "6–8 Plus", (375, 812): "X / XS / 11 Pro / 12 mini / 13 mini",
+           (414, 896): "XR / 11 / XS Max / 11 Pro Max", (390, 844): "12 / 13 / 14", (428, 926): "12 Pro Max / 13 Pro Max / 14 Plus",
+           (393, 852): "14 Pro / 15 / 15 Pro / 16", (430, 932): "14 Pro Max / 15 Plus / 15 Pro Max / 16 Plus",
+           (402, 874): "16 Pro / 17 / 17 Pro", (440, 956): "16 Pro Max / 17 Pro Max", (420, 912): "Air"}
+DEVICE_KEYS = {"model": 60, "platform": 40, "os_version": 30, "screen": 20, "dpr": 6, "lang": 20, "tz": 50, "standalone": 5,
+               "embedded": 5, "notifications": 12, "dark": 5, "touch": 5, "app": 12}
+
+
+def device_label(info: dict) -> dict:
+    """A readable name for a device from its browser's description plus what the app reports."""
+    ua = info.get("ua", "")
+    m = lambda rx: (re.search(rx, ua) or [None, ""])[1]
+    if "iPhone" in ua:
+        w, h = sorted(int(x) for x in re.findall(r"\d+", info.get("screen", "0x0"))[:2] or (0, 0))
+        model = "iPhone" + (f" (probably {IPHONES[(w, h)]})" if (w, h) in IPHONES else "")
+        system = "iOS " + m(r"OS (\d+(?:_\d+)?)").replace("_", ".")
+    elif "iPad" in ua or ("Macintosh" in ua and info.get("touch")):
+        model, system = "iPad", "iPadOS " + m(r"OS (\d+(?:_\d+)?)").replace("_", ".")
+    elif "Android" in ua:
+        model = info.get("model") or m(r"Android [\d.]+; ([^;)]+)")
+        model = "Android phone" if not model or model == "K" else model
+        system = "Android " + (info.get("os_version") or m(r"Android ([\d.]+)"))
+    elif "Windows" in ua:
+        model, system = "Windows PC", "Windows" + (" 11" if (info.get("os_version") or "0").split(".")[0].isdigit()
+                                                   and int((info.get("os_version") or "0").split(".")[0]) >= 13 else "")
+    elif "Macintosh" in ua:
+        model, system = "Mac", "macOS"
+    elif "CrOS" in ua:
+        model, system = "Chromebook", "ChromeOS"
+    else:
+        model, system = "Computer", info.get("platform") or "Linux"
+    browser = ("Edge" if "Edg/" in ua else "Samsung Internet" if "SamsungBrowser" in ua else "Opera" if "OPR/" in ua
+               else "Firefox" if ("Firefox" in ua or "FxiOS" in ua) else "Chrome" if ("Chrome" in ua or "CriOS" in ua)
+               else "Safari" if "Safari" in ua else "Browser")
+    how = "inside A.F.R.A" if info.get("embedded") else "Home Screen app" if info.get("standalone") else browser
+    return {"label": f"{model} · {how}", "model": model, "system": system.strip(), "browser": browser, "how": how}
+
+
+@app.post("/api/device")
+def report_device(body: dict, request: Request, authorization: str = Header(None)):
+    """Each device says what it is once per start, so the admin can tell phones and laptops apart."""
+    auth(authorization)
+    info = {k: str(body.get(k))[:n] for k, n in DEVICE_KEYS.items() if body.get(k) not in (None, "")}
+    info["ua"] = (request.headers.get("user-agent") or "")[:300]
+    with closing(db()) as c:
+        c.execute("UPDATE sessions SET info=? WHERE token=?", (json.dumps(info), _th((authorization or "").removeprefix("Bearer ").strip())))
+        c.commit()
+    return {"ok": True}
+
+
+def devices_of(c, uid: int) -> list:
+    pushed = {r[0] for r in c.execute("SELECT device FROM pushes WHERE user_id=?", (uid,))}
+    out = []
+    for s in c.execute("SELECT device, created, last_used, info FROM sessions WHERE user_id=? ORDER BY last_used DESC", (uid,)):
+        info = json.loads(s["info"]) if s["info"] else {}
+        d = device_label(info) if info else {"label": "Unknown device (not opened since this was added)"}
+        out.append({**d, "id": s["device"], "logged_in": s["created"], "last_used": s["last_used"],
+                    "online": s["device"] in SOCKETS.get(uid, {}) or any(k.startswith(s["device"] + ".") for k in SOCKETS.get(uid, {})),
+                    "push": s["device"] in pushed, "screen": info.get("screen", ""), "lang": info.get("lang", ""),
+                    "tz": info.get("tz", ""), "dark": info.get("dark") == "True", "app": info.get("app", ""), "ua": info.get("ua", "")})
+    return out
+
+
 @app.get("/api/admin/users")
 def admin_users(authorization: str = Header(None)):
     admin(authorization)
     with closing(db()) as c:
         rows = c.execute("SELECT * FROM users ORDER BY created").fetchall()
-        devices = {r[0]: r[1] for r in c.execute("SELECT user_id, COUNT(*) FROM sessions GROUP BY user_id")}
-    return [{**public(r), "disabled": bool(r["disabled"]), "created": r["created"], "devices": devices.get(r["id"], 0)} for r in rows]
+        devs = {r["id"]: devices_of(c, r["id"]) for r in rows}
+    return [{**public(r), "disabled": bool(r["disabled"]), "created": r["created"], "devices": len(devs[r["id"]]),
+             "device_list": devs[r["id"]]} for r in rows]
 
 
 @app.patch("/api/admin/users/{uid}")
@@ -944,16 +1011,17 @@ def export_users(t: str = "", authorization: str = Header(None)):
     admin_q(t, authorization)
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["id", "username", "name", "admin", "switched off", "joined", "last seen", "messages sent", "devices logged in", "notifications"])
+    w.writerow(["id", "username", "name", "admin", "switched off", "joined", "last seen", "messages sent", "devices logged in", "notifications", "devices"])
     fmt = lambda x: time.strftime("%Y-%m-%d %H:%M", time.localtime(x)) if x else ""
     with closing(db()) as c:
         for u in c.execute("SELECT * FROM users ORDER BY id"):
             msgs = c.execute("SELECT COUNT(*) FROM messages WHERE sender=? AND deleted=0", (u["id"],)).fetchone()[0]
-            devs = c.execute("SELECT COUNT(*) FROM sessions WHERE user_id=?", (u["id"],)).fetchone()[0]
+            dl = devices_of(c, u["id"]); devs = len(dl)
             push = c.execute("SELECT COUNT(*) FROM pushes WHERE user_id=?", (u["id"],)).fetchone()[0]
             seen = time.time() if SOCKETS.get(u["id"]) else u["last_seen"]
             w.writerow([u["id"], u["username"], u["name"], "yes" if u["is_admin"] else "", "yes" if u["disabled"] else "",
-                        fmt(u["created"]), fmt(seen), msgs, devs, push])
+                        fmt(u["created"]), fmt(seen), msgs, devs, push,
+                        "; ".join(f'{d["label"]} ({d.get("system", "")})' for d in dl)])
     return Response("\ufeff" + out.getvalue(), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="afra-chat-users-{time.strftime("%Y%m%d")}.csv"'})
 

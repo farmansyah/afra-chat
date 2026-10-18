@@ -1,7 +1,7 @@
 /* A.F.R.A ♥: works offline (app shell) and shows notifications with the sender's name and message.
    The notification text arrives encrypted for this phone (Web Push, RFC 8291); only this phone can read it. */
-const CACHE = "afra-chat-v9";
-const SHELL = ["./", "index.html", "app.css?v=9", "alive.css?v=9", "theme.css?v=9", "app.js?v=9", "templates.json", "manifest.webmanifest", "icon-512.png"];
+const CACHE = "afra-chat-v10";
+const SHELL = ["./", "index.html", "app.css?v=10", "alive.css?v=10", "theme.css?v=10", "app.js?v=10", "templates.json", "manifest.webmanifest", "icon-512.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", (e) => {

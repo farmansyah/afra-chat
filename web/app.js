@@ -714,17 +714,25 @@
         } else {
           const users = await api("/api/admin/users");
           el.innerHTML = users.map((u) => `<div class="urow"><div class="av-wrap ${u.online ? "on" : ""}">${avatar(u, "sm")}</div><div class="mid"><b>${esc(u.name)}</b> <span style="color:var(--muted)">@${esc(u.username)}</span>${u.is_admin ? ` <span class="pill gold">admin</span>` : ""}${u.disabled ? ` <span class="pill">off</span>` : ""}
-              <small>${u.online ? "online" : esc(lastSeen(u) || "never online")} · ${u.devices} device${u.devices === 1 ? "" : "s"}</small></div>
-              ${u.id === S.me.id ? "" : `<button class="sbtn" data-chat="${esc(u.username)}">💬</button><button class="sbtn" data-more="${u.id}">⋯</button>`}</div>`).join("");
+              <small>${u.online ? "online" : esc(lastSeen(u) || "never online")} · ${u.device_list.length ? esc([...new Set(u.device_list.map((d) => d.model || "Unknown"))].join(", ")) : "no devices"}</small></div>
+              ${u.id === S.me.id ? `<button class="sbtn" data-more="${u.id}">⋯</button>` : `<button class="sbtn" data-chat="${esc(u.username)}">💬</button><button class="sbtn" data-more="${u.id}">⋯</button>`}</div>`).join("");
           $$("[data-chat]", el).forEach((b) => b.onclick = async () => { const c = await api("/api/convs", { body: { username: b.dataset.chat } }); page.remove(); addConv(c); openConv(c.id); });
           $$("[data-more]", el).forEach((b) => b.onclick = () => {
             const u = users.find((x) => x.id === +b.dataset.more);
             const m = sheet(`<h3>${esc(u.name)} <small style="color:var(--muted)">@${esc(u.username)}</small></h3><div class="menu">
-              <button data-x="reset">🔑 Password reset code</button><button data-x="admin">${u.is_admin ? "Remove admin" : "🛡 Make admin"}</button>
-              <button data-x="off" class="${u.disabled ? "" : "danger"}">${u.disabled ? "✓ Switch account back on" : "Switch account off (logs them out)"}</button>
-              <button data-x="delete" class="danger">🗑 Delete account…</button></div><div id="mout"></div>`);
+              <button data-x="devices">📱 Devices (${u.device_list.length})</button>${u.id === S.me.id ? "" : `<button data-x="reset">🔑 Password reset code</button>`}${u.id === S.me.id ? "" : `<button data-x="admin">${u.is_admin ? "Remove admin" : "🛡 Make admin"}</button>`}
+              ${u.id === S.me.id ? "" : `<button data-x="off" class="${u.disabled ? "" : "danger"}">${u.disabled ? "✓ Switch account back on" : "Switch account off (logs them out)"}</button>
+              <button data-x="delete" class="danger">🗑 Delete account…</button>`}</div><div id="mout"></div>`);
             $$("[data-x]", m).forEach((x) => x.onclick = async () => {
               try {
+                if (x.dataset.x === "devices") {
+                  const when = (t) => t ? new Date(t * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "";
+                  $("#mout", m).innerHTML = u.device_list.map((d) => `<div class="devcard"><b>${d.online ? "🟢 " : ""}${esc(d.label)}</b>
+                    <small>${esc([d.system, d.browser !== d.how ? d.browser : "", d.screen && `screen ${d.screen}`, d.lang, d.tz, d.dark ? "dark mode" : d.screen ? "light mode" : "", d.push ? "🔔 notifications on" : d.screen ? "🔕 notifications off" : ""].filter(Boolean).join(" · "))}</small>
+                    <small>Logged in ${esc(when(d.logged_in))} · last used ${esc(when(d.last_used))}</small>
+                    ${d.ua ? `<details><summary>Technical details</summary><code>${esc(d.ua)}</code></details>` : ""}</div>`).join("") || `<div class="hint">Not logged in on any device.</div>`;
+                  return;
+                }
                 if (x.dataset.x === "delete") {
                   $("#mout", m).innerHTML = `<div class="hint" style="margin:10px 0">This removes @${esc(u.username)} for good: their account, their Notes to self, and their chats with everyone (the other person loses those chats too), with all photos and files. "Switch account off" is the undoable option. A copy of the database is saved in the server's backups first.</div>
                     <input class="inp" id="dconf" placeholder="Type ${esc(u.username)} to confirm" autocapitalize="none" autocorrect="off" autocomplete="off">
@@ -771,7 +779,7 @@
       const reg = await navigator.serviceWorker.ready;
       let sub = await reg.pushManager.getSubscription();
       if (!sub) { const { key } = await api("/api/push/key"); sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(key) }); }
-      await api("/api/push", { body: { sub: sub.toJSON(), device: DEVICE } });
+      await api("/api/push", { body: { sub: sub.toJSON(), device: DEVICE } }); reportDevice();
       return "Notifications are on ♥";
     } catch (e) { return "Couldn't turn on notifications: " + e.message; }
   }
@@ -853,13 +861,24 @@
     authScreen("login"); if (expired) toast("Please log in again");
   }
 
+  async function reportDevice() {  // tells the server what this device is (shown to the admin in People)
+    const d = { screen: `${screen.width}x${screen.height}`, dpr: devicePixelRatio, lang: navigator.language, standalone, embedded: window.parent !== window,
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone, notifications: "Notification" in window ? Notification.permission : "none",
+      dark: matchMedia("(prefers-color-scheme: dark)").matches, touch: navigator.maxTouchPoints > 1, app: (document.querySelector('script[src*="app.js"]')?.src.match(/v=(\d+)/) || [])[1] };
+    try {
+      const h = navigator.userAgentData && await navigator.userAgentData.getHighEntropyValues(["model", "platformVersion"]);
+      if (h) Object.assign(d, { model: h.model, os_version: h.platformVersion, platform: h.platform });
+    } catch { }
+    api("/api/device", { body: d }).catch(() => { });
+  }
+
   // ------------------------------------------------------------------ start
   async function start() {
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => { });
     if (!TOKEN) return authScreen();
     S.me = S.me || store.get("cache", {}).me || null;
     if (!S.me) { try { S.me = await api("/api/me"); } catch (e) { if (!TOKEN) return; return authScreen(); } }
-    cacheLoad(); shell(); connect(); pwGate();
+    cacheLoad(); shell(); connect(); pwGate(); reportDevice();
     toAfra({ type: "ready", me: { username: S.me.username, name: S.me.name } });
     const want = +(new URLSearchParams(location.hash.slice(1)).get("c") || 0);
     if (want) setTimeout(() => conv(want) && openConv(want), 400);
