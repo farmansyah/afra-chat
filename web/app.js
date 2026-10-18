@@ -77,6 +77,56 @@
   }
   function toast(msg) { const t = document.createElement("div"); t.className = "toast"; t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 2800); }
 
+  // ---- the heart: every so often it taps out "RAINA DANA" in Morse code; tap it for little love notes (same as in A.F.R.A)
+  const HB = (() => {
+    const MORSE = { R: ".-.", A: ".-", I: "..", N: "-.", D: "-.." }, UNIT = 150, ramp = 35, glow = "drop-shadow(0 0 6px rgba(229,72,77,.85))";
+    let t = 0; const beats = [];
+    "RAINA DANA".split(" ").forEach((word, wi) => {
+      if (wi) t += 4 * UNIT;
+      word.split("").forEach((ch) => { MORSE[ch].split("").forEach((sym) => { const on = (sym === "." ? 1 : 3) * UNIT; beats.push([t, t + on]); t += on + UNIT; }); t += 2 * UNIT; });
+    });
+    const kf = [{ offset: 0, transform: "scale(1)", filter: "none" }];
+    beats.forEach((b) => {
+      kf.push({ offset: b[0] / t, transform: "scale(1)", filter: "none" }, { offset: (b[0] + ramp) / t, transform: "scale(1.42)", filter: glow },
+        { offset: (b[1] - ramp) / t, transform: "scale(1.42)", filter: glow }, { offset: b[1] / t, transform: "scale(1)", filter: "none" });
+    });
+    kf.push({ offset: 1, transform: "scale(1)", filter: "none" });
+    return { kf, total: t };
+  })();
+  function heartbeat() { $$(".dedi-heart").forEach((h) => { if (h.animate) h.animate(HB.kf, { duration: HB.total, easing: "linear" }); }); }
+  if (!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches)) {
+    const next = (first) => {
+      const seen = !!store.get("heartseen"), min = first ? 15 : seen ? 240 : 60, max = first ? 45 : seen ? 480 : 180;
+      setTimeout(() => { if (document.visibilityState === "visible") heartbeat(); next(false); }, (min + Math.random() * (max - min)) * 1000);
+    };
+    next(true);
+  }
+  function heartNotes() {
+    const N = window.AFRA_NOTES; if (!N || !N.notes || !N.notes.length) return;
+    store.set("heartseen", 1);
+    const last = store.get("notelast", ""), list = [...N.notes].sort(() => Math.random() - .5);
+    if (list.length > 1 && list[0] === last) list.push(list.shift());
+    store.set("notelast", list[0]);
+    const o = document.createElement("div"); o.className = "hn";
+    o.innerHTML = `<div class="hn-bg" data-x></div><div class="hn-box">
+      <button class="hn-close" data-x aria-label="Close">✕</button>
+      <div class="hn-head"><img src="icon-512.png" alt=""><h2>${esc(N.title || "A little note")}</h2></div>
+      <div class="hn-track">${list.map((t, i) => `<article class="hn-card ${i ? "" : "on"}"><p>${esc(t)}</p><div class="sig">${esc(N.signature || "")}</div></article>`).join("")}</div>
+      <div class="hn-foot"><button class="hn-nav" data-n="-1" aria-label="Previous">‹</button><span data-c>1 / ${list.length}</span><button class="hn-nav" data-n="1" aria-label="Next">›</button></div>
+      <small class="hn-tip">Swipe for another note ♥</small></div>`;
+    document.body.appendChild(o);
+    const tr = $(".hn-track", o), cards = $$(".hn-card", o), cnt = $("[data-c]", o);
+    const idx = () => Math.max(0, Math.min(cards.length - 1, Math.round(tr.scrollLeft / (cards[0].offsetWidth + 12))));
+    const go = (i) => tr.scrollTo({ left: Math.max(0, Math.min(cards.length - 1, i)) * (cards[0].offsetWidth + 12), behavior: "smooth" });
+    tr.addEventListener("scroll", () => { const i = idx(); cnt.textContent = `${i + 1} / ${cards.length}`; cards.forEach((c, k) => c.classList.toggle("on", k === i)); }, { passive: true });
+    $$("[data-n]", o).forEach((b) => b.onclick = () => go(idx() + +b.dataset.n));
+    const close = () => { document.removeEventListener("keydown", key); o.classList.add("closing"); setTimeout(() => o.remove(), 200); };
+    const key = (e) => { if (e.key === "Escape") close(); else if (e.key === "ArrowRight") go(idx() + 1); else if (e.key === "ArrowLeft") go(idx() - 1); };
+    document.addEventListener("keydown", key);
+    $$("[data-x]", o).forEach((b) => b.onclick = close);
+    burstAt($(".hn-head img", o), "❤️", 5);
+  }
+
   // ------------------------------------------------------------------ bridge to A.F.R.A
   // When A.F.R.A shows this chat (♥ → Messages), the two pages talk directly: unread count, new-message previews and
   // "share in chat". No API key: the login in this chat is the permission, and only an A.F.R.A running on this computer
@@ -298,36 +348,60 @@
     app.innerHTML = `
       <section class="pane-list">
         <div class="top"><div id="meAv" style="cursor:pointer"></div><h1>Chats<small class="greet" id="greet"></small></h1>
-          <button class="icon" id="bAdmin" title="Admin" hidden>🛡</button></div>
+          <button class="icon dedi-heart" id="bHeart" title="A little note" aria-label="A little note">♥</button><button class="icon" id="bAdmin" title="Admin" hidden>🛡</button></div>
         <div id="banner"></div>
         <div class="list-tools"><input type="search" id="lq" placeholder="Search chats"></div>
         <div class="convs" id="convs"></div>
         <button class="fab" id="bNew" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 21l2.1-5.7A8.4 8.4 0 1 1 21 11.5z"/><path d="M12 8v7M8.5 11.5h7"/></svg></button>
       </section>
       <section class="pane-chat" id="chatPane"></section>`;
-    $("#bNew").onclick = newChat; $("#bAdmin").onclick = adminPage; $("#meAv").onclick = profileSheet;
+    $("#bNew").onclick = newChat; $("#bHeart").onclick = heartNotes; $("#bAdmin").onclick = adminPage; $("#meAv").onclick = profileSheet;
     $("#lq").oninput = (e) => { S.filter = e.target.value.trim().toLowerCase(); drawList(); };
     setView(S.view); drawAll(); drawBanner();
   }
   function setView(v) { if (S.view !== v) { app.classList.remove("slide"); void app.offsetWidth; app.classList.add("slide"); } S.view = v; app.dataset.view = v; }
   function drawAll() { if (!$("#convs")) return; $("#greet").innerHTML = greeting(); $("#meAv").innerHTML = avatar(S.me, "sm"); $("#bAdmin").hidden = !S.me.is_admin; drawList(); drawChatPane(); badge(); }
 
+  // Pinned chats (up to 3). There is no per-user settings store on the server, so this is saved on this device.
+  const pinList = () => (store.get("pins", []) || []).filter((id) => S.convs.some((c) => c.id === id));
+  function bindPin(d) {  // long-press (touch) or right-click (mouse) on a chat
+    let t = 0, x = 0, y = 0;
+    const open = () => { d._lp = 1; setTimeout(() => { d._lp = 0; }, 700); pinSheet(+d.dataset.c); };
+    d.addEventListener("contextmenu", (e) => { e.preventDefault(); if (!d._lp) open(); });
+    d.addEventListener("pointerdown", (e) => { if (e.pointerType === "mouse") return; x = e.clientX; y = e.clientY; clearTimeout(t); t = setTimeout(() => { t = 0; if (navigator.vibrate) navigator.vibrate(12); open(); }, 480); });
+    d.addEventListener("pointermove", (e) => { if (t && Math.hypot(e.clientX - x, e.clientY - y) > 9) { clearTimeout(t); t = 0; } });
+    ["pointerup", "pointercancel", "pointerleave"].forEach((n) => d.addEventListener(n, () => { clearTimeout(t); t = 0; }));
+  }
+  function pinSheet(cid) {
+    const c = conv(cid); if (!c) return;
+    const pins = pinList(), on = pins.includes(cid);
+    const s = sheet(`<h3>${esc(title(c))}</h3><div class="menu"><button data-p>${on ? "📌 Unpin chat" : "📌 Pin chat"}</button></div>`);
+    $("[data-p]", s).onclick = () => {
+      s.remove();
+      if (!on && pins.length >= 3) return toast("You can pin up to 3 chats");
+      store.set("pins", on ? pins.filter((x) => x !== cid) : [...pins, cid]); drawList(); toast(on ? "Unpinned" : "Pinned to the top");
+    };
+  }
+
   function drawList(bumpId) {
     const el = $("#convs"); if (!el) return;
     const before = {}; $$(".conv", el).forEach((d) => { before[d.dataset.c] = d.getBoundingClientRect().top; });
     if (!S.convs.length && !LOADED) { el.innerHTML = [1, 2, 3, 4].map(() => `<div class="skeleton"><i style="width:44px;height:44px;border-radius:50%"></i><span style="flex:1"><i style="width:45%;height:13px;margin-bottom:8px"></i><i style="width:75%;height:11px"></i></span></div>`).join(""); return; }
     const t = now();
-    const items = S.convs.filter((c) => !S.filter || title(c).toLowerCase().includes(S.filter) || (other(c) && other(c).username.includes(S.filter)));
+    const pins = pinList(), items = S.convs.filter((c) => !S.filter || title(c).toLowerCase().includes(S.filter) || (other(c) && other(c).username.includes(S.filter)));
+    const rank = (id) => { const i = pins.indexOf(id); return i < 0 ? 99 : i; };
+    items.sort((x, y) => rank(x.id) - rank(y.id));  // pinned chats first (the sort keeps everything else in order)
     el.innerHTML = items.map((c) => {
       const u = other(c), typing = (S.typing[c.id] || 0) > t;
       const last = c.last ? (c.last.sender === S.me.id && c.kind !== "self" ? "You: " : "") + preview(c.last) : c.kind === "self" ? "Keep notes, links and photos for yourself" : c.kind === "bot" ? "Reminders, notes, lists, questions" : "Say hi 👋";
       return `<div class="conv ${S.cur === c.id ? "on" : ""}" data-c="${c.id}">
         <div class="av-wrap ${u && u.online && !u.bot ? "on" : ""}">${avatar(u, "", c.kind === "self")}</div>
-        <div class="mid"><div class="row1"><b>${esc(title(c))}</b><small>${c.last ? shortTime(c.last.created) : ""}</small></div>
+        <div class="mid"><div class="row1"><b>${esc(title(c))}</b>${pins.includes(c.id) ? `<i class="pin" title="Pinned">📌</i>` : ""}<small>${c.last ? shortTime(c.last.created) : ""}</small></div>
           <div class="row2"><span class="${typing ? "typing" : ""}">${typing ? "typing…" : esc(last)}</span>${isMuted(c) ? `<i class="muted">🔕</i>` : ""}${c.unread ? `<span class="badge ${isMuted(c) ? "quiet" : ""}">${c.unread}</span>` : ""}</div></div></div>`;
     }).join("") || `<div class="empty">No chats yet.<br><small>Tap 💬 at the bottom right to start one.</small></div>`;
     $$(".conv", el).forEach((d) => {
-      d.onclick = () => openConv(+d.dataset.c);
+      d.onclick = () => { if (d._lp) { d._lp = 0; return; } openConv(+d.dataset.c); };
+      bindPin(d);
       const was = before[d.dataset.c], top = d.getBoundingClientRect().top;
       if (was !== undefined && Math.abs(was - top) > 2 && d.animate) d.animate([{ transform: `translateY(${was - top}px)` }, { transform: "none" }], { duration: 320, easing: "cubic-bezier(.2,.8,.2,1)" });
       if (+d.dataset.c === bumpId) d.classList.add("bump");
@@ -352,15 +426,17 @@
         <button class="icon" id="bTheme" title="Chat theme">🎨</button><button class="icon" id="bSearch" title="Search">🔍</button></div>
       <div class="searchbar" id="sbar" hidden><input type="search" id="sq" placeholder="Search in this chat"><button class="cbtn" id="sclose">✕</button></div>
       <div class="log" id="log"></div>
-      <div class="typing-line" id="typing"></div>
-      <div id="replybar"></div>
-      <div class="quick" id="quick"></div>
-      <div class="compose">
-        <button class="cbtn" id="btpl" title="Quick messages">💌</button>
-        <button class="cbtn" id="bemoji" title="Emoji">😊</button>
-        <textarea id="txt" rows="1" placeholder="Message"></textarea>
-        <button class="cbtn" id="battach" title="Attach">📎</button>
-        <button class="cbtn send" id="bsend" title="Send">🎤</button>
+      <div class="dock" id="dock">
+        <div class="typing-line" id="typing"></div>
+        <div id="replybar"></div>
+        <div class="quick" id="quick"></div>
+        <div class="compose" id="compose">
+          <button class="cbtn plus" id="battach" title="Attach" aria-label="Attach"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+          <div class="pill"><textarea id="txt" rows="1" placeholder="Message"></textarea><button class="cbtn" id="bemoji" title="Emoji">😊</button></div>
+          <button class="cbtn cam" id="bcam" title="Tap for a photo or video, hold for a video note" aria-label="Camera"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.6l1.2-1.7A1.5 1.5 0 0 1 10.5 3.5h3a1.5 1.5 0 0 1 1.2.8L15.9 6h1.6A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.4"/></svg></button>
+          <button class="cbtn send" id="bsend" title="Send">🎤</button>
+          <input type="file" id="bcamfile" accept="image/*,video/*" capture hidden>
+        </div>
       </div>`;
     $("#bBack").onclick = () => { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); drawList(); };
     $("#bSearch").onclick = () => { $("#sbar").hidden = false; $("#sq").focus(); };
@@ -371,6 +447,7 @@
     const grow = () => {
       txt.style.height = "auto"; txt.style.height = Math.min(txt.scrollHeight, 140) + "px";
       const typed = !!(txt.value.trim() || S.edit), b = $("#bsend");
+      $("#compose").classList.toggle("typed", typed);
       if (b.dataset.mode !== (typed ? "send" : "mic")) { b.dataset.mode = typed ? "send" : "mic"; b.textContent = typed ? "➤" : "🎤"; b.classList.remove("swap"); void b.offsetWidth; b.classList.add("swap"); }
       $("#quick").classList.toggle("hide", typed);
     };
@@ -380,10 +457,39 @@
     $("#bsend").onclick = () => (txt.value.trim() || S.edit) ? sendText() : toggleVoice();
     $("#battach").onclick = attachMenu;
     $(".top .who", pane).onclick = infoPage; $("#chatAv").onclick = infoPage;
-    $("#btpl").onclick = openTemplates; $("#bemoji").onclick = openEmoji;
+    $("#bemoji").onclick = openEmoji; bindCamera();
+    const dock = $("#dock"), logEl = $("#log");  // the glass bar floats over the chat: keep the last message clear of it
+    if (window.ResizeObserver) new ResizeObserver(() => { const near = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 160; logEl.style.paddingBottom = (dock.offsetHeight + 6) + "px"; if (near) logEl.scrollTop = logEl.scrollHeight; }).observe(dock);
     window.growComposer = grow; grow(); drawQuick();
     applyStyle(); drawHeader(); drawChat(); scrollEnd(true);
     if (focus && !matchMedia("(pointer: coarse)").matches) txt.focus();
+  }
+
+  function bindCamera() {  // tap: take a photo or video. Hold: a round video note (slide up to lock, left to cancel, let go to send)
+    const b = $("#bcam"), f = $("#bcamfile"); if (!b) return;
+    f.onchange = (e) => { const fs = [...e.target.files]; e.target.value = ""; if (fs.length) mediaPreview(fs); };
+    let timer = 0, held = false, ctl = null, sx = 0, sy = 0, pid = null;
+    b.addEventListener("contextmenu", (e) => e.preventDefault());
+    b.addEventListener("pointerdown", (e) => {
+      if (e.button) return; sx = e.clientX; sy = e.clientY; pid = e.pointerId; ctl = null;
+      try { b.setPointerCapture(pid); } catch { }
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = 0; held = true; ctl = { dx: 0, dy: 0, up: false, abort: false }; b.classList.add("hold");
+        if (navigator.vibrate) navigator.vibrate(15);
+        recordVideoNote({ hold: true, ctl });
+      }, 300);
+    });
+    b.addEventListener("pointermove", (e) => {
+      if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 12) { clearTimeout(timer); timer = 0; }
+      if (ctl) { ctl.dx = e.clientX - sx; ctl.dy = e.clientY - sy; if (ctl.onmove) ctl.onmove(); }
+    });
+    const end = (e) => {
+      if (e.pointerId !== pid) return; clearTimeout(timer); timer = 0; b.classList.remove("hold");
+      if (ctl) { const c = ctl; ctl = null; c.up = true; c.abort = e.type === "pointercancel"; if (c.onup) c.onup(); setTimeout(() => { held = false; }, 400); }
+    };
+    b.addEventListener("pointerup", end); b.addEventListener("pointercancel", end);
+    b.addEventListener("click", () => { if (held) return; b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop"); f.click(); });
   }
 
   async function drawQuick() {  // one tap sends: a heart, a hug, a few love notes (new ones each time), surprise
@@ -395,17 +501,34 @@
       $$("[data-x]", el).forEach((b) => b.onclick = () => { b.classList.add("sent"); setTimeout(() => b.classList.remove("sent"), 400); send({ text: ex[+b.dataset.x][1] }); });
       return;
     }
-    const tpl = await loadTemplates(), all = tplPool(tpl.categories || []).filter(([, t]) => t.length <= 46);
-    const picks = [];
-    while (picks.length < 4 && all.length) picks.push(all.splice(pickWeighted(all), 1)[0][1]);
-    const chips = ["❤️", "🥰", "🤗", ...picks];
-    el.innerHTML = chips.map((t, i) => `<button data-q="${i}" class="${t.length <= 3 ? "emo" : ""}">${esc(t)}</button>`).join("") + `<button data-q="more" title="More messages">💌 More</button>`;
-    $$("[data-q]", el).forEach((b) => b.onclick = () => {
-      if (b.dataset.q === "more") return openTemplates();
-      b.classList.add("sent"); setTimeout(() => b.classList.remove("sent"), 400);
-      send({ text: chips[+b.dataset.q], reply_to: S.reply ? S.reply.id : null }); S.reply = null; drawReply();
-      if (chips[+b.dataset.q].length > 3) setTimeout(drawQuick, 500);  // fresh suggestions
-    });
+    const tpl = await loadTemplates();
+    const pickChips = () => {  // a fresh mix: a couple from templates.json plus lines from lines.js, no repeats
+      const tp = tplPool(tpl.categories || []).filter(([, t]) => t.length <= 46), lines = [...(window.AFRA_LINES || [])];
+      const out = [], seen = new Set(), add = (t) => { const k = t.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(t); } };
+      for (let n = 0; n < 2 && tp.length; n++) add(tp.splice(pickWeighted(tp), 1)[0][1]);
+      while (out.length < 5 && lines.length) add(lines.splice(Math.floor(Math.random() * lines.length), 1)[0]);
+      while (out.length < 5 && tp.length) add(tp.splice(pickWeighted(tp), 1)[0][1]);
+      return out.sort(() => Math.random() - .5);
+    };
+    let chips = [];
+    const paint = (anim) => {
+      chips = ["❤️", ...pickChips()];
+      el.classList.remove("rolling"); el.classList.toggle("shuf", !!anim);
+      el.innerHTML = chips.map((t, i) => `<button data-q="${i}" style="--i:${i}" class="${t.length <= 3 ? "emo" : ""}">${esc(t)}</button>` + (i === 0 ? `<button data-q="dice" class="dice ${anim ? "settle" : ""}" title="Shuffle the suggestions" aria-label="Shuffle the suggestions">🎲</button>` : "")).join("") + `<button data-q="more" title="More messages">💌 More</button>`;
+      $$("[data-q]", el).forEach((b) => b.onclick = () => {
+        if (b.dataset.q === "more") return openTemplates();
+        if (b.dataset.q === "dice") {
+          if (el.classList.contains("rolling")) return;
+          if (navigator.vibrate) navigator.vibrate(10);
+          b.classList.add("roll"); el.classList.add("rolling"); setTimeout(() => paint(true), 480); return;
+        }
+        b.classList.add("sent"); setTimeout(() => b.classList.remove("sent"), 400);
+        const t = chips[+b.dataset.q];
+        send({ text: t, reply_to: S.reply ? S.reply.id : null }); S.reply = null; drawReply();
+        if (t.length > 3) setTimeout(() => $("#quick") === el && paint(true), 500);  // fresh suggestions
+      });
+    };
+    paint(false);
   }
 
   function drawHeader() {
@@ -562,7 +685,7 @@
   const inkFor = (hex) => isDark(hex) ? "#ffffff" : "#111111";
   function bgCss(st) {  // [css background, is it dark?]
     const b = st.bg || "";
-    if (b.startsWith("photo:")) { const d = (st.dim ?? 25) / 100; return [`linear-gradient(rgba(0,0,0,${d}),rgba(0,0,0,${d})), url("${fileUrl(b.slice(6))}") center/cover no-repeat`, d >= 0.2]; }
+    if (b.startsWith("photo:")) { if (store.get("photobg", true) === false) return ["", false]; const d = (st.dim ?? 25) / 100; return [`linear-gradient(rgba(0,0,0,${d}),rgba(0,0,0,${d})), url("${fileUrl(b.slice(6))}") center/cover no-repeat`, d >= 0.2]; }
     if (b === "custom") { const a = st.bg1 || "#ffd1dc", z = st.bg2 || a; return [`linear-gradient(160deg,${a},${z})`, isDark(a) && isDark(z)]; }
     const p = BGS.find((x) => x[0] === b); if (!p || !p[2]) return ["", false];
     const dm = darkMode() && !!p[3]; return [dm ? p[3] : p[2], p[4][darkMode() ? 1 : 0]];
@@ -586,6 +709,34 @@
   function applyStyle() { const c = conv(S.cur), pane = $("#chatPane"), log = $("#log"); if (c && pane && log) paintStyle(pane, log, chatStyle(c)); }
   try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyStyle); } catch { }
 
+  const photoSwitch = () => `<label class="swrow"><span><b>Photo backgrounds</b><small>Turn off to use the plain background on this device (nice on a computer)</small></span><input type="checkbox" class="swtog" id="tphotobg" ${store.get("photobg", true) === false ? "" : "checked"}></label>`;
+  function wallpaperPreview(blob, d) {  // full-screen look at a photo before it becomes the chat background
+    return new Promise((res) => {
+      const url = URL.createObjectURL(blob); let dim = d.dim ?? 25;
+      const o = document.createElement("div"); o.className = "wpv";
+      o.innerHTML = `<div class="wpv-bg" style="background-image:url('${url}')"></div><div class="wpv-dim"></div>
+        <div class="wpv-top"><button class="wpv-b" data-c>Cancel</button><b>Wallpaper preview</b><span></span></div>
+        <div class="log wpv-log">
+          <div class="msg"><div class="bub"><div class="txt">Hey you 👋 how does this look?</div></div></div>
+          <div class="msg mine"><div class="bub"><div class="txt">I love it ♥</div></div><div class="meta">${fmtTime(now())} <span class="ticks read">✓✓</span></div></div>
+          <div class="msg"><div class="bub"><div class="txt">Then it's yours.</div></div></div>
+        </div>
+        <div class="wpv-bot"><label>Darken <input type="range" min="0" max="70" value="${dim}"></label>
+          <div class="wpv-btns"><button class="sbtn" data-c>Cancel</button><button class="big-btn" data-ok>Set wallpaper</button></div></div>`;
+      document.body.appendChild(o);
+      const log = $(".wpv-log", o), dm = $(".wpv-dim", o);
+      paintStyle(o, log, { bg: "none", bubble: d.bubble, mine: d.mine, theirs: d.theirs });
+      log.classList.add("styled");
+      const paint = () => { dm.style.opacity = dim / 100; log.classList.toggle("on-dark", dim >= 20); };
+      paint();
+      const done = (v) => { document.removeEventListener("keydown", key); o.classList.add("closing"); setTimeout(() => { o.remove(); URL.revokeObjectURL(url); }, 180); res(v); };
+      const key = (e) => { if (e.key === "Escape") done(null); };
+      document.addEventListener("keydown", key);
+      $("input", o).oninput = (e) => { dim = +e.target.value; paint(); };
+      $$("[data-c]", o).forEach((b) => b.onclick = () => done(null));
+      $("[data-ok]", o).onclick = () => done({ dim });
+    });
+  }
   function themeSheet() {
     const c = conv(S.cur); if (!c) return;
     const shared = c.kind !== "self", mineOwn = hasKeys(c.my_style);
@@ -610,7 +761,7 @@
       const body = $("#tbody", s);
       if (tab === "bg") {
         const cur = isPhoto() ? "photo" : (d.bg || "none");
-        body.innerHTML = `<div class="swatches">${BGS.map(([id, name]) => `<button class="sw ${cur === id ? "on" : ""}" data-bg="${id}"><i style="background:${esc(bgCss({ bg: id })[0] || "var(--bg)")}"></i><span>${name}</span></button>`).join("")}
+        body.innerHTML = photoSwitch() + `<div class="swatches">${BGS.map(([id, name]) => `<button class="sw ${cur === id ? "on" : ""}" data-bg="${id}"><i style="background:${esc(bgCss({ bg: id })[0] || "var(--bg)")}"></i><span>${name}</span></button>`).join("")}
           <button class="sw ${cur === "photo" ? "on" : ""}" data-bg="photo"><i style="${isPhoto() ? `background:${esc(bgCss(d)[0])}` : ""}">📷</i><span>Your photo</span></button>
           <button class="sw ${cur === "custom" ? "on" : ""}" data-bg="custom"><i style="background:${esc(bgCss({ bg: "custom", bg1: d.bg1 || "#ffd1dc", bg2: d.bg2 || "#c3b1ff" })[0])}"></i><span>Custom</span></button></div>
           ${cur === "custom" ? `<div class="row colors"><label>Top <input type="color" id="tbg1" value="${d.bg1 || "#ffd1dc"}"></label><label>Bottom <input type="color" id="tbg2" value="${d.bg2 || "#c3b1ff"}"></label></div>` : ""}
@@ -626,6 +777,7 @@
         if (v === "photo") return $("#tphoto", s).click();
         d.bg = v; if (v === "custom") { d.bg1 = d.bg1 || "#ffd1dc"; d.bg2 = d.bg2 || "#c3b1ff"; } draw();
       });
+      const ps = $("#tphotobg", body); if (ps) ps.onchange = () => { store.set("photobg", ps.checked); draw(); applyStyle(); };
       $$("[data-bub]", body).forEach((b) => b.onclick = () => { d.bubble = b.dataset.bub; if (d.bubble === "custom") d.mine = d.mine || "#ff6b9a"; draw(); });
       const live = (id, key, redraw) => { const el = $("#" + id, body); if (el) { el.oninput = () => { d[key] = key === "dim" ? +el.value : el.value; preview(); }; if (redraw) el.onchange = draw; } };
       live("tbg1", "bg1", true); live("tbg2", "bg2", true); live("tdim", "dim"); live("tmine", "mine", true); live("ttheirs", "theirs", true);
@@ -636,8 +788,9 @@
     $("#tphoto", s).onchange = async (e) => {
       const f = e.target.files[0]; e.target.value = ""; if (!f) return;
       try {
-        toast("Uploading…"); const img = await shrinkImage(f, 1600); const fd = new FormData(); fd.append("file", img, img.name);
-        const att = await api("/api/files", { body: fd }); d.bg = "photo:" + att.id; d.dim = d.dim ?? 25; draw();
+        const img = await shrinkImage(f, 1600), pick = await wallpaperPreview(img, d); if (!pick) return;
+        toast("Uploading…"); const fd = new FormData(); fd.append("file", img, img.name);
+        const att = await api("/api/files", { body: fd }); d.bg = "photo:" + att.id; d.dim = pick.dim; store.set("photobg", true); draw();
       } catch (x) { toast(x.message); }
     };
     const save = async (style, sc) => {
@@ -714,12 +867,14 @@
       <label><i style="background:#7c5cff">🖼</i>Photos &amp; videos<input type="file" id="aMedia" accept="image/*,video/*" multiple hidden></label>
       <label><i style="background:#ff3b5c">📸</i>Camera<input type="file" id="aCam" accept="image/*,video/*" capture="environment" hidden></label>
       <button id="aNote"><i style="background:#ff9500">⭕</i>Video note</button>
+      <button id="aLetter"><i style="background:#e5484d">💌</i>Love notes</button>
       <label><i style="background:#0a84ff">📄</i>Document<input type="file" id="aDoc" multiple hidden></label>
       ${(conv(S.cur) || {}).kind === "bot" ? `<button id="aWhere"><i style="background:#34c759">📍</i>Share where I am</button>` : ""}
     </div>`);
     const take = (e, doc) => { const fs = [...e.target.files]; e.target.value = ""; s.remove(); if (!fs.length) return; doc ? fs.forEach((f) => sendFile(f, "file")) : mediaPreview(fs); };
     $("#aMedia", s).onchange = (e) => take(e); $("#aCam", s).onchange = (e) => take(e); $("#aDoc", s).onchange = (e) => take(e, true);
     $("#aNote", s).onclick = () => { s.remove(); recordVideoNote(); };
+    $("#aLetter", s).onclick = () => { s.remove(); openTemplates(); };
     if ($("#aWhere", s)) $("#aWhere", s).onclick = () => { s.remove(); shareWhere(); };
   }
   function mediaPreview(files) {  // look before sending, with a caption (like WhatsApp)
@@ -765,13 +920,15 @@
   const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 
   let vrec = null;
-  async function recordVideoNote() {  // round selfie video, up to 60 s, like Telegram / WhatsApp video notes
+  async function recordVideoNote(opts = {}) {  // round selfie video, up to 60 s, like Telegram / WhatsApp video notes
     if (!navigator.mediaDevices || !window.MediaRecorder) return toast(isIOS && !standalone ? "Video notes work in the Home Screen app" : "This browser can't record video");
     if (vrec) return;
-    let facing = "user", stream = null, rec = null, chunks = [], started = 0, tick = null, cancelled = false;
-    const ov = document.createElement("div"); ov.className = "vrec";
+    let facing = "user", stream = null, rec = null, chunks = [], started = 0, tick = null, cancelled = false, locked = false;
+    const hold = !!opts.hold, ctl = opts.ctl;
+    const ov = document.createElement("div"); ov.className = "vrec" + (hold ? " hold" : "");
     ov.innerHTML = `<div class="vrec-circle"><video autoplay playsinline muted></video><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="48"/></svg></div>
-      <div class="vrec-time">Tap ● to record</div>
+      <div class="vrec-time">${hold ? "Starting…" : "Tap ● to record"}</div>
+      <div class="vrec-hint"><span class="lk">⌃<br>Slide up to lock</span><span class="cn">‹ Slide left to cancel</span></div>
       <div class="vrec-btns"><button id="vX" title="Cancel">✕</button><button id="vGo" class="go" title="Record"></button><button id="vFlip" title="Flip camera">⟲</button></div>`;
     document.body.appendChild(ov); vrec = ov;
     const vid = $("video", ov), ring = $("circle", ov), time = $(".vrec-time", ov), go = $("#vGo", ov);
@@ -784,24 +941,39 @@
     try { await open(); } catch { close(); return toast("Camera not allowed"); }
     $("#vX", ov).onclick = () => { cancelled = true; if (rec && rec.state !== "inactive") rec.stop(); else close(); };
     $("#vFlip", ov).onclick = async () => { if (rec) return; facing = facing === "user" ? "environment" : "user"; try { await open(); } catch { toast("No other camera"); } };
-    go.onclick = () => {
-      if (rec) { rec.stop(); return; }
+    const startRec = () => {
       const type = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((t) => MediaRecorder.isTypeSupported(t)) || "";
       rec = new MediaRecorder(stream, { ...(type ? { mimeType: type } : {}), videoBitsPerSecond: 1_000_000 });
       rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
       rec.onstop = () => {
         const secs = (Date.now() - started) / 1000, mime = (rec.mimeType || "video/mp4").split(";")[0]; close();
         if (cancelled) return;
-        if (secs < 1) return toast("Tap ●, talk, then tap ■ to send");
+        if (secs < 1) return toast(hold ? "Hold a little longer to record" : "Tap ●, talk, then tap ■ to send");
         sendFile(new File([new Blob(chunks, { type: mime })], `videonote.${mime.includes("mp4") ? "mp4" : "webm"}`, { type: mime }), "videonote", "", { dur: Math.round(secs) });
       };
       rec.start(250); started = Date.now(); ov.classList.add("on"); $("#vFlip", ov).disabled = true;
       tick = setInterval(() => {
-        const s = (Date.now() - started) / 1000; time.textContent = "● " + fmtDur(s) + "  ·  tap ■ to send";
+        const s = (Date.now() - started) / 1000; time.textContent = "● " + fmtDur(s) + (hold && !locked ? "  ·  release to send" : "  ·  tap ■ to send");
         ring.style.strokeDashoffset = 301.6 * (1 - Math.min(s / 60, 1));
         if (s >= 60) rec.stop();
       }, 200);
     };
+    go.onclick = () => { if (rec) rec.stop(); else startRec(); };
+    if (hold && ctl) {  // WhatsApp style: recording starts at once; slide up to lock, left to cancel, let go to send
+      if (ctl.up) { cancelled = true; close(); return; }
+      startRec();
+      ctl.onmove = () => {
+        if (locked) return;
+        if (ctl.dy < -80) { locked = true; ov.classList.remove("cancelling"); ov.classList.add("locked"); if (navigator.vibrate) navigator.vibrate(12); }
+        else ov.classList.toggle("cancelling", ctl.dx < -80);
+      };
+      ctl.onup = () => {
+        if (locked) return;
+        if (ctl.abort || ctl.dx < -80) cancelled = true;
+        if (rec && rec.state !== "inactive") rec.stop(); else close();
+      };
+      if (ctl.up) ctl.onup();
+    }
   }
   function bindVideoNotes(root) {  // tap a round video to play it with sound; a ring shows how far it is
     $$("[data-vn]", root).forEach((el) => {
