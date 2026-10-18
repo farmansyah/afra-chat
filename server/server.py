@@ -43,7 +43,9 @@ WEB = Path(os.environ.get("WEB_DIR", Path(__file__).resolve().parent.parent / "w
 FILES = DATA / "files"
 DB = DATA / "chat.db"
 CONTACT = os.environ.get("PUSH_CONTACT", "mailto:afra@localhost")
-MAX_FILE = int(os.environ.get("MAX_FILE_MB", "30")) * 1024 * 1024
+MAX_FILE = int(os.environ.get("MAX_FILE_MB", "100")) * 1024 * 1024
+KINDS = {"text", "image", "voice", "file", "video", "videonote", "sticker", "location"}
+MUTE_FOREVER = 4e9  # "Always" (year 2096)
 USERNAME = re.compile(r"^[a-z0-9][a-z0-9._]{2,19}$")
 for d in (DATA, FILES, DATA / "backups"):
     d.mkdir(parents=True, exist_ok=True)
@@ -64,6 +66,7 @@ CREATE INDEX IF NOT EXISTS messages_conv ON messages(conv_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS messages_client ON messages(sender, client_id);
 CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, owner INTEGER, name TEXT, mime TEXT, size INTEGER, created REAL);
 CREATE TABLE IF NOT EXISTS pushes (endpoint TEXT PRIMARY KEY, user_id INTEGER, device TEXT, sub TEXT, created REAL);
+CREATE TABLE IF NOT EXISTS stars (user_id INTEGER, msg_id INTEGER, created REAL, PRIMARY KEY (user_id, msg_id));
 """
 
 
@@ -82,6 +85,9 @@ with closing(db()) as _c:
     for _t in ("convs", "members"):  # chat theme: on convs = shared by both people, on members = "just for me"
         if "style" not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN style TEXT DEFAULT '{{}}'")
+    for _t, _col, _def in (("users", "bio", "TEXT DEFAULT ''"), ("members", "muted", "REAL DEFAULT 0")):  # about line; mute until (time)
+        if _col not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
+            _c.execute(f"ALTER TABLE {_t} ADD COLUMN {_col} {_def}")
     _c.commit()
 
 app = FastAPI(title="A.F.R.A chat", docs_url=None, redoc_url=None, openapi_url=None)
@@ -185,7 +191,7 @@ def throttle(key: str):
 def public(u) -> dict:
     online = bool(SOCKETS.get(u["id"]))
     return {"id": u["id"], "username": u["username"], "name": u["name"], "avatar": u["avatar"], "is_admin": bool(u["is_admin"]),
-            "online": online, "last_seen": time.time() if online else u["last_seen"]}
+            "online": online, "last_seen": time.time() if online else u["last_seen"], "bio": u["bio"] or ""}
 
 
 def make_code(c, kind="invite", admin_=0, by=None, note="") -> str:
@@ -286,6 +292,8 @@ async def update_me(body: dict, authorization: str = Header(None)):
     with closing(db()) as c:
         if "name" in body:
             c.execute("UPDATE users SET name=? WHERE id=?", ((body["name"] or "").strip()[:40] or u["username"], u["id"]))
+        if "bio" in body:
+            c.execute("UPDATE users SET bio=? WHERE id=?", (" ".join((body["bio"] or "").split())[:140], u["id"]))
         if body.get("username") and body["username"].lower().lstrip("@") != u["username"]:
             new = body["username"].strip().lower().lstrip("@")
             if not USERNAME.match(new):
@@ -367,14 +375,15 @@ def _member(c, cid: int, uid: int):
 def conv_view(c, cid: int, uid: int) -> dict:
     cv = c.execute("SELECT * FROM convs WHERE id=?", (cid,)).fetchone()
     others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>?", (cid, uid))]
-    mine = c.execute("SELECT last_read, style FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
+    mine = c.execute("SELECT last_read, style, muted FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
     last = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
     unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND created>?",
                        (cid, uid, mine["last_read"] if mine else 0)).fetchone()[0]
     other_read = max([r["last_read"] for r in c.execute("SELECT last_read FROM members WHERE conv_id=? AND user_id<>?", (cid, uid))] or [0])
     return {"id": cid, "kind": cv["kind"], "members": others, "last": msg_view(last) if last else None, "unread": unread,
             "last_at": cv["last_at"], "other_read": other_read,
-            "style": json.loads(cv["style"] or "{}"), "my_style": json.loads((mine["style"] if mine else "") or "{}")}
+            "style": json.loads(cv["style"] or "{}"), "my_style": json.loads((mine["style"] if mine else "") or "{}"),
+            "muted": (mine["muted"] or 0) if mine and (mine["muted"] or 0) > time.time() else 0}
 
 
 def msg_view(m) -> dict:
@@ -497,6 +506,9 @@ async def send_message(cid: int, body: dict, authorization: str = Header(None)):
         raise HTTPException(403, "Please choose a stronger password first (8+ characters with a capital letter, a small letter, a number and a symbol).")
     text = (body.get("text") or "").strip()[:8000]
     att = body.get("attachment")
+    kind = body.get("kind") or "text"
+    if kind not in KINDS:
+        raise ValueError("Unknown message type")
     if not text and not att:
         raise ValueError("Empty message")
     with closing(db()) as c:
@@ -508,7 +520,7 @@ async def send_message(cid: int, body: dict, authorization: str = Header(None)):
         now = time.time()
         mid = c.execute("""INSERT INTO messages (conv_id, sender, client_id, kind, text, reply_to, attachment, created, updated)
                            VALUES (?,?,?,?,?,?,?,?,?)""",
-                        (cid, u["id"], body.get("client_id"), body.get("kind") or "text", text, body.get("reply_to") or None,
+                        (cid, u["id"], body.get("client_id"), kind, text, body.get("reply_to") or None,
                          json.dumps(att) if att else "", now, now)).lastrowid
         c.execute("UPDATE convs SET last_at=? WHERE id=?", (now, cid))
         c.execute("UPDATE members SET last_read=? WHERE conv_id=? AND user_id=?", (now, cid, u["id"]))
@@ -517,7 +529,9 @@ async def send_message(cid: int, body: dict, authorization: str = Header(None)):
         members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cid,))]
     for uid in members:
         await send_to(uid, {"t": "msg", "msg": m})
-    asyncio.create_task(push_message(u, m, [x for x in members if x != u["id"]]))
+    with closing(db()) as c:  # muted chats stay quiet (no notification)
+        quiet = {r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=? AND muted>?", (cid, time.time()))}
+    asyncio.create_task(push_message(u, m, [x for x in members if x != u["id"] and x not in quiet]))
     return m
 
 
@@ -574,6 +588,72 @@ async def react(mid: int, body: dict, authorization: str = Header(None)):
     return await _changed(mid, u["id"], fn)
 
 
+@app.post("/api/messages/{mid}/star")
+def star(mid: int, authorization: str = Header(None)):
+    """Star (or unstar) a message: only for me, like WhatsApp."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        m = c.execute("SELECT conv_id FROM messages WHERE id=? AND deleted=0", (mid,)).fetchone()
+        if not m:
+            raise HTTPException(404, "Message not found")
+        _member(c, m["conv_id"], u["id"])
+        if c.execute("DELETE FROM stars WHERE user_id=? AND msg_id=?", (u["id"], mid)).rowcount:
+            on = False
+        else:
+            c.execute("INSERT INTO stars (user_id, msg_id, created) VALUES (?,?,?)", (u["id"], mid, time.time()))
+            on = True
+        c.commit()
+    return {"id": mid, "starred": on}
+
+
+@app.get("/api/stars")
+def starred(conv: int = 0, authorization: str = Header(None)):
+    """My starred messages (newest star first), in every chat or one chat."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        rows = c.execute("""SELECT m.* FROM stars s JOIN messages m ON m.id=s.msg_id
+                            JOIN members mb ON mb.conv_id=m.conv_id AND mb.user_id=s.user_id
+                            WHERE s.user_id=? AND m.deleted=0 AND (?=0 OR m.conv_id=?) ORDER BY s.created DESC LIMIT 500""",
+                         (u["id"], conv, conv)).fetchall()
+    return [msg_view(r) for r in rows]
+
+
+@app.put("/api/convs/{cid}/mute")
+async def mute(cid: int, body: dict, authorization: str = Header(None)):
+    """Mute notifications for a while: {"hours": 8}, {"hours": 168}, {"always": true}, or {} to unmute."""
+    u = auth(authorization)
+    until = MUTE_FOREVER if body.get("always") else time.time() + float(body["hours"]) * 3600 if body.get("hours") else 0
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        c.execute("UPDATE members SET muted=? WHERE conv_id=? AND user_id=?", (until, cid, u["id"]))
+        c.commit()
+        view = conv_view(c, cid, u["id"])
+    await send_to(u["id"], {"t": "conv", "conv": view})  # my other devices
+    return view
+
+
+LINK = re.compile(r"https?://[^\s<>\"']+")
+
+
+@app.get("/api/convs/{cid}/media")
+def conv_media(cid: int, type: str = "media", before: int = 0, authorization: str = Header(None)):
+    """What a chat holds, for the contact page: media (photos, videos, video notes), docs, or links."""
+    u = auth(authorization)
+    where = {"media": "kind IN ('image','video','videonote')", "docs": "kind='file'", "voice": "kind='voice'",
+             "links": "(text LIKE '%http://%' OR text LIKE '%https://%')"}.get(type)
+    if not where:
+        raise ValueError("Unknown type")
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        rows = c.execute(f"SELECT * FROM messages WHERE conv_id=? AND deleted=0 AND {where} AND (?=0 OR id<?) ORDER BY id DESC LIMIT 300",
+                         (cid, before, before)).fetchall()
+    out = [msg_view(r) for r in rows]
+    if type == "links":
+        for m in out:
+            m["links"] = LINK.findall(m["text"])[:5]
+    return out
+
+
 @app.post("/api/convs/{cid}/read")
 async def mark_read(cid: int, authorization: str = Header(None)):
     u = auth(authorization)
@@ -605,16 +685,22 @@ async def upload(file: UploadFile = File(...), authorization: str = Header(None)
     u = auth(authorization)
     if needs_new_pw(u):
         raise HTTPException(403, "Please choose a stronger password first (8+ characters with a capital letter, a small letter, a number and a symbol).")
-    data = await file.read()
-    if len(data) > MAX_FILE:
-        raise ValueError(f"Files up to {MAX_FILE // 1048576} MB.")
-    fid = secrets.token_hex(16)
-    (FILES / fid).write_bytes(data)
+    fid, size = secrets.token_hex(16), 0
+    try:
+        with open(FILES / fid, "wb") as out:
+            while chunk := await file.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_FILE:
+                    raise ValueError(f"Files up to {MAX_FILE // 1048576} MB.")
+                out.write(chunk)
+    except BaseException:
+        (FILES / fid).unlink(missing_ok=True)
+        raise
     name = os.path.basename(file.filename or "file")[:120]
     with closing(db()) as c:
-        c.execute("INSERT INTO files VALUES (?,?,?,?,?,?)", (fid, u["id"], name, file.content_type or "application/octet-stream", len(data), time.time()))
+        c.execute("INSERT INTO files VALUES (?,?,?,?,?,?)", (fid, u["id"], name, file.content_type or "application/octet-stream", size, time.time()))
         c.commit()
-    return {"id": fid, "name": name, "mime": file.content_type or "application/octet-stream", "size": len(data)}
+    return {"id": fid, "name": name, "mime": file.content_type or "application/octet-stream", "size": size}
 
 
 @app.get("/api/files/{fid}")
@@ -767,7 +853,11 @@ async def push_to(uids: list[int], payload: dict, skip_visible=True):
 async def push_message(sender, m: dict, uids: list[int]):
     if not uids:
         return
-    body = m["text"] or {"image": "📷 Photo", "voice": "🎤 Voice note", "file": "📎 " + ((m.get("attachment") or {}).get("name") or "File")}.get(m["kind"], "New message")
+    icon = {"image": "📷", "video": "🎥", "videonote": "📹", "sticker": "", "location": "📍"}.get(m["kind"])
+    body = {"image": "📷 Photo", "voice": "🎤 Voice note", "file": "📎 " + ((m.get("attachment") or {}).get("name") or "File"),
+            "video": "🎥 Video", "videonote": "📹 Video note", "sticker": "Sticker", "location": "📍 Location"}.get(m["kind"], "New message")
+    if m["text"]:
+        body = (icon + " " if icon else "") + m["text"] if m["kind"] in ("image", "video") else m["text"]
     await push_to(uids, {"title": sender["name"] or sender["username"], "body": body[:180], "conv": m["conv_id"],
                          "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
 
@@ -1158,6 +1248,7 @@ def _chat_bundle(c, cv, users, z: zipfile.ZipFile, folder: str, files_done: set)
             (f'<div class="q">{hesc(who(reply["sender"]))}: {hesc((reply["text"] or "")[:80])}</div>' if reply else "")
             + (f'<img src="{hesc(fpath)}">' if att and m["kind"] == "image" and fpath else
                f'<audio controls src="{hesc(fpath)}"></audio>' if att and m["kind"] == "voice" and fpath else
+               f'<video controls playsinline src="{hesc(fpath)}"></video>' if att and m["kind"] in ("video", "videonote") and fpath else
                f'<a href="{hesc(fpath)}">📄 {hesc(att.get("name", "file"))}</a>' if att else "")
             + (f"<div>{hesc(m['text'])}</div>" if m["text"] else "")
             + (f'<div class="rx">{" ".join(hesc(v) for v in rx.values())}</div>' if rx else ""))

@@ -84,7 +84,7 @@
   const fileUrl = (id) => `/api/files/${id}?t=${encodeURIComponent(TOKEN)}`;
 
   // ------------------------------------------------------------------ state
-  const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {}, seen: {} };
+  const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {}, seen: {}, stars: new Set() };
   const app = $("#app");
   const REACTIONS = ["❤️", "🥰", "😂", "😮", "😢", "🙏", "👍", "🔥"];
   const EMOJIS = "❤️ 🥰 😘 😍 🤗 😊 😁 😂 🥹 😭 😢 🥺 😴 🤔 😮 😎 🙈 🙏 👍 👏 💪 🎉 ✨ 🔥 💯 🌹 🌸 🌙 ☀️ ☕ 🍜 🍦 📚 ✍️ 🎓 💌 💖 💕 💞 💗 🤍 💛 💙 🫶 👀 😅 🙃 😌".split(" ");
@@ -123,7 +123,9 @@
   }
   const onlyEmoji = (s) => s && s.length <= 12 && /^(\p{Extended_Pictographic}|\p{Emoji_Component}|‍|️|\s)+$/u.test(s);
   const sizeTxt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
-  const preview = (m) => !m ? "" : m.deleted ? "Message deleted" : m.text || { image: "📷 Photo", voice: "🎤 Voice note", file: "📎 " + ((m.attachment || {}).name || "File") }[m.kind] || "";
+  const KIND_LABEL = { image: "📷 Photo", voice: "🎤 Voice note", video: "🎥 Video", videonote: "📹 Video note", sticker: "💟 Sticker", location: "📍 Location" };
+  const preview = (m) => !m ? "" : m.deleted ? "Message deleted" : m.text ? ({ image: "📷 ", video: "🎥 " }[m.kind] || "") + m.text
+    : m.kind === "file" ? "📎 " + ((m.attachment || {}).name || "File") : KIND_LABEL[m.kind] || "";
 
   // ------------------------------------------------------------------ offline copy (shows your chats instantly, also without internet)
   const cacheSave = () => { store.set("cache", { me: S.me, convs: S.convs, msgs: Object.fromEntries(Object.entries(S.msgs).map(([k, v]) => [k, v.slice(-120)])) }); };
@@ -152,6 +154,7 @@
     try {
       S.me = await api("/api/me"); pwGate();
       S.convs = await api("/api/convs");
+      try { S.stars = new Set((await api("/api/stars")).map((m) => m.id)); } catch { }
       const since = lastSync ? lastSync - 5 : 0, t0 = now();
       for (const c of S.convs) {
         if (!S.msgs[c.id] || !since) { await loadConv(c.id); continue; }
@@ -186,7 +189,7 @@
           delete S.typing[c.id];
           if (S.cur === c.id && isVisible()) markRead(c.id); else c.unread = (c.unread || 0) + 1;
           if (!isVisible()) toAfra({ type: "message", conv: c.id, from: title(c), text: preview(e.msg) });
-          if (isVisible()) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
+          if (isVisible() && (S.cur === c.id || !isMuted(c))) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
         }
         S.convs.sort((a, b) => (b.last_at || 0) - (a.last_at || 0));
       } else if (c.last && c.last.id === e.msg.id) c.last = e.msg;
@@ -287,7 +290,7 @@
       return `<div class="conv ${S.cur === c.id ? "on" : ""}" data-c="${c.id}">
         <div class="av-wrap ${u && u.online ? "on" : ""}">${avatar(u, "", c.kind === "self")}</div>
         <div class="mid"><div class="row1"><b>${esc(title(c))}</b><small>${c.last ? shortTime(c.last.created) : ""}</small></div>
-          <div class="row2"><span class="${typing ? "typing" : ""}">${typing ? "typing…" : esc(last)}</span>${c.unread ? `<span class="badge">${c.unread}</span>` : ""}</div></div></div>`;
+          <div class="row2"><span class="${typing ? "typing" : ""}">${typing ? "typing…" : esc(last)}</span>${isMuted(c) ? `<i class="muted">🔕</i>` : ""}${c.unread ? `<span class="badge ${isMuted(c) ? "quiet" : ""}">${c.unread}</span>` : ""}</div></div></div>`;
     }).join("") || `<div class="empty">No chats yet.<br><small>Tap 💬 at the bottom right to start one.</small></div>`;
     $$(".conv", el).forEach((d) => {
       d.onclick = () => openConv(+d.dataset.c);
@@ -322,9 +325,8 @@
         <button class="cbtn" id="btpl" title="Quick messages">💌</button>
         <button class="cbtn" id="bemoji" title="Emoji">😊</button>
         <textarea id="txt" rows="1" placeholder="Message"></textarea>
-        <button class="cbtn" id="battach" title="Photo or file">📎</button>
+        <button class="cbtn" id="battach" title="Attach">📎</button>
         <button class="cbtn send" id="bsend" title="Send">🎤</button>
-        <input type="file" id="file" hidden>
       </div>`;
     $("#bBack").onclick = () => { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); drawList(); };
     $("#bSearch").onclick = () => { $("#sbar").hidden = false; $("#sq").focus(); };
@@ -342,8 +344,8 @@
     txt.oninput = () => { grow(); if (txt.value && now() - lastTyping > 3 && c.kind !== "self") { lastTyping = now(); api(`/api/convs/${c.id}/typing`, { body: {} }).catch(() => { }); } };
     txt.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); sendText(); } if (e.key === "Escape") { S.reply = S.edit = null; drawReply(); } };
     $("#bsend").onclick = () => (txt.value.trim() || S.edit) ? sendText() : toggleVoice();
-    $("#battach").onclick = () => $("#file").click();
-    $("#file").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) sendFile(f); };
+    $("#battach").onclick = attachMenu;
+    $(".top .who", pane).onclick = infoPage; $("#chatAv").onclick = infoPage;
     $("#btpl").onclick = openTemplates; $("#bemoji").onclick = openEmoji;
     window.growComposer = grow; grow(); drawQuick();
     applyStyle(); drawHeader(); drawChat(); scrollEnd(true);
@@ -393,6 +395,8 @@
     if (a && a.id) {
       if (m.kind === "image") html += `<img class="photo" src="${fileUrl(a.id)}" alt="${esc(a.name)}" loading="lazy" data-full="${fileUrl(a.id)}">`;
       else if (m.kind === "voice") html += `<audio controls preload="none" src="${fileUrl(a.id)}"></audio>`;
+      else if (m.kind === "video") html += `<div class="vid" data-v${a.w ? ` style="aspect-ratio:${Math.max(.6, Math.min(1.8, a.w / a.h))}"` : ""}>${a.poster ? `<img src="${fileUrl(a.poster)}" alt="" loading="lazy">` : `<video src="${fileUrl(a.id)}#t=0.1" preload="metadata" muted playsinline></video>`}<span class="vid-play">▶</span><span class="vid-len">🎥 ${a.dur ? fmtDur(a.dur) : ""}</span></div>`;
+      else if (m.kind === "videonote") html += `<div class="vnote" data-vn><video src="${fileUrl(a.id)}#t=0.1"${a.poster ? ` poster="${fileUrl(a.poster)}"` : ""} playsinline preload="metadata"></video><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="48"/></svg><span class="vn-play">▶${a.dur ? " " + fmtDur(a.dur) : ""}</span></div>`;
       else html += `<a class="file" href="${fileUrl(a.id)}" target="_blank" download="${esc(a.name)}"><span style="font-size:28px">📄</span><span><b>${esc(a.name)}</b><small>${sizeTxt(a.size || 0)}</small></span></a>`;
     } else if (a && a.local) html += `<div class="txt">⏳ ${esc(a.name)}</div>`;
     if (m.text) html += `<div class="txt ${onlyEmoji(m.text) ? "big" : ""}">${esc(m.text)}</div>`;
@@ -416,13 +420,15 @@
       const key = m.client_id || m.id; fresh.add(key);
       const pop = seen && !seen.has(key) ? "pop" : "";
       html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
-        <div class="bub ${m.deleted ? "deleted" : ""}">${bubbleBody(m, list)}</div>
+        <div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
         ${rx.length ? `<div class="reacts">${rx.map(([uid, e]) => `<span title="${esc((userById(+uid) || {}).name || "")}">${esc(e)}</span>`).join("")}</div>` : ""}
-        <div class="meta">${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
+        <div class="meta">${S.stars.has(m.id) ? "⭐ " : ""}${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
     }
     log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
-    $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const v = document.createElement("div"); v.className = "viewer"; v.innerHTML = `<img src="${img.dataset.full}">`; v.onclick = () => v.remove(); document.body.appendChild(v); });
+    $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
+    $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
+    bindVideoNotes(log);
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
       e.stopPropagation(); const t = $(`.msg[data-id="${q.dataset.goto}"]`); if (!t) return;
       t.scrollIntoView({ behavior: "smooth", block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 1400);
@@ -460,7 +466,7 @@
     });
     el.addEventListener("contextmenu", (e) => { e.preventDefault(); msgMenu(id); });
     el.addEventListener("click", (e) => {
-      if (e.target.closest("a,audio,img,.quote")) return;
+      if (e.target.closest("a,audio,img,video,.quote,[data-vn],[data-v]")) return;
       const t = Date.now(); if (t - lastTap < 320) { bigHeart(e.clientX, e.clientY); if ((findMsg(id) || {}).reactions?.[S.me.id] !== "❤️") react(id, "❤️"); lastTap = 0; } else lastTap = t;
     });
   }
@@ -665,6 +671,251 @@
     });
   }
 
+  // ------------------------------------------------------------------ media: attach menu, captions, videos, round video notes
+  function attachMenu() {
+    const s = sheet(`<div class="attach">
+      <label><i style="background:#7c5cff">🖼</i>Photos &amp; videos<input type="file" id="aMedia" accept="image/*,video/*" multiple hidden></label>
+      <label><i style="background:#ff3b5c">📸</i>Camera<input type="file" id="aCam" accept="image/*,video/*" capture="environment" hidden></label>
+      <button id="aNote"><i style="background:#ff9500">⭕</i>Video note</button>
+      <label><i style="background:#0a84ff">📄</i>Document<input type="file" id="aDoc" multiple hidden></label>
+    </div>`);
+    const take = (e, doc) => { const fs = [...e.target.files]; e.target.value = ""; s.remove(); if (!fs.length) return; doc ? fs.forEach((f) => sendFile(f, "file")) : mediaPreview(fs); };
+    $("#aMedia", s).onchange = (e) => take(e); $("#aCam", s).onchange = (e) => take(e); $("#aDoc", s).onchange = (e) => take(e, true);
+    $("#aNote", s).onclick = () => { s.remove(); recordVideoNote(); };
+  }
+  function mediaPreview(files) {  // look before sending, with a caption (like WhatsApp)
+    files = files.filter((f) => /^(image|video)\//.test(f.type)).slice(0, 10);
+    if (!files.length) return toast("Choose photos or videos");
+    const urls = files.map((f) => URL.createObjectURL(f));
+    const s = sheet(`<div class="mprev">${files.map((f, i) => f.type.startsWith("video/") ? `<video src="${urls[i]}" controls playsinline muted></video>` : `<img src="${urls[i]}" alt="">`).join("")}</div>
+      <div class="caprow"><textarea class="inp" id="mcap" rows="1" placeholder="Add a caption…"></textarea><button class="cbtn send" id="msend" title="Send">➤</button></div>`);
+    const done = () => urls.forEach((u) => URL.revokeObjectURL(u));
+    s.addEventListener("click", (e) => { if (e.target === s) done(); });
+    $("#msend", s).onclick = async () => {
+      const cap = $("#mcap", s).value.trim(); s.remove(); done();
+      for (let i = 0; i < files.length; i++) await sendFile(files[i], null, i === 0 ? cap : "");
+    };
+    setTimeout(() => { const c = $("#mcap", s); if (c && !matchMedia("(pointer: coarse)").matches) c.focus(); }, 150);
+  }
+  function videoInfo(file) {  // size, length and a poster frame for a video (best effort: some phones say no)
+    return new Promise((res) => {
+      const v = document.createElement("video"), url = URL.createObjectURL(file); let done = false;
+      const fin = (r) => { if (done) return; done = true; URL.revokeObjectURL(url); v.removeAttribute("src"); v.load(); res(r); };
+      v.muted = true; v.playsInline = true; v.preload = "auto";
+      v.onloadeddata = () => { v.currentTime = isFinite(v.duration) ? Math.min(0.1, v.duration / 2) : 0.1; };
+      v.onseeked = () => {
+        try {
+          const k = Math.min(1, 480 / Math.max(v.videoWidth, v.videoHeight)), c = document.createElement("canvas");
+          c.width = Math.round(v.videoWidth * k); c.height = Math.round(v.videoHeight * k); c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+          c.toBlob((b) => fin({ w: v.videoWidth, h: v.videoHeight, dur: isFinite(v.duration) ? Math.round(v.duration) : 0, poster: b }), "image/jpeg", 0.8);
+        } catch { fin({}); }
+      };
+      v.onerror = () => fin({}); setTimeout(() => fin({}), 5000);
+      v.src = url; v.load();
+    });
+  }
+  function upload(f, onPct) {  // like api("/api/files") but shows how far a big video got
+    return new Promise((res, rej) => {
+      const x = new XMLHttpRequest(); x.open("POST", "/api/files"); x.setRequestHeader("authorization", "Bearer " + TOKEN);
+      x.upload.onprogress = (e) => e.lengthComputable && onPct && onPct(Math.round(e.loaded * 100 / e.total));
+      x.onload = () => { let d = {}; try { d = JSON.parse(x.responseText); } catch { } x.status < 300 ? res(d) : rej(new Error(d.detail || "Upload failed")); };
+      x.onerror = () => rej(new Error("No connection"));
+      const fd = new FormData(); fd.append("file", f, f.name); x.send(fd);
+    });
+  }
+  const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+  let vrec = null;
+  async function recordVideoNote() {  // round selfie video, up to 60 s, like Telegram / WhatsApp video notes
+    if (!navigator.mediaDevices || !window.MediaRecorder) return toast(isIOS && !standalone ? "Video notes work in the Home Screen app" : "This browser can't record video");
+    if (vrec) return;
+    let facing = "user", stream = null, rec = null, chunks = [], started = 0, tick = null, cancelled = false;
+    const ov = document.createElement("div"); ov.className = "vrec";
+    ov.innerHTML = `<div class="vrec-circle"><video autoplay playsinline muted></video><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="48"/></svg></div>
+      <div class="vrec-time">Tap ● to record</div>
+      <div class="vrec-btns"><button id="vX" title="Cancel">✕</button><button id="vGo" class="go" title="Record"></button><button id="vFlip" title="Flip camera">⟲</button></div>`;
+    document.body.appendChild(ov); vrec = ov;
+    const vid = $("video", ov), ring = $("circle", ov), time = $(".vrec-time", ov), go = $("#vGo", ov);
+    const open = async () => {
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 480 }, height: { ideal: 480 } }, audio: true });
+      vid.srcObject = stream; vid.classList.toggle("mirror", facing === "user");
+    };
+    const close = () => { clearInterval(tick); if (stream) stream.getTracks().forEach((t) => t.stop()); ov.remove(); vrec = null; };
+    try { await open(); } catch { close(); return toast("Camera not allowed"); }
+    $("#vX", ov).onclick = () => { cancelled = true; if (rec && rec.state !== "inactive") rec.stop(); else close(); };
+    $("#vFlip", ov).onclick = async () => { if (rec) return; facing = facing === "user" ? "environment" : "user"; try { await open(); } catch { toast("No other camera"); } };
+    go.onclick = () => {
+      if (rec) { rec.stop(); return; }
+      const type = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((t) => MediaRecorder.isTypeSupported(t)) || "";
+      rec = new MediaRecorder(stream, { ...(type ? { mimeType: type } : {}), videoBitsPerSecond: 1_000_000 });
+      rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+      rec.onstop = () => {
+        const secs = (Date.now() - started) / 1000, mime = (rec.mimeType || "video/mp4").split(";")[0]; close();
+        if (cancelled) return;
+        if (secs < 1) return toast("Tap ●, talk, then tap ■ to send");
+        sendFile(new File([new Blob(chunks, { type: mime })], `videonote.${mime.includes("mp4") ? "mp4" : "webm"}`, { type: mime }), "videonote", "", { dur: Math.round(secs) });
+      };
+      rec.start(250); started = Date.now(); ov.classList.add("on"); $("#vFlip", ov).disabled = true;
+      tick = setInterval(() => {
+        const s = (Date.now() - started) / 1000; time.textContent = "● " + fmtDur(s) + "  ·  tap ■ to send";
+        ring.style.strokeDashoffset = 301.6 * (1 - Math.min(s / 60, 1));
+        if (s >= 60) rec.stop();
+      }, 200);
+    };
+  }
+  function bindVideoNotes(root) {  // tap a round video to play it with sound; a ring shows how far it is
+    $$("[data-vn]", root).forEach((el) => {
+      const v = $("video", el), ring = $("circle", el);
+      v.ontimeupdate = () => { if (!v.paused && v.duration && isFinite(v.duration)) ring.style.strokeDashoffset = 301.6 * (1 - v.currentTime / v.duration); };
+      v.onended = () => { el.classList.remove("playing"); ring.style.strokeDashoffset = 301.6; v.currentTime = 0.1; };
+      el.onclick = (e) => {
+        e.stopPropagation();
+        $$("[data-vn].playing video").forEach((o) => { if (o !== v) { o.pause(); o.closest("[data-vn]").classList.remove("playing"); } });
+        if (v.paused) { v.muted = false; v.play().then(() => el.classList.add("playing")).catch(() => { }); } else { v.pause(); el.classList.remove("playing"); }
+      };
+    });
+  }
+  function viewMedia(m, list) {  // full screen photos and videos, like WhatsApp: swipe through, scrub, swipe down to close
+    const media = (list || S.msgs[m.conv_id] || [m]).filter((x) => !x.deleted && x.attachment && (x.kind === "image" || x.kind === "video"));
+    let i = Math.max(0, media.findIndex((x) => x.id === m.id)); if (!media.length) media.push(m);
+    const v = document.createElement("div"); v.className = "viewer mv"; document.body.appendChild(v);
+    let hideT = 0, vid = null;
+    const close = () => { clearTimeout(hideT); if (vid) vid.pause(); v.classList.add("closing"); setTimeout(() => v.remove(), 180); document.removeEventListener("keydown", key); };
+    const chrome = (on) => { v.classList.toggle("bare", !on); clearTimeout(hideT); if (on && vid && !vid.paused) hideT = setTimeout(() => v.classList.add("bare"), 2600); };
+    const show = () => {
+      const x = media[i], a = x.attachment || {}, isVid = x.kind === "video";
+      const who = x.sender === S.me.id ? "You" : (userById(x.sender) || {}).name || "";
+      v.innerHTML = `<div class="mv-top"><button class="mv-b" data-x>‹</button><div class="mv-who"><b>${esc(who)}</b><small>${esc(dayLabel(x.created) + " · " + fmtTime(x.created))}</small></div>
+          <button class="mv-b" data-go title="Show in chat">💬</button><a class="mv-b" href="${fileUrl(a.id)}" download="${esc(a.name || "")}" title="Save">⤓</a></div>
+        <div class="mv-stage">${isVid ? `<video src="${fileUrl(a.id)}"${a.poster ? ` poster="${fileUrl(a.poster)}"` : ""} playsinline autoplay></video><button class="mv-big" hidden>▶</button>`
+          : `<img src="${fileUrl(a.id)}" alt="">`}</div>
+        ${i > 0 ? `<button class="mv-nav l" data-n="-1">‹</button>` : ""}${i < media.length - 1 ? `<button class="mv-nav r" data-n="1">›</button>` : ""}
+        <div class="mv-bot">${x.text ? `<div class="mv-cap">${esc(x.text)}</div>` : ""}
+          ${isVid ? `<div class="mv-bar"><button class="mv-b" data-p>❚❚</button><span data-c>0:00</span><input type="range" min="0" max="1000" value="0"><span data-d>${a.dur ? fmtDur(a.dur) : "0:00"}</span><button class="mv-b" data-m>🔊</button></div>` : ""}
+          ${media.length > 1 ? `<div class="mv-count">${i + 1} / ${media.length}</div>` : ""}</div>`;
+      $("[data-x]", v).onclick = close;
+      $("[data-go]", v).onclick = () => { close(); gotoMsg(x.conv_id, x.id); };
+      $$("[data-n]", v).forEach((b) => b.onclick = (e) => { e.stopPropagation(); step(+b.dataset.n); });
+      vid = isVid ? $("video", v) : null;
+      if (vid) {
+        const bar = $("input", v), big = $(".mv-big", v), pb = $("[data-p]", v), mb = $("[data-m]", v);
+        let seeking = false;
+        const sync = () => { const p = vid.paused; pb.textContent = p ? "▶" : "❚❚"; big.hidden = !p; chrome(true); };
+        vid.onplay = vid.onpause = sync;
+        vid.onended = () => { big.textContent = "↻"; sync(); };
+        vid.onloadedmetadata = () => { if (isFinite(vid.duration)) $("[data-d]", v).textContent = fmtDur(vid.duration); };
+        vid.ontimeupdate = () => { $("[data-c]", v).textContent = fmtDur(vid.currentTime); if (!seeking && vid.duration) bar.value = 1000 * vid.currentTime / vid.duration; };
+        bar.oninput = () => { seeking = true; if (vid.duration) { vid.currentTime = vid.duration * bar.value / 1000; $("[data-c]", v).textContent = fmtDur(vid.currentTime); } chrome(true); };
+        bar.onchange = () => { seeking = false; };
+        const toggle = () => { big.textContent = "▶"; vid.paused ? vid.play().catch(() => { }) : vid.pause(); };
+        pb.onclick = toggle; big.onclick = (e) => { e.stopPropagation(); toggle(); };
+        mb.onclick = () => { vid.muted = !vid.muted; mb.textContent = vid.muted ? "🔇" : "🔊"; };
+        vid.play().catch(() => { big.hidden = false; pb.textContent = "▶"; });
+      }
+      chrome(true);
+    };
+    const step = (d) => { if (media[i + d]) { if (vid) vid.pause(); i += d; show(); } };
+    const key = (e) => {
+      if (e.key === "Escape") close(); else if (e.key === "ArrowLeft") step(-1); else if (e.key === "ArrowRight") step(1);
+      else if (e.key === " " && vid) { e.preventDefault(); vid.paused ? vid.play() : vid.pause(); }
+    };
+    document.addEventListener("keydown", key);
+    // tap the picture to show/hide the bars; swipe sideways for the next one, down to close
+    let sx = 0, sy = 0, dy = 0, moved = false;
+    v.addEventListener("pointerdown", (e) => { if (e.target.closest("button,a,input")) return; sx = e.clientX; sy = e.clientY; dy = 0; moved = false; v.dataset.drag = "1"; });
+    v.addEventListener("pointermove", (e) => {
+      if (!v.dataset.drag) return; const dx = e.clientX - sx; dy = e.clientY - sy;
+      if (Math.abs(dx) > 8 || Math.abs(dy) > 8) moved = true;
+      if (dy > 0 && Math.abs(dy) > Math.abs(dx)) { const st = $(".mv-stage", v); st.style.transform = `translateY(${dy}px) scale(${1 - Math.min(dy, 400) / 1600})`; v.style.background = `rgba(0,0,0,${1 - Math.min(dy, 300) / 450})`; }
+    });
+    v.addEventListener("pointerup", (e) => {
+      if (!v.dataset.drag) return; delete v.dataset.drag; const dx = e.clientX - sx, st = $(".mv-stage", v); dy = e.clientY - sy;
+      if (!moved) { if (!e.target.closest(".mv-bot,.mv-top,.mv-nav")) chrome(v.classList.contains("bare")); return; }
+      if (dy > 110 && Math.abs(dy) > Math.abs(dx)) return close();
+      if (st) st.style.transform = ""; v.style.background = "";
+      if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) step(dx < 0 ? 1 : -1);
+    });
+    show();
+  }
+
+  // ------------------------------------------------------------------ starred messages and mute
+  async function toggleStar(id) {
+    try { const r = await api(`/api/messages/${id}/star`, { body: {} }); r.starred ? S.stars.add(id) : S.stars.delete(id); toast(r.starred ? "⭐ Starred" : "Unstarred"); drawChat(); }
+    catch (x) { toast(x.message); }
+  }
+  const isMuted = (c) => !!c && (c.muted || 0) > now();
+  function muteSheet(c, after) {
+    const s = sheet(`<h3>${isMuted(c) ? "🔕 Muted" : "Mute notifications"}</h3><div class="menu">
+      ${isMuted(c) ? `<button data-h="0">🔔 Unmute</button>` : ""}<button data-h="8">8 hours</button><button data-h="168">1 week</button><button data-h="always">Always</button></div>`);
+    $$("[data-h]", s).forEach((b) => b.onclick = async () => {
+      s.remove(); const h = b.dataset.h;
+      try { addConv(await api(`/api/convs/${c.id}/mute`, { method: "PUT", body: h === "always" ? { always: true } : h === "0" ? {} : { hours: +h } })); cacheSave(); drawList(); toast(h === "0" ? "Unmuted" : "Muted"); after && after(); }
+      catch (x) { toast(x.message); }
+    });
+  }
+  async function gotoMsg(cid, id) {  // open the chat at a message (loads older messages if it's far back)
+    if (S.cur !== cid) await openConv(cid);
+    for (let i = 0; i < 15 && !(S.msgs[cid] || []).some((m) => m.id === id) && S.older[cid]; i++) await loadOlder();
+    const t = $(`.msg[data-id="${id}"]`); if (!t) return toast("Couldn't find that message");
+    t.scrollIntoView({ behavior: "smooth", block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 1400);
+  }
+
+  // ------------------------------------------------------------------ contact info: photo, about, media, links, docs, starred
+  function infoPage() {
+    const c = conv(S.cur); if (!c) return;
+    const u = other(c), self = c.kind === "self";
+    const page = document.createElement("div"); page.className = "page info";
+    const close = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    page.innerHTML = `<div class="top"><button class="icon" id="iBack">‹</button><h1>${self ? "Notes to self" : "Contact info"}</h1></div>
+      <div class="page-body">
+        <div class="ihead">${avatar(u, "xl", self)}<div class="iname">${esc(title(c))}</div>
+          ${self ? `<div class="isub">Only you can see this chat</div>` : `<div class="isub">@${esc(u.username)}${lastSeen(u) ? " · " + esc(lastSeen(u)) : ""}</div>${u.bio ? `<div class="ibio">${esc(u.bio)}</div>` : ""}`}</div>
+        <div class="iacts"><button data-i="search"><i>🔍</i>Search</button><button data-i="theme"><i>🎨</i>Theme</button>
+          ${self ? "" : `<button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button>`}</div>
+        <div class="chips tabs itabs"><button data-t="media" class="on">Media</button><button data-t="links">Links</button><button data-t="docs">Docs</button><button data-t="starred">⭐ Starred</button></div>
+        <div id="ibody"></div>
+      </div>`;
+    document.body.appendChild(page);
+    $("#iBack", page).onclick = close;
+    $$("[data-i]", page).forEach((b) => b.onclick = () => {
+      const a = b.dataset.i;
+      if (a === "search") { close(); $("#sbar").hidden = false; $("#sq").focus(); }
+      if (a === "theme") { close(); themeSheet(); }
+      if (a === "mute") muteSheet(conv(c.id), () => { page.remove(); infoPage(); });
+    });
+    const body = $("#ibody", page);
+    const when = (m) => `${dayLabel(m.created)} · ${fmtTime(m.created)}`;
+    const show = async (t) => {
+      $$(".itabs button", page).forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+      body.innerHTML = `<div class="hint">Loading…</div>`;
+      let list = [];
+      try { list = t === "starred" ? await api(`/api/stars?conv=${c.id}`) : await api(`/api/convs/${c.id}/media?type=${t}`); }
+      catch (x) { body.innerHTML = `<div class="empty">${esc(x.message)}</div>`; return; }
+      if (!list.length) { body.innerHTML = `<div class="empty">${{ media: "No photos or videos yet", links: "No links yet", docs: "No documents yet", starred: "No starred messages.<br><small>Long-press a message → ⭐ Star</small>" }[t]}</div>`; return; }
+      if (t === "media") {
+        body.innerHTML = `<div class="mgrid">${list.map((m, i) => {
+          const a = m.attachment || {}, poster = a.poster ? fileUrl(a.poster) : "";
+          return `<button data-k="${i}" class="${m.kind === "videonote" ? "round" : ""}">${m.kind === "image" ? `<img src="${fileUrl(a.id)}" loading="lazy" alt="">`
+            : poster ? `<img src="${poster}" loading="lazy" alt="">` : `<video src="${fileUrl(a.id)}#t=0.1" preload="metadata" muted playsinline></video>`}${m.kind !== "image" ? `<span>▶${a.dur ? " " + fmtDur(a.dur) : ""}</span>` : ""}</button>`;
+        }).join("")}</div>`;
+        $$("[data-k]", body).forEach((b) => b.onclick = () => { const m = list[+b.dataset.k]; if (m.kind === "videonote") { close(); gotoMsg(c.id, m.id); } else viewMedia(m, [...list].reverse()); });
+      } else if (t === "links") {
+        body.innerHTML = list.flatMap((m) => (m.links || []).map((l) => {
+          let host = l; try { host = new URL(l).hostname.replace(/^www\./, ""); } catch { }
+          return `<a class="lrow" href="${esc(l)}" target="_blank" rel="noopener"><i>🔗</i><span><b>${esc(host)}</b><small>${esc(l)}</small><small>${esc(when(m))}</small></span></a>`;
+        })).join("");
+      } else if (t === "docs") {
+        body.innerHTML = list.map((m) => { const a = m.attachment || {}; return `<a class="lrow" href="${fileUrl(a.id)}" target="_blank" download="${esc(a.name)}"><i>📄</i><span><b>${esc(a.name)}</b><small>${sizeTxt(a.size || 0)} · ${esc(when(m))}</small></span></a>`; }).join("");
+      } else {
+        body.innerHTML = list.map((m) => `<button class="lrow" data-g="${m.id}"><i>⭐</i><span><b>${esc(m.sender === S.me.id ? "You" : (userById(m.sender) || {}).name || "")}</b><small class="clip">${esc(preview(m))}</small><small>${esc(when(m))}</small></span></button>`).join("");
+        $$("[data-g]", body).forEach((b) => b.onclick = () => { close(); gotoMsg(c.id, +b.dataset.g); });
+      }
+    };
+    $$(".itabs button", page).forEach((b) => b.onclick = () => show(b.dataset.t));
+    show("media");
+  }
+
   function sheet(html) {
     const bg = document.createElement("div"); bg.className = "sheet-bg";
     bg.innerHTML = `<div class="sheet"><div class="grab"></div>${html}</div>`;
@@ -676,12 +927,13 @@
     const m = findMsg(id); if (!m || m.deleted) return;
     const mine = m.sender === S.me.id, myRx = (m.reactions || {})[S.me.id];
     const s = sheet(`<div class="menu"><div class="rx">${REACTIONS.map((r) => `<button data-rx="${r}" class="${myRx === r ? "on" : ""}">${r}</button>`).join("")}</div>
-      <button data-a="reply">↩️ Reply</button>${m.text ? `<button data-a="copy">📋 Copy</button>` : ""}
-      ${mine && m.text && !m.attachment ? `<button data-a="edit">✏️ Edit</button>` : ""}${mine ? `<button data-a="delete" class="danger">🗑 Delete for everyone</button>` : ""}</div>`);
+      <button data-a="reply">↩️ Reply</button><button data-a="star">${S.stars.has(id) ? "☆ Unstar" : "⭐ Star"}</button>${m.text ? `<button data-a="copy">📋 Copy</button>` : ""}
+      ${mine && m.text && (!m.attachment || m.kind === "image" || m.kind === "video") ? `<button data-a="edit">✏️ Edit</button>` : ""}${mine ? `<button data-a="delete" class="danger">🗑 Delete for everyone</button>` : ""}</div>`);
     $$("[data-rx]", s).forEach((b) => b.onclick = () => { s.remove(); react(id, b.dataset.rx); });
     $$("[data-a]", s).forEach((b) => b.onclick = async () => {
       s.remove(); const a = b.dataset.a;
       if (a === "reply") { S.reply = m; S.edit = null; drawReply(); $("#txt").focus(); }
+      if (a === "star") toggleStar(id);
       if (a === "copy") navigator.clipboard.writeText(m.text).then(() => toast("Copied"));
       if (a === "edit") { S.edit = m; S.reply = null; $("#txt").value = m.text; window.growComposer(); drawReply(); $("#txt").focus(); }
       if (a === "delete" && confirm("Delete this message for everyone?")) api(`/api/messages/${id}`, { method: "DELETE" }).then(upsert).then(drawChat).catch((x) => toast(x.message));
@@ -709,19 +961,23 @@
     const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.86));
     return new File([blob], (file.name || "photo").replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" });
   }
-  async function sendFile(file, kind) {
+  async function sendFile(file, kind, text = "", extra = {}) {
+    if (file.size > 100 * 1048576) return toast("Files up to 100 MB");
+    kind = kind || (/^image\//.test(file.type) ? "image" : /^video\//.test(file.type) ? "video" : "file");
+    const cid = S.cur, reply = S.reply ? S.reply.id : null;
+    const temp = { id: 0, conv_id: cid, sender: S.me.id, client_id: rid(), kind, text, attachment: { local: true, name: file.name }, reactions: {}, created: now(), pending: true };
+    S.reply = null; drawReply(); upsert(temp); drawChat(); scrollEnd(true);
     try {
-      if (file.size > 30 * 1048576) return toast("Files up to 30 MB");
-      const image = !kind && /^image\//.test(file.type);
-      const f = image ? await shrinkImage(file) : file;
-      const cid = S.cur, temp = { id: 0, conv_id: cid, sender: S.me.id, client_id: rid(), kind: kind || (image ? "image" : "file"), text: "", attachment: { local: true, name: f.name }, reactions: {}, created: now(), pending: true };
-      upsert(temp); drawChat(); scrollEnd(true);
-      const fd = new FormData(); fd.append("file", f, f.name);
-      const att = await api("/api/files", { body: fd });
+      const f = kind === "image" ? await shrinkImage(file) : file, att = {};
+      if (kind === "video" || kind === "videonote") {
+        const info = await videoInfo(f);
+        if (info.poster) { try { att.poster = (await upload(new File([info.poster], "poster.jpg", { type: "image/jpeg" }))).id; } catch { } }
+        if (info.w) { att.w = info.w; att.h = info.h; } if (info.dur) att.dur = info.dur;
+      }
+      const up = await upload(f, (p) => { const el = f.size > 1.5e6 && $(`.msg[data-cid="${temp.client_id}"] .txt`); if (el) el.textContent = `⏳ ${f.name}  ${p}%`; });
       S.msgs[cid] = (S.msgs[cid] || []).filter((m) => m !== temp);
-      const prevCur = S.cur; S.cur = cid; await send({ kind: temp.kind, attachment: att, reply_to: S.reply ? S.reply.id : null }); S.cur = prevCur;
-      S.reply = null; drawReply();
-    } catch (e) { toast("Couldn't send: " + e.message); }
+      const prevCur = S.cur; S.cur = cid; await send({ kind, text, attachment: { ...up, ...att, ...extra }, reply_to: reply }); S.cur = prevCur;
+    } catch (e) { S.msgs[cid] = (S.msgs[cid] || []).filter((m) => m !== temp); if (S.cur === cid) drawChat(); toast("Couldn't send: " + e.message); }
   }
   let rec = null;
   async function toggleVoice() {
@@ -823,6 +1079,7 @@
       <h4>Profile</h4>
       <div class="field"><label>Name</label><input class="inp" id="pname" value="${esc(S.me.name)}"></div>
       <div class="field"><label>Username</label><input class="inp" id="puser" value="${esc(S.me.username)}" autocapitalize="none" autocorrect="off"></div>
+      <div class="field"><label>About</label><input class="inp" id="pbio" value="${esc(S.me.bio || "")}" maxlength="140" placeholder="A line about you (people see it on your profile)"></div>
       <button class="big-btn" id="psave">Save</button><div class="err" id="perr"></div>
       <h4>Notifications</h4>
       ${isIOS && !standalone ? `<div class="note warn">📲 On iPhone, notifications work in the Home Screen app: tap <b>Share</b> ⬆ → <b>Add to Home Screen</b>, then open A.F.R.A ♥ from its icon.</div>`
@@ -841,7 +1098,7 @@
       catch (x) { toast(x.message); }
     };
     $("#psave", s).onclick = async () => {
-      try { S.me = await api("/api/me", { method: "PATCH", body: { name: $("#pname", s).value, username: $("#puser", s).value } }); s.remove(); drawAll(); toast("Saved"); }
+      try { S.me = await api("/api/me", { method: "PATCH", body: { name: $("#pname", s).value, username: $("#puser", s).value, bio: $("#pbio", s).value } }); s.remove(); drawAll(); toast("Saved"); }
       catch (x) { $("#perr", s).textContent = x.message; }
     };
     pwChecklist($("#pnew", s));
