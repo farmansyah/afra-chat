@@ -11,6 +11,8 @@ Admin invite:  python server.py invite --admin        (also printed at first sta
 """
 import asyncio
 import base64
+import calendar
+import random
 import csv
 import io
 import tempfile
@@ -87,6 +89,15 @@ CREATE INDEX IF NOT EXISTS pet_log_pet ON pet_log(pet_id, at);
 CREATE TABLE IF NOT EXISTS ai_usage (id INTEGER PRIMARY KEY, ts REAL, user_id INTEGER, conv_id INTEGER, who TEXT, model TEXT, prompt_tokens INTEGER, completion_tokens INTEGER, cost REAL);
 CREATE INDEX IF NOT EXISTS ai_usage_ts ON ai_usage(ts);
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS dq_days (conv_id INTEGER, day TEXT, qidx INTEGER, asked INTEGER DEFAULT 0, rewarded INTEGER DEFAULT 0, PRIMARY KEY (conv_id, day));
+CREATE TABLE IF NOT EXISTS dq_answers (conv_id INTEGER, day TEXT, qidx INTEGER, user_id INTEGER, answer TEXT, ts REAL, PRIMARY KEY (conv_id, day, user_id));
+CREATE TABLE IF NOT EXISTS moods (user_id INTEGER, day TEXT, emoji TEXT, word TEXT DEFAULT '', ts REAL, pushed INTEGER DEFAULT 0, PRIMARY KEY (user_id, day));
+CREATE TABLE IF NOT EXISTS pair_dates (conv_id INTEGER PRIMARY KEY, together TEXT DEFAULT '', next_meet TEXT DEFAULT '', monthsary INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS birthdays (user_id INTEGER PRIMARY KEY, date TEXT);
+CREATE TABLE IF NOT EXISTS date_sent (conv_id INTEGER, key TEXT, PRIMARY KEY (conv_id, key));
+CREATE TABLE IF NOT EXISTS date_seen (conv_id INTEGER, user_id INTEGER, key TEXT, PRIMARY KEY (conv_id, user_id, key));
+CREATE TABLE IF NOT EXISTS otd (conv_id INTEGER, day TEXT, data TEXT DEFAULT '{}', said INTEGER DEFAULT 0, PRIMARY KEY (conv_id, day));
+CREATE INDEX IF NOT EXISTS messages_created ON messages(conv_id, created);
 CREATE TABLE IF NOT EXISTS broadcasts (id INTEGER PRIMARY KEY, user_id INTEGER, title TEXT, body TEXT, sent INTEGER DEFAULT 0, devices INTEGER DEFAULT 0, created REAL);
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
@@ -457,6 +468,7 @@ def conv_view(c, cid: int, uid: int) -> dict:
             "muted": (mine["muted"] or 0) if mine and (mine["muted"] or 0) > time.time() else 0,
             "nudge": bool(mine["nudge_on"]) if mine and mine["nudge_on"] is not None else True,
             "pet": pet_view(c, c.execute("SELECT * FROM pets WHERE conv_id=?", (cid,)).fetchone()) if cv["kind"] == "pet" else None,
+            "mood": _mood_of(c, others[0]["id"]) if cv["kind"] == "direct" and others and not others[0]["bot"] else None,
             "wants_loc": cv["kind"] == "bot" and bool(c.execute("SELECT 1 FROM reminders WHERE user_id=? AND done=0 AND place<>''", (uid,)).fetchone())}
 
 
@@ -1203,6 +1215,7 @@ async def _reminders():
                 await fire_reminder(r)
             await _pet_evening()  # at most once every 5 minutes; the pet's daily nudge
             await _nudge_unread()
+            await _couple_jobs()  # v22: the morning question, birthday/anniversary reminders, 'on this day'
         except Exception as e:
             print("reminders failed:", repr(e)[:300], flush=True)
         await asyncio.sleep(15)
@@ -2182,6 +2195,539 @@ def download(fid: str, t: str = "", authorization: str = Header(None)):
     inline = f["mime"].startswith(("image/", "audio/", "video/"))
     return FileResponse(FILES / fid, media_type=f["mime"], filename=None if inline else f["name"],
                         headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
+
+# ---------------------------------------------------------------- v22: for two (daily question, moods, our dates, on this day)
+# Everything here is scoped to a pair of people = their direct chat. The Home tab (the pet's chat) and the direct chat both map to the same pair.
+DQ_BANK = [
+    # light
+    "What's a tiny thing that made you smile today?", "If we had a free Saturday with no plans, how would you spend it?",
+    "What's your comfort food when the day was long?", "Which song is stuck in your head lately?",
+    "What's the best thing you ate this week?", "Coffee, tea, or something else? And how do you take it?",
+    "What's a small habit of yours you secretly like?", "Which season feels most like you, and why?",
+    "What's your go-to way to cheer yourself up?", "What would your perfect lazy morning look like?",
+    "Which emoji do you use the most? Be honest.", "What's the last thing that made you laugh out loud?",
+    "What's a smell that instantly makes you happy?", "What's something small you're looking forward to this week?",
+    "Rain or sunshine, and what do you do on that kind of day?", "What's the cosiest place you've ever been?",
+    "If you could have any snack right now, what would it be?", "What's a show or video you could rewatch forever?",
+    "What's the nicest compliment you got recently?", "What's one tiny luxury you never say no to?",
+    "Morning person or night owl? Has that ever changed for you?", "What's something you're oddly good at?",
+    "What colour would you paint our imaginary living room?", "What's your favourite way to relax after a stressful day?",
+    "What's a word you love the sound of?", "What do you usually think about right before you fall asleep?",
+    # deep
+    "When do you feel most like yourself?", "What's something you're proud of that you rarely talk about?",
+    "What is one fear you'd like to feel lighter about?", "What do you need more of in your life right now?",
+    "What's a lesson you learned the hard way?", "How do you like to be comforted when you're really down?",
+    "What does a good day look like to you, start to finish?", "What's one thing you wish people understood about you?",
+    "When did you last feel truly at peace?", "What's something you've forgiven yourself for?",
+    "Which of your qualities do you think I appreciate most?", "What makes you feel safe with someone?",
+    "What's a belief you held as a kid that you've changed your mind about?", "What's something you're still figuring out?",
+    "Which moment this year are you most grateful for?", "What do you wish you did more often?",
+    "How do you know when you're loved? What does it feel like?", "What's one thing I do that makes your day easier?",
+    "What's a choice you made that changed everything?", "Who has shaped you the most, and how?",
+    "What's something you want to be braver about?", "What do you do when you feel overwhelmed, and what do you wish you did instead?",
+    "What does home mean to you?", "What's a compliment you'd love to hear more of?",
+    "What do you think is the secret to staying close when life gets busy?", "What's something small I could do this week that would mean a lot to you?",
+    # playful
+    "If we swapped lives for a day, what's the first thing you'd do as me?", "What superpower would you pick, and how would you use it on a normal Tuesday?",
+    "If we opened a tiny cafe together, what would it be called and what's the signature drink?", "Which animal do you think I'd be, and which one are you?",
+    "You can teleport us anywhere for dinner tonight. Where?", "What would our couple theme song be?",
+    "If you were a flavour of ice cream, which one would you be?", "What's the most ridiculous thing you'd do if you won the lottery?",
+    "Which fictional character is the most like you?", "If our pet could talk for one minute, what would it say about us?",
+    "Would you rather travel back to the past or jump to the future? Where to?", "What's your most useless talent?",
+    "If you could instantly master any skill, what would you pick?", "What movie title best describes your week?",
+    "If we had to survive a zombie apocalypse together, what would your role be?", "What's the weirdest food combination you secretly enjoy?",
+    "You get one wish for our next date. What is it?", "What would you name a boat if you had one?",
+    "Which of us would be more likely to get lost on a trip? Be gentle.", "If you could live in any fictional world, which one?",
+    "What's your dream pyjama situation?", "If you had a personal theme day, what would the dress code be?",
+    "Pick one: a month on a beach or a month in a cabin in the snow?", "What would you do with a day when nobody could see you?",
+    "Which dance move are you proudest of, or most embarrassed by?", "What's a hobby you'd try if you knew you couldn't fail?",
+    # memories
+    "What's your favourite memory of the two of us so far?", "What did you think of me the very first time we talked?",
+    "What's a moment with me you replay in your head?", "What was the first thing you noticed about me?",
+    "What's the funniest thing that has happened to us?", "What's a place we've been together that you'd happily go back to?",
+    "What's a childhood memory that still makes you smile?", "What was your favourite thing about school?",
+    "Which trip from your past do you remember most vividly?", "What's a meal you'll never forget, and who was there?",
+    "What's something your family always did that you loved?", "What's the best surprise you've ever had?",
+    "What song takes you straight back to a specific time in your life?", "What's a photo of us you love, and why?",
+    "When did you first realise you really liked me?", "What's the kindest thing someone has done for you?",
+    "What's a smell or taste that brings back your childhood?", "What was the best gift you've ever received?",
+    "What's a time we laughed so hard we couldn't stop?", "What was your favourite toy or game as a kid?",
+    "What's the best advice you've ever been given?", "What's a small moment between us that meant more than it looked?",
+    "What did you want to be when you grew up?", "What's a day from your past you'd love to relive for an hour?",
+    "What's something we did early on that you miss?", "What's a moment when you felt really proud of me?",
+    # future
+    "Where do you see us a year from now?", "What's one place you want us to visit together?",
+    "What's something new you'd like us to try this month?", "What would our dream weekend look like?",
+    "What's a goal you're working towards right now, and how can I help?", "If we could build a small tradition together, what would it be?",
+    "What does your ideal home look like in five years?", "What's one thing you'd like to learn this year?",
+    "What would you like us to do more of?", "What's a dream you haven't told many people?",
+    "Where would you love to wake up for a whole week?", "What's a skill you'd like us to learn together?",
+    "What would you like to celebrate together next?", "What's one adventure you want to have before the year ends?",
+    "What would a perfect ordinary Wednesday look like for us in the future?", "What's something you'd like to leave behind this year?",
+    "What do you hope never changes about us?", "What would you do if we had a whole month off together?",
+    "What kind of pet-parents do you think we'll be in ten years?", "What's one small promise you'd like us to make this week?",
+]
+DQ_REACT = [
+    "Ooh, I peeked at your answers and I'm smiling 🥰", "You two are so cute together. Read them slowly 💛", "Both answered! That's my favourite kind of day 🐾",
+    "I love how different and how alike you sound 🤭", "Sharing little thoughts like this makes my tail wiggle 🥹", "Okay, that answer deserves a hug 🫶",
+    "Hehe, I didn't see that coming! Tell each other more 💬", "Look at you two, getting to know each other even better ✨"]
+DQ_ASK = ["Today's question for you two 💭", "Good morning! Here's today's question 🐾", "A little question to start the day ☀️", "Question time! No peeking at each other's answers 🤫"]
+MOODS = {"happy": ("😊", "happy"), "loved": ("🥰", "loved"), "tired": ("😴", "tired"), "stressed": ("😣", "stressed"),
+         "sad": ("😢", "sad"), "sick": ("🤒", "sick"), "annoyed": ("😤", "annoyed"), "excited": ("🤩", "excited")}
+MOOD_EMOJI = {v[0]: v[1] for v in MOODS.values()}
+LOW_MOODS = {"tired", "stressed", "sad", "sick", "annoyed"}
+MOOD_NUDGE = {
+    "tired": ["{n} sounds worn out today. A kind word could go a long way 💛", "{n} is tired today. Maybe send something cosy?"],
+    "stressed": ["{n}'s having a stressful day. Maybe check in with something calm?", "{n} is feeling the pressure today. A little encouragement would help 💪"],
+    "sad": ["{n}'s feeling down today. Maybe send something sweet?", "{n} is a bit sad today. A hug in words, perhaps? 🫂"],
+    "sick": ["{n} isn't feeling well today. Maybe ask how they're doing 🤒", "{n} is under the weather. A get-well message would be lovely 💛"],
+    "annoyed": ["{n}'s had a rough day. Maybe send something nice?", "{n} is a bit annoyed today. A funny message could help 😅"]}
+DATE_PET = {
+    "bday": ["It's {w}'s birthday today! 🎂 Let's make it special 🎉", "Happy birthday, {w}! 🎈 I'm doing a happy dance 🐾"],
+    "anniv": ["Happy anniversary, you two! 💞 {n} together today 🥳", "Today you've been together {n}. I'm so happy to live with you both 💛"],
+    "month": ["Happy monthsary! 💕 {n} months together today ✨", "{n} months together today! Cheers to you two 🥂"]}
+
+
+def _dparse(s):
+    try:
+        return datetime.strptime((s or "")[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _pair_tz(c, a: int, b: int):
+    """One clock for the pair: the time zone of whoever is further ahead (the earlier riser)."""
+    tzs = [_tz(c, a), _tz(c, b)]
+    return max(tzs, key=lambda z: datetime.now(z).utcoffset() or timedelta(0))
+
+
+def _pair_of(c, cid: int, uid: int) -> dict:
+    """The pair behind a chat id: either their direct chat or their Home (the pet's chat)."""
+    cv = c.execute("SELECT * FROM convs WHERE id=?", (cid,)).fetchone()
+    if not cv or not c.execute("SELECT 1 FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone():
+        raise HTTPException(404, "Chat not found")
+    if cv["kind"] == "pet":
+        p = c.execute("SELECT * FROM pets WHERE conv_id=?", (cid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "No pet here")
+        return _pair_build(c, p["user_a"], p["user_b"], p)
+    if cv["kind"] == "direct":
+        ids = sorted(r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cid,)))
+        if len(ids) != 2 or c.execute("SELECT 1 FROM users WHERE id IN (?,?) AND bot<>0", tuple(ids)).fetchone():
+            raise HTTPException(404, "Not available in this chat")
+        return _pair_build(c, ids[0], ids[1], _pet_for(c, ids[0], ids[1]))
+    raise HTTPException(404, "Not available in this chat")
+
+
+def _pair_build(c, a: int, b: int, p=None) -> dict:
+    return {"direct": _conv(c, [a, b]), "pet": p["conv_id"] if p else None, "pet_id": p["id"] if p else None,
+            "pet_name": p["name"] if p else "", "a": a, "b": b, "tz": _pair_tz(c, a, b)}
+
+
+def _dq_row(c, pr: dict, day: str):
+    """Today's question for the pair: picked once per day; a shuffle seeded by the chat, so no repeats until all have been used."""
+    r = c.execute("SELECT * FROM dq_days WHERE conv_id=? AND day=?", (pr["direct"], day)).fetchone()
+    if r:
+        return r
+    n = c.execute("SELECT COUNT(*) FROM dq_days WHERE conv_id=?", (pr["direct"],)).fetchone()[0]
+    order = list(range(len(DQ_BANK)))
+    random.Random(pr["direct"] * 1009 + n // len(DQ_BANK)).shuffle(order)
+    c.execute("INSERT OR IGNORE INTO dq_days (conv_id, day, qidx) VALUES (?,?,?)", (pr["direct"], day, order[n % len(DQ_BANK)]))
+    return c.execute("SELECT * FROM dq_days WHERE conv_id=? AND day=?", (pr["direct"], day)).fetchone()
+
+
+def _dq_streak(c, cid: int, today: str) -> int:
+    days = {r[0] for r in c.execute("SELECT day FROM dq_answers WHERE conv_id=? GROUP BY day HAVING COUNT(*)>=2", (cid,))}
+    d = _dparse(today)
+    if today not in days:
+        d -= timedelta(days=1)
+    n = 0
+    while d.isoformat() in days:
+        n += 1
+        d -= timedelta(days=1)
+    return n
+
+
+def _dq_view(c, pr: dict, uid: int, day: str) -> dict:
+    row = _dq_row(c, pr, day)
+    ans = {r["user_id"]: r["answer"] for r in c.execute("SELECT user_id, answer FROM dq_answers WHERE conv_id=? AND day=?", (pr["direct"], day))}
+    other = pr["b"] if uid == pr["a"] else pr["a"]
+    both = uid in ans and other in ans
+    return {"day": day, "q": DQ_BANK[row["qidx"]], "mine": ans.get(uid), "other_answered": other in ans, "revealed": both,
+            "other": ans.get(other) if both else None, "streak": _dq_streak(c, pr["direct"], day)}
+
+
+def _mood_of(c, uid: int):
+    tz = _tz(c, uid)
+    day = _day(tz)
+    r = c.execute("SELECT * FROM moods WHERE user_id=? AND day=?", (uid, day)).fetchone()
+    if not r:
+        return None
+    nxt = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=tz) + timedelta(days=1)
+    return {"emoji": r["emoji"], "label": MOOD_EMOJI.get(r["emoji"], ""), "word": r["word"] or "", "ts": r["ts"], "until": nxt.timestamp()}
+
+
+def _fix_date(s):
+    s = (s or "").strip()
+    if not s:
+        return ""
+    d = _dparse(s)
+    if not d or not 1900 <= d.year <= 2100:
+        raise ValueError("That date doesn't look right. Use the date picker.")
+    return d.isoformat()
+
+
+def _md_match(src, day) -> bool:
+    if src.month == 2 and src.day == 29 and not calendar.isleap(day.year):
+        return day.month == 2 and day.day == 28
+    return (src.month, src.day) == (day.month, day.day)
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _occasions(c, pr: dict, day) -> list:
+    """Birthdays, the anniversary and (if switched on) monthsaries that fall on `day` for this pair."""
+    out = []
+    pd = c.execute("SELECT * FROM pair_dates WHERE conv_id=?", (pr["direct"],)).fetchone()
+    for uid in (pr["a"], pr["b"]):
+        r = c.execute("SELECT date FROM birthdays WHERE user_id=?", (uid,)).fetchone()
+        b = _dparse(r["date"]) if r else None
+        if b and _md_match(b, day):
+            out.append({"type": "bday", "uid": uid, "n": day.year - b.year, "key": f"bday:{uid}:{day.isoformat()}"})
+    t = _dparse(pd["together"]) if pd else None
+    if t and day > t:
+        months = (day.year - t.year) * 12 + day.month - t.month
+        if _md_match(t, day) and months % 12 == 0:
+            out.append({"type": "anniv", "uid": 0, "n": months // 12, "key": f"anniv:0:{day.isoformat()}"})
+        elif pd["monthsary"] and months > 0 and day.day == min(t.day, calendar.monthrange(day.year, day.month)[1]):
+            out.append({"type": "month", "uid": 0, "n": months, "key": f"month:0:{day.isoformat()}"})
+    return out
+
+
+def _occ_text(occ: dict, who: str, mine: bool) -> tuple:
+    """(emoji, title, body) for the celebration screen and the push."""
+    n = occ["n"]
+    if occ["type"] == "bday":
+        return ("🎂", f"Happy birthday, {who}!" if mine else f"It's {who}'s birthday!", "Today is all yours 💛" if mine else "Say something sweet today 💌")
+    if occ["type"] == "anniv":
+        return ("💞", "Happy anniversary!", f"{_plural(n, 'year')} together today")
+    return ("💕", "Happy monthsary!", f"{_plural(n, 'month')} together today")
+
+
+def _first_name(c, viewer: int, uid: int) -> str:
+    n = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (viewer, uid)).fetchone()
+    if n and n[0]:
+        return n[0]
+    u = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    return _first(u) if u else "They"
+
+
+def _dates_view(c, pr: dict, uid: int, today) -> dict:
+    pd = c.execute("SELECT * FROM pair_dates WHERE conv_id=?", (pr["direct"],)).fetchone()
+    b = {str(x): (c.execute("SELECT date FROM birthdays WHERE user_id=?", (x,)).fetchone() or {"date": ""})["date"] for x in (pr["a"], pr["b"])}
+    together = pd["together"] if pd else ""
+    nxt = pd["next_meet"] if pd else ""
+    t, nm = _dparse(together), _dparse(nxt)
+    up = []
+    for k in range(0, 61):
+        for o in _occasions(c, pr, today + timedelta(days=k)):
+            who = _first_name(c, uid, o["uid"]) if o["uid"] else ""
+            up.append({"days": k, "type": o["type"], "uid": o["uid"], "n": o["n"], "who": who})
+        if len(up) >= 2:
+            break
+    return {"together": together, "next_meet": nxt, "monthsary": bool(pd["monthsary"]) if pd else False, "birthdays": b,
+            "together_days": (today - t).days if t and t <= today else None,
+            "next_days": (nm - today).days if nm and nm >= today else None, "upcoming": up}
+
+
+def _otd_pick(c, cid: int, today, tz) -> dict | None:
+    """Messages from this date in earlier years (or exactly a month ago if there's nothing older): up to 3, photos first."""
+    cand = []
+    for y in range(today.year - 1, today.year - 12, -1):
+        try:
+            cand.append((today.replace(year=y), f"{today.year - y} year{'s' if today.year - y > 1 else ''} ago"))
+        except ValueError:  # 29 Feb
+            cand.append((today.replace(year=y, day=28), f"{today.year - y} year{'s' if today.year - y > 1 else ''} ago"))
+    mo, yr = today.month - 1 or 12, today.year - (1 if today.month == 1 else 0)
+    cand.append((today.replace(year=yr, month=mo, day=min(today.day, calendar.monthrange(yr, mo)[1])), "1 month ago"))
+    for d0, label in cand:
+        t0 = datetime(d0.year, d0.month, d0.day, tzinfo=tz).timestamp()
+        rows = c.execute("""SELECT id, sender, kind, text, attachment, created FROM messages WHERE conv_id=? AND deleted=0
+                            AND kind IN ('text','image') AND created>=? AND created<? ORDER BY id""", (cid, t0, t0 + 86400)).fetchall()
+        items = []
+        for r in rows:
+            if r["kind"] == "image":
+                try:
+                    f = (json.loads(r["attachment"] or "{}") or {}).get("id")
+                except ValueError:
+                    f = None
+                if f:
+                    items.append((0, r["id"], {"id": r["id"], "kind": "image", "file": f, "text": (r["text"] or "")[:80], "sender": r["sender"]}))
+            elif len((r["text"] or "").strip()) >= 12:
+                items.append((1, -len(r["text"]), {"id": r["id"], "kind": "text", "text": r["text"].strip()[:110], "sender": r["sender"]}))
+        if items:
+            items.sort(key=lambda x: (x[0], x[1]))
+            return {"label": label, "date": d0.isoformat(), "items": [i[2] for i in items[:3]]}
+    return None
+
+
+def _otd_get(c, pr: dict, today, tz, make: bool):
+    r = c.execute("SELECT * FROM otd WHERE conv_id=? AND day=?", (pr["direct"], today.isoformat())).fetchone()
+    if r:
+        d = json.loads(r["data"] or "{}")
+        return (d or None), r["said"]
+    if not make:
+        return None, 1
+    d = _otd_pick(c, pr["direct"], today, tz)
+    c.execute("INSERT OR IGNORE INTO otd (conv_id, day, data, said) VALUES (?,?,?,0)", (pr["direct"], today.isoformat(), json.dumps(d or {})))
+    return d, 0
+
+
+def home_data(c, pr: dict, uid: int) -> dict:
+    lt = datetime.now(pr["tz"])
+    today = lt.date()
+    day = today.isoformat()
+    otd, _ = _otd_get(c, pr, today, pr["tz"], lt.hour >= 20)
+    names = {str(x): _first(c.execute("SELECT * FROM users WHERE id=?", (x,)).fetchone()) for x in (pr["a"], pr["b"])}
+    return {"conv": pr["direct"], "pet": pr["pet"], "day": day, "me": uid, "names": names,
+            "question": _dq_view(c, pr, uid, day),
+            "moods": {str(x): _mood_of(c, x) for x in (pr["a"], pr["b"])},
+            "dates": _dates_view(c, pr, uid, today), "otd": otd}
+
+
+async def home_ping(pr: dict, what: str, extra=None):
+    for uid in (pr["a"], pr["b"]):
+        await send_to(uid, {"t": "home", "conv": pr["direct"], "pet": pr["pet"], "what": what, **(extra or {})})
+
+
+@app.get("/api/home/{cid}")
+def home_get(cid: int, authorization: str = Header(None)):
+    """Everything under the pet room in one go: today's question, moods, our dates, on this day."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        d = home_data(c, pr, u["id"])
+        c.commit()
+    return d
+
+
+@app.put("/api/home/{cid}/question")
+async def home_answer(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    text = (body.get("answer") or "").strip()[:600]
+    if not text:
+        raise ValueError("Write an answer first")
+    react = None
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        day = _day(pr["tz"])
+        row = _dq_row(c, pr, day)
+        v = _dq_view(c, pr, u["id"], day)
+        if v["revealed"]:
+            raise ValueError("You both answered already. See you tomorrow 💛")
+        c.execute("INSERT OR REPLACE INTO dq_answers (conv_id, day, qidx, user_id, answer, ts) VALUES (?,?,?,?,?,?)",
+                  (pr["direct"], day, row["qidx"], u["id"], text, time.time()))
+        v = _dq_view(c, pr, u["id"], day)
+        if v["revealed"] and c.execute("UPDATE dq_days SET rewarded=1 WHERE conv_id=? AND day=? AND rewarded=0", (pr["direct"], day)).rowcount:
+            if pr["pet_id"]:
+                _coins(c, pr["pet_id"], 10)  # +5 each into the shared wallet
+            react = random.choice(DQ_REACT)
+        out = home_data(c, pr, u["id"])
+        c.commit()
+    await home_ping(pr, "dq", {"by": u["id"], "revealed": bool(react)})
+    if react and pr["pet"]:
+        await pet_say(pr["pet"], react)
+    if react:
+        out["question"]["gain"] = 10
+    return out
+
+
+@app.get("/api/home/{cid}/questions")
+def home_past(cid: int, authorization: str = Header(None)):
+    """Past questions with both answers (an unanswered one shows only your own)."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        today = _day(pr["tz"])
+        other = pr["b"] if u["id"] == pr["a"] else pr["a"]
+        out = []
+        for r in c.execute("SELECT * FROM dq_days WHERE conv_id=? AND day<? ORDER BY day DESC LIMIT 120", (pr["direct"], today)):
+            ans = {x["user_id"]: x["answer"] for x in c.execute("SELECT user_id, answer FROM dq_answers WHERE conv_id=? AND day=?", (pr["direct"], r["day"]))}
+            both = u["id"] in ans and other in ans
+            out.append({"day": r["day"], "q": DQ_BANK[r["qidx"]], "mine": ans.get(u["id"]), "other": ans.get(other) if both else None,
+                        "both": both, "other_answered": other in ans})
+        return {"items": out, "streak": _dq_streak(c, pr["direct"], today), "names": {str(x): _first_name(c, u["id"], x) for x in (pr["a"], pr["b"])}}
+
+
+@app.put("/api/mood")
+async def mood_set(body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    key = (body.get("mood") or "").strip()
+    word = re.sub(r"\s+", " ", (body.get("word") or "")).strip()[:40]
+    todo = []
+    with closing(db()) as c:
+        day = _day(_tz(c, u["id"]))
+        if not key:
+            c.execute("DELETE FROM moods WHERE user_id=? AND day=?", (u["id"], day))
+            m = None
+        else:
+            if key not in MOODS:
+                raise ValueError("Unknown mood")
+            emoji = MOODS[key][0]
+            old = c.execute("SELECT pushed FROM moods WHERE user_id=? AND day=?", (u["id"], day)).fetchone()
+            first_push = key in LOW_MOODS and not (old and old["pushed"])
+            c.execute("INSERT OR REPLACE INTO moods (user_id, day, emoji, word, ts, pushed) VALUES (?,?,?,?,?,?)",
+                      (u["id"], day, emoji, word, time.time(), 1 if (first_push or (old and old["pushed"])) else 0))
+            m = _mood_of(c, u["id"])
+            if first_push:
+                for r in c.execute("""SELECT m2.user_id FROM members m1 JOIN members m2 ON m1.conv_id=m2.conv_id AND m2.user_id<>m1.user_id
+                                      JOIN convs cv ON cv.id=m1.conv_id AND cv.kind='direct' JOIN users x ON x.id=m2.user_id AND x.bot=0
+                                      WHERE m1.user_id=?""", (u["id"],)):
+                    p = _pet_for(c, u["id"], r["user_id"])
+                    todo.append((r["user_id"], _first_name(c, r["user_id"], u["id"]), p["name"] if p else "A.F.R.A", p["conv_id"] if p else 0))
+        peers = [r[0] for r in c.execute("""SELECT DISTINCT m2.user_id FROM members m1 JOIN members m2 ON m1.conv_id=m2.conv_id AND m2.user_id<>m1.user_id
+                                            JOIN convs cv ON cv.id=m1.conv_id AND cv.kind='direct' WHERE m1.user_id=?""", (u["id"],))]
+        c.commit()
+    for x in set(peers) | {u["id"]}:
+        await send_to(x, {"t": "mood", "user": u["id"], "mood": m})
+    for uid, name, title, pcid in todo:
+        await push_to([uid], {"title": title, "body": random.choice(MOOD_NUDGE[key]).format(n=name), "conv": pcid or 0, "icon": "/icon-512.png"})
+    return {"mood": m}
+
+
+@app.put("/api/home/{cid}/dates")
+async def home_dates(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        old = c.execute("SELECT * FROM pair_dates WHERE conv_id=?", (pr["direct"],)).fetchone()
+        together = _fix_date(body["together"]) if "together" in body else (old["together"] if old else "")
+        nxt = _fix_date(body["next_meet"]) if "next_meet" in body else (old["next_meet"] if old else "")
+        mon = (1 if body.get("monthsary") else 0) if "monthsary" in body else (old["monthsary"] if old else 0)
+        c.execute("INSERT OR REPLACE INTO pair_dates (conv_id, together, next_meet, monthsary) VALUES (?,?,?,?)", (pr["direct"], together, nxt, mon))
+        for k, v in (body.get("birthdays") or {}).items():
+            if str(k) not in (str(pr["a"]), str(pr["b"])):
+                continue
+            d = _fix_date(v)
+            if d:
+                c.execute("INSERT OR REPLACE INTO birthdays (user_id, date) VALUES (?,?)", (int(k), d))
+            else:
+                c.execute("DELETE FROM birthdays WHERE user_id=?", (int(k),))
+        out = home_data(c, pr, u["id"])
+        c.commit()
+    await home_ping(pr, "dates", {"by": u["id"]})
+    return out
+
+
+@app.get("/api/celebrate")
+def celebrate_get(authorization: str = Header(None)):
+    """Today's birthdays and anniversaries I haven't seen the celebration for yet (shown once, the first time I open the app)."""
+    u = auth(authorization)
+    out = []
+    with closing(db()) as c:
+        for r in c.execute("""SELECT cv.id FROM members m JOIN convs cv ON cv.id=m.conv_id AND cv.kind='direct' WHERE m.user_id=?""", (u["id"],)).fetchall():
+            try:
+                pr = _pair_of(c, r["id"], u["id"])
+            except HTTPException:
+                continue
+            for o in _occasions(c, pr, datetime.now(pr["tz"]).date()):
+                if c.execute("SELECT 1 FROM date_seen WHERE conv_id=? AND user_id=? AND key=?", (pr["direct"], u["id"], o["key"])).fetchone():
+                    continue
+                who = _first_name(c, u["id"], o["uid"]) if o["uid"] else ""
+                e, t, b = _occ_text(o, who, o["uid"] == u["id"])
+                out.append({"conv": pr["direct"], "key": o["key"], "type": o["type"], "emoji": e, "title": t, "body": b})
+    return out
+
+
+@app.post("/api/celebrate/seen")
+def celebrate_seen(body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, int(body.get("conv") or 0), u["id"])
+        c.execute("INSERT OR IGNORE INTO date_seen (conv_id, user_id, key) VALUES (?,?,?)", (int(body["conv"]), u["id"], str(body.get("key") or "")[:80]))
+        c.commit()
+    return {"ok": True}
+
+
+COUPLE_CHECK = [0.0]
+
+
+async def _couple_jobs():
+    """The pair features' schedule (every ~2 minutes, from the reminder loop): the morning question (~09:00 for the earlier riser),
+    birthday/anniversary reminders (the day before and on the day, once each), and the evening 'on this day' (~20:00)."""
+    if time.time() - COUPLE_CHECK[0] < 120:
+        return
+    COUPLE_CHECK[0] = time.time()
+    acts = []
+    with closing(db()) as c:
+        pairs = {}
+        for p in c.execute("SELECT * FROM pets").fetchall():
+            pr = _pair_build(c, p["user_a"], p["user_b"], p)
+            pairs[pr["direct"]] = pr
+        for r in c.execute("SELECT conv_id FROM pair_dates").fetchall():
+            if r["conv_id"] not in pairs:
+                m = [x["user_id"] for x in c.execute("SELECT user_id FROM members WHERE conv_id=?", (r["conv_id"],))]
+                if len(m) == 2:
+                    pairs[r["conv_id"]] = _pair_build(c, min(m), max(m), _pet_for(c, m[0], m[1]))
+        for pr in pairs.values():
+            lt = datetime.now(pr["tz"])
+            today = lt.date()
+            day = today.isoformat()
+            if 9 <= lt.hour < 22:
+                row = _dq_row(c, pr, day)
+                if not row["asked"]:
+                    c.execute("UPDATE dq_days SET asked=1 WHERE conv_id=? AND day=?", (pr["direct"], day))
+                    acts.append(("ask", pr, DQ_BANK[row["qidx"]]))
+            if lt.hour >= 9:
+                for phase, d in (("day", today), ("eve", today + timedelta(days=1))):
+                    for o in _occasions(c, pr, d):
+                        k = o["key"] + ":" + phase
+                        if c.execute("INSERT OR IGNORE INTO date_sent (conv_id, key) VALUES (?,?)", (pr["direct"], k)).rowcount:
+                            acts.append((phase, pr, o))
+            if lt.hour >= 20:
+                data, said = _otd_get(c, pr, today, pr["tz"], True)
+                if data and not said:
+                    c.execute("UPDATE otd SET said=1 WHERE conv_id=? AND day=?", (pr["direct"], day))
+                    acts.append(("otd", pr, data))
+        c.commit()
+    for kind, pr, x in acts:
+        try:
+            if kind == "ask":
+                text = f"{random.choice(DQ_ASK)}\n{x}"
+                if pr["pet"]:
+                    await pet_say(pr["pet"], text, push=True)
+                else:
+                    await push_to([pr["a"], pr["b"]], {"title": "Today's question", "body": x[:180], "conv": pr["direct"], "icon": "/icon-512.png"})
+                await home_ping(pr, "dq")
+            elif kind in ("day", "eve"):
+                with closing(db()) as c:
+                    for uid in (pr["a"], pr["b"]):
+                        who = _first_name(c, uid, x["uid"]) if x["uid"] else ""
+                        mine = x["uid"] == uid
+                        e, t, b = _occ_text(x, who, mine)
+                        if kind == "eve":
+                            whose = "Your birthday is" if mine else f"{who}'s birthday is"
+                            t = {"bday": f"{whose} tomorrow", "anniv": "Your anniversary is tomorrow", "month": "Your monthsary is tomorrow"}[x["type"]]
+                            b = {"bday": "We hope it's a lovely one 🎈" if mine else "Time to plan something sweet 💌", "anniv": f"{_plural(x['n'], 'year')} together tomorrow",
+                                 "month": f"{_plural(x['n'], 'month')} together tomorrow"}[x["type"]]
+                        await push_to([uid], {"title": f"{e} {t}" if kind == "day" else t, "body": b, "conv": pr["pet"] or pr["direct"], "icon": "/icon-512.png"})
+                if kind == "day" and pr["pet"]:
+                    with closing(db()) as c:
+                        who = _first_name(c, pr["a"], x["uid"]) if x["uid"] else ""
+                    n = _plural(x["n"], "year") if x["type"] == "anniv" else str(x["n"])
+                    await pet_say(pr["pet"], random.choice(DATE_PET[x["type"]]).format(w=who, n=n))
+                await home_ping(pr, "dates")
+            elif kind == "otd" and pr["pet"]:
+                it = next((i for i in x["items"] if i["kind"] == "text"), None)
+                lead = "A month ago today" if x["label"] == "1 month ago" else x["label"] + " today"
+                line = f"{lead} you two talked about “{it['text'][:60].rstrip()}{'…' if len(it['text']) > 60 else ''}” 💭" if it else f"{lead} you two shared a photo 📸"
+                await pet_say(pr["pet"], line)
+                await home_ping(pr, "otd")
+        except Exception as e:
+            print("couple job failed:", repr(e)[:300], flush=True)
 
 
 # ---------------------------------------------------------------- live updates (one WebSocket per device)

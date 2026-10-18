@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 21;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 22;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -297,6 +297,10 @@
       if (e.styled && e.by !== S.me.id && S.cur === e.conv.id) toast(`${dn(userById(e.by)) || "They"} changed the chat theme`);
       cacheSave(); drawList();    } else if (e.t === "pet") {
       onPetEvent(e);
+    } else if (e.t === "mood") {
+      applyMood(e.user, e.mood);
+    } else if (e.t === "home") {
+      onHomeEvent(e);
     } else if (e.t === "conv_gone") {  // the admin deleted the other person's account
       S.convs = S.convs.filter((c) => c.id !== e.conv); delete S.msgs[e.conv];
       if (S.cur === e.conv) { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); }
@@ -360,7 +364,7 @@
       <section class="pane-chat" id="chatPane"></section>`;
     $("#bNew").onclick = newChat; $("#bHeart").onclick = heartNotes; $("#bAdmin").onclick = adminPage; $("#meAv").onclick = () => setTab("settings");
     $("#lq").oninput = (e) => { S.filter = e.target.value.trim().toLowerCase(); drawList(); };
-    setView(S.view); drawAll(); drawBanner(); mountTabs();
+    setView(S.view); drawAll(); drawBanner(); mountTabs(); celebrateCheck();
   }
   function setView(v) { if (S.view !== v) { app.classList.remove("slide"); void app.offsetWidth; app.classList.add("slide"); } S.view = v; app.dataset.view = v; if (v === "list" && S.tab === "home" && H.drawn) homeDraw(); syncAnim(); }
   function drawAll() { if (!$("#convs")) return; $("#greet").innerHTML = greeting(); $("#meAv").innerHTML = avatar(S.me, "sm"); $("#bAdmin").hidden = !S.me.is_admin; drawList(); drawChatPane(); badge(); }
@@ -550,7 +554,7 @@
     $("#chatAv").innerHTML = `<div class="av-wrap ${u && u.online && !u.bot && c.kind !== "pet" ? "on" : ""}">${cav(c, "sm")}</div>`;
     $("#chatName").textContent = title(c);
     const st = $("#chatStat");
-    st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : c.kind === "bot" ? "personal assistant" : c.kind === "pet" ? "Home · you & " + (S.nicks[u && u.id] || ((u && u.name) || "them").split(" ")[0]) : [lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
+    st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : c.kind === "bot" ? "personal assistant" : c.kind === "pet" ? "Home · you & " + (S.nicks[u && u.id] || ((u && u.name) || "them").split(" ")[0]) : [c.kind === "direct" ? moodTxt(moodNow(c.mood)) : "", lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
     st.className = typing || (u && u.online) ? "live" : "";
     const tl = $("#typing");
     if (typing && !tl.firstChild) { tl.innerHTML = `<div class="typing-bub" title="${esc(title(c))} is typing"><i></i><i></i><i></i></div>`; scrollEnd(); }
@@ -1147,7 +1151,7 @@
   }
   async function gotoMsg(cid, id) {  // open the chat at a message (loads older messages if it's far back)
     if (S.cur !== cid) await openConv(cid);
-    for (let i = 0; i < 15 && !(S.msgs[cid] || []).some((m) => m.id === id) && S.older[cid]; i++) await loadOlder();
+    for (let i = 0; i < 60 && !(S.msgs[cid] || []).some((m) => m.id === id) && S.older[cid]; i++) await loadOlder();
     const t = $(`.msg[data-id="${id}"]`); if (!t) return toast("Couldn't find that message");
     t.scrollIntoView({ behavior: "smooth", block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 1400);
   }
@@ -1163,10 +1167,10 @@
     page.innerHTML = `<div class="top"><button class="icon" id="iBack">‹</button><h1>${self ? "Notes to self" : "Contact info"}</h1></div>
       <div class="page-body">
         <div class="ihead">${avatar(u, "xl", self)}<div class="iname">${esc(title(c))}</div>
-          ${self ? `<div class="isub">Only you can see this chat</div>` : `${S.nicks[u.id] ? `<div class="isub real">${esc(u.name || "")}</div>` : ""}<div class="isub">@${esc(u.username)}${lastSeen(u) ? " · " + esc(lastSeen(u)) : ""}</div>${u.bio ? `<div class="ibio">${esc(u.bio)}</div>` : ""}`}</div>
+          ${self ? `<div class="isub">Only you can see this chat</div>` : `${S.nicks[u.id] ? `<div class="isub real">${esc(u.name || "")}</div>` : ""}<div class="isub">@${esc(u.username)}${lastSeen(u) ? " · " + esc(lastSeen(u)) : ""}</div>${c.kind === "direct" && moodNow(c.mood) ? `<div class="isub info-mood">${esc(moodTxt(moodNow(c.mood)))}</div>` : ""}${u.bio ? `<div class="ibio">${esc(u.bio)}</div>` : ""}`}</div>
         <div class="iacts"><button data-i="search"><i>🔍</i>Search</button>
           ${self ? "" : `<button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button>`}${c.kind === "direct" && !(u || {}).bot ? `<button data-i="pet"><i>🐾</i>Share a pet</button>` : ""}</div>
-        ${self || !u || u.bot ? "" : `<div class="irows"><button class="irow" data-i="nick"><i>💕</i><span><b>Nickname</b><small>${S.nicks[u.id] ? esc(S.nicks[u.id]) : "Only you see what you call them"}</small></span><em>›</em></button></div>
+        ${self || !u || u.bot ? "" : `<div class="irows"><button class="irow" data-i="nick"><i>💕</i><span><b>Nickname</b><small>${S.nicks[u.id] ? esc(S.nicks[u.id]) : "Only you see what you call them"}</small></span><em>›</em></button>${c.kind === "direct" ? `<button class="irow" data-i="mood"><i>🌤️</i><span><b>My mood</b><small>Share how you feel today</small></span><em>›</em></button><button class="irow" data-i="dates"><i>💞</i><span><b>Our dates</b><small>Together since, birthdays, next time together</small></span><em>›</em></button>` : ""}</div>
         ${S.nickFor[u.id] ? `<div class="nickfor">${esc((u.name || "").split(" ")[0] || "They")} calls you “${esc(S.nickFor[u.id])}” 💕</div>` : ""}`}
         ${themeRow(c)}
         <div class="chips tabs itabs"><button data-t="media" class="on">Media</button><button data-t="links">Links</button><button data-t="docs">Docs</button><button data-t="starred">⭐ Starred</button></div>
@@ -1180,6 +1184,8 @@
       if (a === "theme") { close(); themeSheet(); }
       if (a === "mute") muteSheet(conv(c.id), () => { page.remove(); infoPage(); });
       if (a === "nick") nickSheet(u);
+      if (a === "mood") moodSheet();
+      if (a === "dates") datesSheet(c.id);
       if (a === "pet") { close(); sharePet(); }
     });
     const body = $("#ibody", page);
@@ -2292,6 +2298,156 @@
     api("/api/device", { body: d }).catch(() => { });
   }
 
+  // ------------------------------------------------------------------ v22: for two (today's question, moods, our dates, on this day, celebrations)
+  const MOOD_LIST = [["happy", "😊", "happy"], ["loved", "🥰", "loved"], ["tired", "😴", "tired"], ["stressed", "😣", "stressed"], ["sad", "😢", "sad"], ["sick", "🤒", "sick"], ["annoyed", "😤", "annoyed"], ["excited", "🤩", "excited"]];
+  const moodNow = (m) => m && m.until > now() ? m : null;
+  const moodTxt = (m) => m ? m.emoji + " " + m.label + (m.word ? " · " + m.word : "") : "";
+  const pName = (id) => id === S.me.id ? "You" : (S.nicks[id] || ((H.pair && H.pair.names[id]) || "They"));
+  const otdSeenKey = () => H.pair ? "otd:" + H.pair.conv + ":" + H.pair.day : "";
+  const otdNew = () => !!(H.pair && H.pair.otd && !store.get(otdSeenKey(), false));
+  function applyMood(uid, m) {  // a mood changed (mine from this or another device, or the partner's)
+    S.convs.forEach((c) => { const o = c.kind === "direct" ? other(c) : null; if (o && o.id === uid) c.mood = m; });
+    if (H.pair && H.pair.moods) H.pair.moods[uid] = m;
+    drawHeader(); drawList(); refreshInfo(); if (S.tab === "home" && H.drawn) homeDraw();
+  }
+  async function pairLoad() {
+    const cid = H.cid; if (!cid) return;
+    try {
+      const d = await api(`/api/home/${cid}`); if (cid !== H.cid) return;
+      const was = H.pair && H.pair.pet === cid ? H.pair.question : null;
+      if (was && !was.revealed && d.question.revealed) H.dqJust = true;
+      H.pair = d; tabBadges(); if (S.tab === "home") homeDraw();
+    } catch { }
+  }
+  function onHomeEvent(e) {  // the partner (or another of my devices) changed the question, dates or on-this-day
+    if (H.cid && (e.pet === H.cid || e.conv === H.cid)) pairLoad();
+    if (e.what === "dates") celebrateCheck();
+  }
+  const dqFmtDay = (d) => new Date(d + "T12:00:00").toLocaleDateString([], { day: "numeric", month: "short" });
+  function pairHtml() {
+    const d = H.pair; if (!d || d.pet !== H.cid) return "";
+    const q = d.question, me = S.me.id, oid = +Object.keys(d.names).find((k) => +k !== me), on = pName(oid);
+    let body;
+    if (q.revealed) {
+      body = `<div class="dq-pair ${H.dqJust ? "just" : ""}"><div class="dq-a mine"><small>You</small><p>${esc(q.mine)}</p></div><div class="dq-a theirs"><small>${esc(on)}</small><p>${esc(q.other)}</p></div></div>
+        <small class="hm-hint">You both answered 💞 A new question comes tomorrow morning.</small>`;
+    } else if (q.mine && !H.dqEdit) {
+      body = `<div class="dq-pair"><div class="dq-a mine"><small>You</small><p>${esc(q.mine)}</p></div><div class="dq-a lock"><small>${esc(on)}</small><p>${q.other_answered ? "Answered 🔒" : "Hasn't answered yet"}</p></div></div>
+        <div class="dq-foot"><small class="hm-hint">${q.other_answered ? "" : esc(on) + " will see yours once they answer too."}</small><button class="sbtn" id="dqEdit">Edit</button></div>`;
+    } else {
+      body = `${q.other_answered ? `<div class="dq-lock">${esc(on)} answered 🔒 <span>Answer to see it</span></div>` : ""}
+        <textarea id="dqText" rows="2" maxlength="600" placeholder="Your answer…">${esc(H.dqEdit ? q.mine || "" : H.dqDraft || "")}</textarea>
+        <div class="dq-foot"><small class="hm-hint">${q.other_answered ? "" : "Hidden from " + esc(on) + " until you both answer · +5 ♥ each"}</small><button class="pi-yes" id="dqSend">Send</button></div>`;
+    }
+    const dt = d.dates, up = dt.upcoming[0];
+    const upTxt = up ? `${up.type === "bday" ? (up.uid === me ? "Your birthday" : esc(up.who) + "'s birthday") : up.type === "anniv" ? "Anniversary" : "Monthsary"} ${up.days === 0 ? "today" : up.days === 1 ? "tomorrow" : "in " + up.days + " days"}` : "";
+    const mrow = (id) => { const m = moodNow(d.moods[id]); const mine = id === me, tg = mine ? "button" : "div"; return `<${tg} class="mrow ${mine ? "mine" : ""}" ${mine ? 'id="pcMood"' : ""}><i>${m ? m.emoji : "🫥"}</i><span><b>${esc(pName(id))}</b><small>${m ? esc(m.label + (m.word ? " · " + m.word : "")) : mine ? "Tap to share how you feel" : "No mood shared today"}</small></span>${mine ? "<em>›</em>" : ""}</${tg}>`; };
+    const dates = (dt.together_days !== null || dt.next_days !== null)
+      ? `<button class="hm-card pc-dates" id="pcDates"><div class="pd-row">${dt.together_days !== null ? `<div><b>${dt.together_days.toLocaleString()}</b><small>days together 💞</small></div>` : ""}${dt.next_days !== null ? `<div><b>${dt.next_days === 0 ? "Today" : dt.next_days}</b><small>${dt.next_days === 0 ? "we're together! 🥰" : (dt.next_days === 1 ? "day" : "days") + " until we meet ✈️"}</small></div>` : ""}</div>${upTxt ? `<em class="pd-up">🎁 ${upTxt}</em>` : ""}</button>`
+      : `<button class="hm-card pc-dates empty" id="pcDates"><i>💞</i><span><b>Our dates</b><small>Add when you got together, birthdays and the next time you meet</small></span><em>›</em></button>`;
+    const o = d.otd, fresh = otdNew();
+    const otd = o ? `<div class="hm-card pc-otd"><h4>📅 On this day <small>${esc(o.label)}</small>${fresh ? `<b class="pc-new">new</b>` : ""}</h4><div class="otd-grid">${o.items.map((i) => i.kind === "image"
+      ? `<button class="otd-it img" data-otd="${i.id}"><img src="${fileUrl(i.file)}" alt="" loading="lazy">${i.text ? `<small>${esc(i.text)}</small>` : ""}</button>`
+      : `<button class="otd-it" data-otd="${i.id}"><p>“${esc(i.text)}”</p><small>${esc(pName(i.sender))}</small></button>`).join("")}</div></div>` : "";
+    return `<div class="pc-stack">
+      <div class="hm-card pc-dq ${q.revealed ? "done" : ""}" id="pcDq"><h4>💭 Today's question ${q.streak ? `<b class="dq-streak">🔥 ${q.streak}</b>` : ""}<button class="sbtn" id="dqPast">Past</button></h4><p class="dq-q">${esc(q.q)}</p>${body}</div>
+      <div class="hm-card pc-mood"><h4>🌤️ Moods</h4>${mrow(me)}${mrow(oid)}</div>
+      ${dates}${otd}</div>`;
+  }
+  function bindPair(box) {
+    const d = H.pair; if (!d || d.pet !== H.cid) return;
+    const send = $("#dqSend", box), tx = $("#dqText", box);
+    if (tx) tx.oninput = () => { H.dqDraft = tx.value; };
+    if (send) send.onclick = async () => {
+      const v = tx.value.trim(); if (!v) { tx.focus(); return; }
+      send.disabled = true;
+      try {
+        const r = await api(`/api/home/${H.cid}/question`, { method: "PUT", body: { answer: v } });
+        const was = d.question.revealed; H.dqEdit = false; H.dqDraft = ""; H.pair = r;
+        if (r.question.revealed && !was) { H.dqJust = true; if (navigator.vibrate) navigator.vibrate([15, 30, 15]); homeLoad(); }
+        homeDraw(); toast(r.question.revealed ? "Both answered 💞" : "Saved 🔒");
+      } catch (x) { toast(x.message); send.disabled = false; }
+    };
+    if (tx && send) tx.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send.click(); };
+    const ed = $("#dqEdit", box); if (ed) ed.onclick = () => { H.dqEdit = true; homeDraw(); const t = $("#dqText"); if (t) t.focus(); };
+    $("#dqPast", box).onclick = pastSheet;
+    $("#pcMood", box).onclick = moodSheet;
+    $("#pcDates", box).onclick = () => datesSheet(d.conv);
+    $$("[data-otd]", box).forEach((b) => b.onclick = () => {
+      store.set(otdSeenKey(), true); tabBadges();
+      const id = +b.dataset.otd; gotoMsg(d.conv, id);
+    });
+    if (H.dqJust) { H.dqJust = false; const card = $("#pcDq", box); if (card) setTimeout(() => { burstAt(card, "💞", 9); burstAt(card, "✨", 6); }, 350); }
+  }
+  async function pastSheet() {
+    const s = sheet(`<h3>Past questions</h3><div class="hint">Loading…</div>`);
+    try {
+      const r = await api(`/api/home/${H.cid}/questions`);
+      const oid = +Object.keys(r.names).find((k) => +k !== S.me.id), nm = S.nicks[oid] || r.names[oid] || "They";
+      $(".hint", s).outerHTML = `<div class="dq-past">${r.streak ? `<p class="dq-sum">🔥 ${r.streak}-day streak</p>` : ""}${r.items.length ? r.items.map((i) => `<div class="dq-pi"><small>${esc(dqFmtDay(i.day))}</small><b>${esc(i.q)}</b>
+        ${i.both ? `<div class="dq-a mine"><small>You</small><p>${esc(i.mine)}</p></div><div class="dq-a theirs"><small>${esc(nm)}</small><p>${esc(i.other)}</p></div>`
+          : `<p class="dq-miss">${i.mine ? "Only you answered" : i.other_answered ? esc(nm) + " answered, you didn't" : "Nobody answered"}</p>`}</div>`).join("") : `<div class="empty">Nothing yet.<br><small>Answered questions land here.</small></div>`}</div>`;
+    } catch (x) { $(".hint", s).textContent = x.message; }
+  }
+  async function moodSheet() {
+    let d = H.pair;
+    if (!d) { const c = conv(S.cur); const dc = c && c.kind === "direct" ? c : S.convs.find((x) => x.kind === "direct"); if (dc) { try { d = await api(`/api/home/${dc.id}`); } catch { } } }
+    const mine = moodNow(d && d.moods[S.me.id]);
+    let pick = mine ? (MOOD_LIST.find((m) => m[1] === mine.emoji) || [])[0] : "";
+    const s = sheet(`<h3 style="margin:4px 0 2px">How are you feeling?</h3><p style="color:var(--muted);margin:0 0 10px;font-size:14px">Your partner sees this until the day ends.</p>
+      <div class="moodgrid">${MOOD_LIST.map((m) => `<button data-mk="${m[0]}" class="${pick === m[0] ? "on" : ""}"><i>${m[1]}</i><span>${m[2]}</span></button>`).join("")}</div>
+      <input id="mdWord" maxlength="40" value="${esc(mine ? mine.word : "")}" placeholder="Add a word (optional)" autocomplete="off" style="width:100%;box-sizing:border-box;min-height:44px;font-size:17px;margin-top:10px">
+      <div class="nickbtns" style="margin-top:12px">${mine ? `<button class="nkrm" id="mdClear">Clear</button>` : ""}<button class="nksave" id="mdSave">Share</button></div>`);
+    $$("[data-mk]", s).forEach((b) => b.onclick = () => { pick = b.dataset.mk; $$("[data-mk]", s).forEach((x) => x.classList.toggle("on", x === b)); if (navigator.vibrate) navigator.vibrate(8); });
+    const go = async (key) => {
+      try { const r = await api("/api/mood", { method: "PUT", body: { mood: key, word: $("#mdWord", s).value.trim() } }); s.remove(); applyMood(S.me.id, r.mood); toast(r.mood ? "Shared " + r.mood.emoji : "Mood cleared"); }
+      catch (x) { toast(x.message); }
+    };
+    $("#mdSave", s).onclick = () => pick ? go(pick) : toast("Pick a mood first");
+    if ($("#mdClear", s)) $("#mdClear", s).onclick = () => go("");
+  }
+  async function datesSheet(cid) {
+    let d = H.pair && H.pair.conv === cid ? H.pair : null;
+    if (!d) { try { d = await api(`/api/home/${cid}`); } catch (x) { return toast(x.message); } }
+    const dt = d.dates, ids = Object.keys(d.names), me = String(S.me.id), oid = ids.find((k) => k !== me);
+    const nm = (id) => id === me ? "Your" : (S.nicks[id] || d.names[id]) + "'s";
+    const s = sheet(`<h3 style="margin:4px 0 2px">💞 Our dates</h3><div class="dts">
+      <label>Together since<input type="date" id="dtT" value="${esc(dt.together || "")}"></label>
+      <label>Next time together<input type="date" id="dtN" value="${esc(dt.next_meet || "")}"></label>
+      <label>${esc(nm(me))} birthday<input type="date" id="dtB1" value="${esc(dt.birthdays[me] || "")}"></label>
+      <label>${esc(nm(oid))} birthday<input type="date" id="dtB2" value="${esc(dt.birthdays[oid] || "")}"></label>
+      <label class="dts-chk"><input type="checkbox" id="dtM" ${dt.monthsary ? "checked" : ""}><span><b>Monthsary reminders</b><small>A little nudge on the same day every month</small></span></label>
+      <p class="hm-hint">You'll both get a reminder the day before and on the day, for birthdays and your anniversary.</p></div>
+      <div class="nickbtns" style="margin-top:12px"><button class="nksave" id="dtSave">Save</button></div>`);
+    $("#dtSave", s).onclick = async (e) => {
+      const btn = e.currentTarget; btn.disabled = true;
+      try {
+        const r = await api(`/api/home/${cid}/dates`, { method: "PUT", body: { together: $("#dtT", s).value, next_meet: $("#dtN", s).value, monthsary: $("#dtM", s).checked, birthdays: { [me]: $("#dtB1", s).value, [oid]: $("#dtB2", s).value } } });
+        s.remove(); toast("Saved 💞"); if (H.pair && H.pair.conv === cid) pairLoad(); celebrateCheck();
+      } catch (x) { toast(x.message); btn.disabled = false; }
+    };
+  }
+  // ---- the celebration: confetti and emoji, once, the first time either of us opens the app on the day
+  var CEL = false;
+  async function celebrateCheck() {
+    if (CEL || !S.me || !TOKEN) return;
+    try { const l = await api("/api/celebrate"); if (l.length) celebrateShow(l); } catch { }
+  }
+  function celebrateShow(list) {
+    if (CEL || !list.length) return; CEL = true;
+    const it = list[0], o = document.createElement("div"); o.className = "cel";
+    const bits = ["🎉", "✨", "💖", "🎈", "🥳", "🌸", "💛", "🎊"];
+    o.innerHTML = `<div class="cel-fx">${Array.from({ length: 30 }, (_, i) => `<span style="--x:${Math.round(Math.random() * 100)}vw;--dl:${(Math.random() * 1.4).toFixed(2)}s;--du:${(2.6 + Math.random() * 2).toFixed(2)}s;--r:${Math.round(Math.random() * 540 - 270)}deg;--sz:${16 + Math.round(Math.random() * 16)}px">${bits[i % bits.length]}</span>`).join("")}</div>
+      <div class="cel-card" role="dialog"><div class="cel-em">${it.emoji}</div><h2>${esc(it.title)}</h2><p>${esc(it.body)}</p><button class="pi-yes wide" id="celOk">Yay 💛</button></div>`;
+    document.body.appendChild(o);
+    if (navigator.vibrate) navigator.vibrate([20, 40, 20, 40, 30]);
+    $("#celOk", o).onclick = async () => {
+      o.classList.add("out"); setTimeout(() => o.remove(), 300); CEL = false;
+      try { await api("/api/celebrate/seen", { method: "POST", body: { conv: it.conv, key: it.key } }); } catch { }
+      if (list.length > 1) setTimeout(() => celebrateShow(list.slice(1)), 350);
+    };
+  }
+
   // ------------------------------------------------------------------ v19: tab bar, Home (pet room), Settings, Notify everyone
   const TABS = [["chats", "💬", "Chats"], ["home", "🏠", "Home"], ["settings", "⚙️", "Settings"]];
   const LOT_CODE = { cat: "1f431", dog: "1f415", bunny: "1f407", bear: "1f43b", fox: "1f98a", penguin: "1f427", panda: "1f43c" };
@@ -2310,7 +2466,7 @@
     $$("#tabbar [data-tab]").forEach((b) => b.onclick = () => setTab(b.dataset.tab));
     setTab(S.tab, true); tabBadges();
   }
-  function unmountTabs() { $("#tabbar") && $("#tabbar").remove(); $$(".tabpage").forEach((x) => x.remove()); killLot(); Object.assign(H, { cid: 0, data: null, drawn: 0, coins: null }); }
+  function unmountTabs() { $("#tabbar") && $("#tabbar").remove(); $$(".tabpage").forEach((x) => x.remove()); killLot(); Object.assign(H, { cid: 0, data: null, drawn: 0, coins: null, pair: null }); }
   function setTab(t, init) {
     if (!TABS.some((x) => x[0] === t)) t = "chats";
     const cur = $(".tabpage.on"); if (cur) cur._sy = $(".tp-scroll", cur).scrollTop;
@@ -2328,7 +2484,7 @@
     const tb = $("#tabbar"); if (!tb) return;
     const n = S.convs.reduce((a, c) => a + (c.unread || 0), 0), b1 = $("[data-tab=chats] .tbadge", tb), b2 = $("[data-tab=home] .tbadge", tb);
     b1.hidden = !n; b1.textContent = n > 99 ? "99+" : n;
-    b2.hidden = !petConvs().some((c) => c.pet.needs_home); b2.textContent = "♥";
+    const nh = petConvs().some((c) => c.pet.needs_home); b2.hidden = !nh && !otdNew(); b2.textContent = nh ? "♥" : "";
   }
 
   // ---- Lottie (loaded the first time Home shows a pet; the animations come from /pets and are cached by the service worker)
@@ -2371,6 +2527,7 @@
   async function homeLoad() {
     const cid = H.cid; if (!cid) return;
     try { const d = await api(`/api/pets/${cid}/home`); if (cid !== H.cid) return; d.pet._t = Date.now(); const c = conv(cid); if (c) c.pet = d.pet; H.data = d; cacheSave(); tabBadges(); if (S.tab === "home") homeDraw(); } catch { }
+    pairLoad();
   }
   function homeSync(e) {  // a pet event arrived (from me on another device, or from the partner)
     tabBadges();
@@ -2426,12 +2583,13 @@
       <div class="hm-acts" id="hmActs">${PET_ACTS.map(([k, ico, lab]) => { const s = petLeft(p, k); const direct = k === "tend" || k === "sleep"; return `<button data-care="${k}" ${s && direct ? "disabled" : ""}><i>${ico}</i><span>${k === "tend" ? "Bathe" : lab}</span>${s && direct ? `<small>${petFmt(s)}</small>` : ""}</button>`; }).join("")}</div>
       <div class="hm-acts three"><button id="hmCheck" ${checked ? "disabled" : ""}><i>💛</i><span>${checked ? "Checked in" : "Check in"}</span>${checked ? "" : `<small>+10 ♥</small>`}</button><button id="hmShop"><i>🛍️</i><span>Shop</span></button><button id="hmAlbum"><i>📸</i><span>Album</span></button></div>
       <button class="hm-talk" id="hmTalk">💬 Talk to ${pn}</button>
+      ${pairHtml()}
       <div class="hm-card hm-streak"><b>🔥 ${p.streak}</b><span>day${p.streak === 1 ? "" : "s"} together · best ${p.best}</span>${p.both_today ? `<em>💞 both today</em>` : p.cared_today ? `<em class="one">needs you both</em>` : `<em class="one">no care yet today</em>`}</div>
       <div class="hm-card"><h4>${pn} feels</h4>${bar("🍖", p.hunger, "Fullness")}${bar("💗", p.joy, "Happiness")}${bar("⚡", p.energy, "Energy")}</div>
       <div class="hm-card"><h4>📋 Quests <b>${done}/${p.quests.length}</b></h4>${p.quests.map((q) => `<div class="hqrow ${q.done ? "done" : ""}"><i>${q.done ? "✓" : ""}</i><span>${esc(q.text)}</span><small>${q.progress}/${q.target}</small></div>`).join("")}<small class="hm-hint">+15 ♥ for each quest</small></div>
       <div class="hm-card"><h4>📸 Album <button class="sbtn" id="hmAll">See all</button></h4>${log.length ? log.slice(0, 3).map(albumRow).join("") : `<div class="hint">${pn}'s milestones will show up here.</div>`}</div>
       <p class="hm-credit">Animated emoji © Google, CC BY 4.0</p></div>`;
-    box.scrollTop = sy; H.drawn = 1;
+    box.scrollTop = sy; H.drawn = 1; bindPair(box);
     // pet animation: keep the running one across redraws
     const ph = $("#hmLot", box);
     if (ph) {
@@ -2781,6 +2939,7 @@
       autoWhere();
       if (!WS || WS.readyState > 1) connect(); else resync();
       if (S.cur && conv(S.cur) && conv(S.cur).unread) markRead(S.cur);
+      celebrateCheck();
     }
   });
   if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (e) => { if (e.data && e.data.open) openConv(+e.data.open); });
