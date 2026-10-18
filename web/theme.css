@@ -297,7 +297,7 @@ select option { background: var(--sheet); color: var(--ink); }
 .dock .compose .pill { flex: 1; min-width: 0; display: flex; align-items: flex-end; border-radius: 23px; background: rgba(127, 127, 127, .16);
   border: 1px solid rgba(255, 255, 255, .28); transition: border-color .2s, box-shadow .25s, background .2s; }
 .dock .compose .pill:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(127, 127, 127, .18); background: rgba(127, 127, 127, .1); }
-.dock .compose .pill textarea, .dock .compose .pill textarea:focus { border: 0; background: transparent; box-shadow: none; border-radius: 22px; padding: 10px 4px 10px 15px; flex: 1; min-width: 0; font-size: calc(16px * var(--fsk, 1)); }
+.dock .compose .pill textarea, .dock .compose .pill textarea:focus { border: 0; background: transparent; box-shadow: none; border-radius: 22px; padding: 10px 4px 10px 15px; flex: 1; min-width: 0; font-size: max(16px, calc(16px * var(--fsk, 1))); }
 .dock .compose .pill .cbtn { width: 38px; height: 40px; font-size: 21px; border-radius: 50%; }
 .dock .compose .plus { color: var(--ink); transition: transform .3s var(--spring), background .15s; }
 .dock .compose .plus:active { transform: rotate(90deg) scale(.9); }

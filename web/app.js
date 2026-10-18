@@ -416,6 +416,7 @@
     const c = conv(cid); if (c && c.unread) markRead(cid);
   }
 
+  let dockRO = null;  // one observer for the composer, re-pointed on each redraw
   function drawChatPane(focus) {
     const pane = $("#chatPane"); if (!pane) return;
     const c = conv(S.cur);
@@ -459,7 +460,7 @@
     $(".top .who", pane).onclick = infoPage; $("#chatAv").onclick = infoPage;
     $("#bemoji").onclick = openEmoji; bindCamera();
     const dock = $("#dock"), logEl = $("#log");  // the glass bar floats over the chat: keep the last message clear of it
-    if (window.ResizeObserver) new ResizeObserver(() => { const near = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 160; logEl.style.paddingBottom = (dock.offsetHeight + 6) + "px"; if (near) logEl.scrollTop = logEl.scrollHeight; }).observe(dock);
+    if (window.ResizeObserver) (dockRO && dockRO.disconnect(), dockRO = new ResizeObserver(() => { const near = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 160; logEl.style.paddingBottom = (dock.offsetHeight + 6) + "px"; if (near) logEl.scrollTop = logEl.scrollHeight; })).observe(dock);
     window.growComposer = grow; grow(); drawQuick();
     applyStyle(); drawHeader(); drawChat(); scrollEnd(true);
     if (focus && !matchMedia("(pointer: coarse)").matches) txt.focus();
