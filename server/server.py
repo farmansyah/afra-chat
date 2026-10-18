@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS touch_prefs (user_id INTEGER PRIMARY KEY, mode TEXT D
   quiet_end TEXT DEFAULT '07:00', watch INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS storm_log (id INTEGER PRIMARY KEY, run TEXT, idx INTEGER, device TEXT, endpoint_type TEXT, sent_at REAL, status INTEGER, ms INTEGER, err TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS storm_run ON storm_log(run);
+-- v24: pinned message bubbles (several per chat) and "in sync" moments of live touch (for achievements later)
+CREATE TABLE IF NOT EXISTS pinned_msgs (conv_id INTEGER, msg_id INTEGER, "by" INTEGER, at REAL, PRIMARY KEY (conv_id, msg_id));
+CREATE TABLE IF NOT EXISTS us_sync (id INTEGER PRIMARY KEY, conv_id INTEGER, at REAL);
+CREATE INDEX IF NOT EXISTS us_sync_conv ON us_sync(conv_id, at);
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
@@ -152,6 +156,15 @@ with closing(db()) as _c:
 
 app = FastAPI(title="A.F.R.A chat", docs_url=None, redoc_url=None, openapi_url=None)
 SOCKETS: dict[int, dict[str, dict]] = {}  # user id -> device -> {"ws": WebSocket, "visible": bool}
+US_HERE: dict[int, dict[int, str]] = {}  # live touch: conv id -> {user id: device} for everyone who has the Us screen open right now
+US_PAIR: dict[tuple, int] = {}  # (user, conv) -> the other person of a direct chat (0 = not a couple chat)
+US_STATE: dict[int, dict[int, dict]] = {}  # conv id -> user id -> last finger {x, y, a, t, pt, down} (for "in sync")
+US_RATE: dict[tuple, float] = {}  # (user, kind) -> time of the last relayed event
+US_SYNC_AT: dict[int, float] = {}  # conv id -> last "in sync" moment
+US_INVITED: dict[int, float] = {}  # user id -> last "Come to Us" push
+NICK_WAIT: dict[tuple, "asyncio.Task"] = {}  # (who named, who was named) -> the notice that goes out once the name stops changing
+NICK_DEBOUNCE = float(os.environ.get("AFRA_NICK_DEBOUNCE", 45))  # seconds
+PIN_MAX = 20
 
 
 @app.exception_handler(ValueError)
@@ -388,6 +401,48 @@ def get_nicknames(authorization: str = Header(None)):
     return {"my_nicks": mine, "nicks_for_me": for_me}
 
 
+def nick_notice(u, other_id: int, nick: str, had_old: bool):
+    """Tell the person about their new nickname: one chip and one push, for the final name once it stops changing."""
+    key = (u["id"], other_id)
+    t = NICK_WAIT.pop(key, None)
+    pending = bool(t and not t.done())
+    if t:
+        t.cancel()
+    if not nick and (pending or not had_old):
+        return  # they were never told about the name that is going away
+    NICK_WAIT[key] = asyncio.create_task(_nick_notice(u, other_id, nick))
+
+
+async def _nick_notice(u, other_id: int, nick: str):
+    try:
+        await asyncio.sleep(NICK_DEBOUNCE)
+        with closing(db()) as c:
+            now_nick = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (u["id"], other_id)).fetchone()
+            if (now_nick[0] if now_nick else "") != nick:
+                return
+            o = c.execute("SELECT * FROM users WHERE id=?", (other_id,)).fetchone()
+            cv = c.execute("SELECT id FROM convs WHERE key=?", ("direct:" + ",".join(map(str, sorted({u["id"], other_id}))),)).fetchone()
+            if not o or o["bot"] or not cv:
+                return
+            cid = cv["id"]
+            fresh = c.execute("SELECT * FROM users WHERE id=?", (u["id"],)).fetchone() or u
+            line = _insert_msg(c, cid, u["id"], "pinact", f"{_first(fresh)} calls you \u201c{nick}\u201d now \U0001F49B" if nick else f"{_first(fresh)} went back to your name")
+            mine = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (other_id, u["id"])).fetchone()
+            c.commit()
+        await _bcast_msg(cid, line)
+        if nick:  # one normal push (a phone with the app open shows the chip itself)
+            who = (mine[0] if mine else None) or _first(fresh)
+            await push_to([other_id], {"title": who, "body": f"Calls you \u201c{nick}\u201d now \U0001F49B", "conv": cid,
+                                       "icon": f"/api/avatar/{u['id']}" if fresh["avatar"] else "/icon-512.png"})
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        print("nickname notice failed:", repr(e)[:300], flush=True)
+    finally:
+        if NICK_WAIT.get((u["id"], other_id)) is asyncio.current_task():
+            NICK_WAIT.pop((u["id"], other_id), None)
+
+
 @app.put("/api/nicknames/{other_id}")
 async def put_nickname(other_id: int, body: dict, authorization: str = Header(None)):
     u = auth(authorization)
@@ -395,11 +450,14 @@ async def put_nickname(other_id: int, body: dict, authorization: str = Header(No
     with closing(db()) as c:
         if other_id == u["id"] or not c.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
             raise HTTPException(404, "Person not found")
+        old = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (u["id"], other_id)).fetchone()
         if nick:
             c.execute("INSERT OR REPLACE INTO nicknames (user_id, other_id, nick) VALUES (?,?,?)", (u["id"], other_id, nick))
         else:
             c.execute("DELETE FROM nicknames WHERE user_id=? AND other_id=?", (u["id"], other_id))
         c.commit()
+    if (old[0] if old else "") != nick:
+        nick_notice(u, other_id, nick, bool(old))
     await send_to(u["id"], {"t": "nick", "other": other_id, "nick": nick})  # my other devices
     await send_to(other_id, {"t": "nickfor", "user": u["id"], "nick": nick})  # the sweet note on their info page
     return {"ok": True, "nick": nick}
@@ -464,16 +522,31 @@ def _member(c, cid: int, uid: int):
         raise HTTPException(404, "Chat not found")
 
 
+def pins_of(c, cid: int) -> list:
+    """Pinned bubbles of a chat, oldest pin first, each with a small snapshot for the bar and the list."""
+    out = []
+    for r in c.execute("""SELECT p.msg_id, p."by" AS pby, p.at, m.kind, m.text, m.sender, m.attachment FROM pinned_msgs p JOIN messages m ON m.id=p.msg_id
+                         WHERE p.conv_id=? AND m.deleted=0 ORDER BY p.at, p.msg_id""", (cid,)):
+        try:
+            att = json.loads(r["attachment"]) if r["attachment"] else None
+        except ValueError:
+            att = None
+        out.append({"id": r["msg_id"], "by": r["pby"], "at": r["at"], "kind": r["kind"], "sender": r["sender"], "text": (r["text"] or "")[:160],
+                    "name": str(att.get("name") or "")[:80] if isinstance(att, dict) else ""})
+    return out
+
+
 def conv_view(c, cid: int, uid: int) -> dict:
     cv = c.execute("SELECT * FROM convs WHERE id=?", (cid,)).fetchone()
     others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>? AND (u.bot<>2 OR ?<>'pet')", (cid, uid, cv["kind"]))]
     mine = c.execute("SELECT last_read, style, muted, nudge_on FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
     last = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
-    unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND created>?",
+    unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind<>'pinact' AND created>?",
                        (cid, uid, mine["last_read"] if mine else 0)).fetchone()[0]
     other_read = max([r["last_read"] for r in c.execute("SELECT last_read FROM members WHERE conv_id=? AND user_id<>?", (cid, uid))] or [0])
     return {"id": cid, "kind": cv["kind"], "members": others, "last": msg_view(last) if last else None, "unread": unread,
             "last_at": cv["last_at"], "other_read": other_read,
+            "pins": pins_of(c, cid),
             "style": json.loads(cv["style"] or "{}"), "my_style": json.loads((mine["style"] if mine else "") or "{}"),
             "muted": (mine["muted"] or 0) if mine and (mine["muted"] or 0) > time.time() else 0,
             "nudge": bool(mine["nudge_on"]) if mine and mine["nudge_on"] is not None else True,
@@ -680,7 +753,62 @@ async def delete_message(mid: int, authorization: str = Header(None)):
         if m["sender"] != u["id"]:
             raise HTTPException(403, "You can only delete your own messages.")
         c.execute("UPDATE messages SET deleted=1, text='', attachment='', reactions='{}' WHERE id=?", (mid,))
-    return await _changed(mid, u["id"], fn)
+        if c.execute("DELETE FROM pinned_msgs WHERE msg_id=?", (mid,)).rowcount:
+            unpinned.append(m["conv_id"])
+    unpinned: list = []
+    r = await _changed(mid, u["id"], fn)
+    if unpinned:
+        await pin_broadcast(unpinned[0], u["id"])
+    return r
+
+
+async def pin_broadcast(cid: int, by: int = 0):
+    with closing(db()) as c:
+        pins = pins_of(c, cid)
+        members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cid,))]
+    for x in members:
+        await send_to(x, {"t": "pins", "conv": cid, "pins": pins, "by": by})
+
+
+@app.post("/api/messages/{mid}/pin")
+async def pin_msg(mid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        m = c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
+        if not m:
+            raise HTTPException(404, "Message not found")
+        cid = m["conv_id"]
+        _member(c, cid, u["id"])
+        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite"):
+            raise HTTPException(400, "That one can't be pinned.")
+        line = None
+        if not c.execute("SELECT 1 FROM pinned_msgs WHERE conv_id=? AND msg_id=?", (cid, mid)).fetchone():
+            if c.execute("SELECT COUNT(*) FROM pinned_msgs WHERE conv_id=?", (cid,)).fetchone()[0] >= PIN_MAX:
+                raise HTTPException(400, f"You can pin up to {PIN_MAX} messages in a chat. Unpin one first.")
+            c.execute('INSERT INTO pinned_msgs (conv_id, msg_id, "by", at) VALUES (?,?,?,?)', (cid, mid, u["id"], time.time()))
+            if c.execute("SELECT kind FROM convs WHERE id=?", (cid,)).fetchone()["kind"] != "self":
+                line = _insert_msg(c, cid, u["id"], "pinact", f"{_first(u)} pinned a message 📌")
+            c.commit()
+        pins = pins_of(c, cid)
+    if line:
+        await _bcast_msg(cid, line)
+    await pin_broadcast(cid, u["id"])
+    return {"pins": pins}
+
+
+@app.delete("/api/messages/{mid}/pin")
+async def unpin_msg(mid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        m = c.execute("SELECT conv_id FROM messages WHERE id=?", (mid,)).fetchone()
+        if not m:
+            raise HTTPException(404, "Message not found")
+        _member(c, m["conv_id"], u["id"])
+        c.execute("DELETE FROM pinned_msgs WHERE conv_id=? AND msg_id=?", (m["conv_id"], mid))
+        c.commit()
+        pins = pins_of(c, m["conv_id"])
+    await pin_broadcast(m["conv_id"], u["id"])
+    return {"pins": pins}
 
 
 @app.post("/api/messages/{mid}/react")
@@ -1189,10 +1317,10 @@ async def _nudge_unread():
     t = time.time()
     with closing(db()) as c:
         c.execute("""UPDATE members SET nudged=0 WHERE nudged>0 AND NOT EXISTS (SELECT 1 FROM messages ms WHERE ms.conv_id=members.conv_id
-                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.kind<>'touch' AND ms.created>members.last_read)""")
+                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact') AND ms.created>members.last_read)""")
         rows = c.execute("""SELECT m.conv_id, m.user_id, m.nudged, MIN(ms.created) AS oldest FROM members m
                             JOIN convs cv ON cv.id=m.conv_id AND cv.kind='direct'
-                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.kind<>'touch' AND ms.created>m.last_read
+                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact') AND ms.created>m.last_read
                             WHERE m.nudge_on=1 AND m.nudged<2 AND m.muted<=?
                             GROUP BY m.conv_id, m.user_id HAVING MIN(ms.created)<=?""", (t, t - 900)).fetchall()
         todo = []
@@ -1200,7 +1328,7 @@ async def _nudge_unread():
             stage = 2 if t - r["oldest"] >= 2700 and r["nudged"] == 1 else 1 if r["nudged"] == 0 else 0
             if not stage:
                 continue
-            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind<>'touch' AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
+            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('touch','pinact') AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
                              ORDER BY id LIMIT 1""", (r["conv_id"], r["user_id"], r["conv_id"], r["user_id"])).fetchone()
             sender = c.execute("SELECT * FROM users WHERE id=?", (m["sender"],)).fetchone() if m else None
             c.execute("UPDATE members SET nudged=? WHERE conv_id=? AND user_id=?", (stage, r["conv_id"], r["user_id"]))
@@ -2816,16 +2944,135 @@ async def ws(sock: WebSocket, token: str = "", device: str = "device"):
             m = json.loads(await sock.receive_text())
             if m.get("t") == "vis":
                 SOCKETS[uid][dev]["visible"] = bool(m.get("v"))
+                if not m.get("v"):  # a locked or hidden screen is not "here" any more
+                    await us_leave(uid, dev)
             elif m.get("t") == "ping":
                 await sock.send_text('{"t":"pong"}')
+            elif m.get("t") in ("us", "us_tap"):
+                try:  # a bad live-touch event must never drop the chat connection
+                    if m["t"] == "us":
+                        await us_set(int(m.get("conv") or 0), uid, dev, bool(m.get("here")))
+                    else:
+                        await us_tap(uid, int(m.get("conv") or 0), m)
+                except (TypeError, ValueError, KeyError, sqlite3.Error):
+                    pass
     except (WebSocketDisconnect, RuntimeError, ValueError):
         pass
     finally:
         if SOCKETS.get(uid, {}).get(dev, {}).get("ws") is sock:
+            await us_leave(uid, dev)
             SOCKETS[uid].pop(dev, None)
             if not SOCKETS[uid]:
                 SOCKETS.pop(uid, None)
                 await announce_presence(uid, False)
+
+
+# ---------------------------------------------------------------- live touch (Us screen): presence and taps relayed over the WebSocket, nothing stored per tap
+def us_peer(uid: int, cid: int) -> int:
+    """The other person of a couple chat that `uid` is in (0 when it is not one)."""
+    k = (uid, cid)
+    if k not in US_PAIR:
+        with closing(db()) as c:
+            r = c.execute("""SELECT u.id, u.bot FROM convs v JOIN members m ON m.conv_id=v.id JOIN users u ON u.id=m.user_id
+                            WHERE v.id=? AND v.kind='direct' AND u.id<>? AND EXISTS (SELECT 1 FROM members x WHERE x.conv_id=v.id AND x.user_id=?)""", (cid, uid, uid)).fetchone()
+        US_PAIR[k] = r["id"] if r and not r["bot"] else 0
+    return US_PAIR[k]
+
+
+def us_present(cid: int, uid: int) -> bool:
+    dev = US_HERE.get(cid, {}).get(uid)
+    return bool(dev) and any(s_["visible"] for d, s_ in SOCKETS.get(uid, {}).items() if d == dev)
+
+
+async def us_set(cid: int, uid: int, dev: str, here: bool):
+    peer = us_peer(uid, cid)
+    if not peer:
+        return
+    d = US_HERE.setdefault(cid, {})
+    if here:
+        d[uid] = dev
+    else:
+        if d.get(uid) != dev:
+            return
+        d.pop(uid, None)
+        US_STATE.get(cid, {}).pop(uid, None)
+    if not d:
+        US_HERE.pop(cid, None)
+    await send_to(peer, {"t": "us_here", "conv": cid, "user": uid, "here": here})
+    if here:  # and the one who just came in learns whether the other is already there
+        await send_to(uid, {"t": "us_here", "conv": cid, "user": peer, "here": us_present(cid, peer)})
+
+
+async def us_leave(uid: int, dev: str):
+    for cid in [k for k, d in US_HERE.items() if d.get(uid) == dev]:
+        await us_set(cid, uid, dev, False)
+
+
+async def us_tap(uid: int, cid: int, m: dict):
+    """One small event of a live touch, passed on to the other person only. Also spots "in sync" moments."""
+    peer = us_peer(uid, cid)
+    if not peer or not us_present(cid, uid) or not us_present(cid, peer):
+        return
+    k = m.get("k") if m.get("k") in ("d", "m", "u", "b") else "d"
+    now_ = time.time()
+    if now_ - US_RATE.get((uid, k), 0) < (0.4 if k == "b" else 0.04):  # at most about 20 a second
+        return
+    US_RATE[(uid, k)] = now_
+
+    def num(v, lo, hi, d):
+        try:
+            return round(max(lo, min(hi, float(v))), 3)
+        except (TypeError, ValueError):
+            return d
+    x, y, s_ = num(m.get("x"), 0, 1, .5), num(m.get("y"), 0, 1, .5), num(m.get("s"), 1, 5, 2)
+    a = m.get("a") if m.get("a") in TOUCH_ACTIONS else ""
+    await send_to(peer, {"t": "us_tap", "conv": cid, "user": uid, "k": k, "x": x, "y": y, "s": s_, "a": a})
+    st = US_STATE.setdefault(cid, {})
+    me, him = st.setdefault(uid, {"down": False, "t": 0, "pt": 0, "a": "", "x": .5, "y": .5}), st.get(peer)
+    if k == "u":
+        me["down"] = False
+        return
+    if k == "b":
+        return
+    me.update(x=x, y=y, pt=now_, down=True)
+    if k == "d":
+        me.update(t=now_, a=a)
+    if not him or now_ - US_SYNC_AT.get(cid, 0) < 5:
+        return
+    same_action = k == "d" and a and him["a"] == a and now_ - him["t"] <= 1.0
+    near = him["down"] and now_ - him["pt"] < 1.5 and math.hypot(x - him["x"], y - him["y"]) < .15
+    if same_action or near:
+        US_SYNC_AT[cid] = now_
+        with closing(db()) as c:
+            c.execute("INSERT INTO us_sync (conv_id, at) VALUES (?,?)", (cid, now_))
+            c.commit()
+        for t_ in (uid, peer):
+            await send_to(t_, {"t": "us_sync", "conv": cid})
+
+
+@app.post("/api/us/{cid}/invite")
+async def us_invite(cid: int, authorization: str = Header(None)):
+    """Come to Us: one gentle push that opens straight into the Us screen (once per 2 minutes per person)."""
+    u = auth(authorization)
+    peer = us_peer(u["id"], cid)
+    if not peer:
+        raise HTTPException(404, "Chat not found")
+    if us_present(cid, peer):
+        return {"here": True, "sent": False}
+    left = 120 - (time.time() - US_INVITED.get(u["id"], 0))
+    if left > 0:
+        raise HTTPException(429, f"You just asked. Try again in {math.ceil(left)} s.")
+    US_INVITED[u["id"]] = time.time()
+    with closing(db()) as c:
+        nick = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (peer, u["id"])).fetchone()
+        pr = touch_prefs(c, peer)
+        quiet = in_quiet(pr, _tz(c, peer))
+    await send_to(peer, {"t": "us_invite", "conv": cid, "user": u["id"]})
+    push = pr["mode"] != "off" and not quiet
+    if push:
+        asyncio.create_task(push_to([peer], {"title": (nick[0] if nick else None) or u["name"] or u["username"], "body": "Come to Us 🫶", "conv": cid, "us": cid,
+                                             "tag": f"us-{cid}", "icon": f"/api/avatar/{u['id']}" if u["avatar"] else "/icon-512.png", "vibrate": [80, 50, 80]}))
+    return {"here": False, "sent": True, "push": push}
 
 
 # ---------------------------------------------------------------- Web Push (VAPID + RFC 8291 encrypted payload)
@@ -2884,7 +3131,7 @@ async def push_to(uids: list[int], payload: dict, skip_visible=True):
                 sub = json.loads(r["sub"])
                 with closing(db()) as c:
                     badge = c.execute("""SELECT COUNT(*) FROM messages ms JOIN members mb ON mb.conv_id=ms.conv_id AND mb.user_id=?
-                                         WHERE ms.sender<>? AND ms.deleted=0 AND ms.kind<>'touch' AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
+                                         WHERE ms.sender<>? AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact') AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
                 body = encrypt_push(sub, json.dumps({**payload, "badge": badge}).encode()[:3800])
                 resp = await h.post(sub["endpoint"], content=body, headers={
                     "Authorization": _vapid_header(sub["endpoint"]), "Content-Encoding": "aes128gcm",
@@ -3756,16 +4003,18 @@ async def run_storm(tid: int, sender, rid: int, cid: int, n: int, gap_ms: int, a
         sent = 0
         async with httpx.AsyncClient(timeout=15) as h:
             for i in range(n):
+                t_step = time.time()
+                if us_present(cid, rid):
+                    break  # they came into the Us screen meanwhile: they feel it live now
                 payload = {"title": title, "body": touch_line(action, word, i, n, count)[:180], "conv": cid, "touch": tid, "tag": f"touch-{tid}-{i}",
                            "icon": icon, "vibrate": _buzz(strength), "renotify": True}
-                for r in rows:
-                    devs = SOCKETS.get(rid, {})
-                    if any(s_["visible"] for d, s_ in devs.items() if d == r["device"] or d.startswith(r["device"] + ".")):
-                        continue
-                    status, _, _ = await push_sub(h, r, payload)
-                    sent += 1 if 200 <= status < 300 else 0
+                devs = SOCKETS.get(rid, {})
+                targets = [r for r in rows if not any(s_["visible"] for d, s_ in devs.items() if d == r["device"] or d.startswith(r["device"] + "."))]
+                # every phone gets this step at the same moment (a slow service must not delay the others)
+                for res in await asyncio.gather(*[push_sub(h, r, payload) for r in targets]):
+                    sent += 1 if 200 <= res[0] < 300 else 0
                 if i < n - 1:
-                    await asyncio.sleep(gap_ms / 1000)
+                    await asyncio.sleep(max(0, gap_ms / 1000 - (time.time() - t_step)))
         with closing(db()) as c:
             c.execute("UPDATE touches SET delivered=? WHERE id=?", (sent, tid))
             c.commit()
@@ -3874,9 +4123,12 @@ async def touch_send(cid: int, body: dict, authorization: str = Header(None)):
         n = 1 if (count <= 1 or word) else max(1, min(smax, math.ceil(count * (0.6 + 0.2 * strength))))
         pr = touch_prefs(c, peer["id"])
         reason = ""
+        live = us_present(cid, peer["id"])  # they are in the Us screen right now: they felt it live, so no storm
         recent = c.execute("SELECT COUNT(*) FROM touches WHERE sender=? AND ts>? AND pushes>1", (u["id"], now - 60)).fetchone()[0]
         used = c.execute("SELECT COALESCE(SUM(pushes),0) FROM touches WHERE sender=? AND ts>?", (u["id"], now - 3600)).fetchone()[0]
-        if pr["mode"] == "off":
+        if live:
+            n, reason = 0, "live"
+        elif pr["mode"] == "off":
             n, reason = 0, "off"
         elif in_quiet(pr, _tz(c, peer["id"])):
             n, reason = 0, "quiet"
@@ -3894,7 +4146,7 @@ async def touch_send(cid: int, body: dict, authorization: str = Header(None)):
         tid = c.execute("INSERT INTO touches (conv_id, sender, action, word, count, strength, pattern, ts, pushes) VALUES (?,?,?,?,?,?,?,?,?)",
                         (cid, u["id"], action, word, count, strength, json.dumps(pattern), now, n)).lastrowid
         summary = f"{TOUCH_ACTIONS[action]} ×{count}" if action else f"{TOUCH_WORDS.get(word, '💌')} {word}"
-        m = _insert_msg(c, cid, u["id"], "touch", summary, {"touch": tid, "action": action, "word": word, "count": count, "strength": strength})
+        m = _insert_msg(c, cid, u["id"], "touch", summary, {"touch": tid, "action": action, "word": word, "count": count, "strength": strength, **({"live": True} if live else {})})
         c.execute("UPDATE touches SET msg_id=? WHERE id=?", (m["id"], tid))
         coin = False
         pet = _pet_for(c, u["id"], peer["id"])
@@ -3910,7 +4162,7 @@ async def touch_send(cid: int, body: dict, authorization: str = Header(None)):
         c.commit()
     for uid in (u["id"], peer["id"]):
         await send_to(uid, {"t": "msg", "msg": m})
-        await send_to(uid, {"t": "touch", "touch": view, "mine": uid == u["id"], "limited": reason == "limit"})
+        await send_to(uid, {"t": "touch", "touch": view, "mine": uid == u["id"], "limited": reason == "limit", "live": live})
     if n:
         asyncio.create_task(run_storm(tid, u, peer["id"], cid, n, spacing, action, word, count, strength))
     if coin and pet:

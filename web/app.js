@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 23;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 24;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -165,8 +165,10 @@
   const userById = (id) => id === S.me.id ? S.me : S.convs.flatMap((c) => c.members).find((u) => u.id === id);
   // nicknames: what I call someone is private to me; dn() is the name I see everywhere
   const dn = (u) => !u ? "" : (S.nicks[u.id] || u.name || "@" + (u.username || ""));
+  const NICKLINE = /calls you \u201c|went back to your name/;  // the notice about a nickname is for the person named, not for who chose it
   const mtext = (m) => {  // Home captions are stored with the real first name; show my nickname for them instead
-    const n = m.kind === "petact" && m.sender !== S.me.id && S.nicks[m.sender], u = n && userById(m.sender), f = u && (u.name || u.username || "").split(" ")[0];
+    if (m.kind === "pinact" && m.sender === S.me.id) { const me = (S.me.name || S.me.username || "").split(" ")[0]; return me && m.text.startsWith(me) ? "You" + m.text.slice(me.length) : m.text; }
+    const n = (m.kind === "petact" || m.kind === "pinact") && m.sender !== S.me.id && S.nicks[m.sender], u = n && userById(m.sender), f = u && (u.name || u.username || "").split(" ")[0];
     return f && m.text.startsWith(f) ? n + m.text.slice(f.length) : m.text;
   };
 
@@ -202,7 +204,7 @@
   const onlyEmoji = (s) => s && s.length <= 12 && /^(\p{Extended_Pictographic}|\p{Emoji_Component}|‍|️|\s)+$/u.test(s);
   const sizeTxt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
   const KIND_LABEL = { image: "📷 Photo", voice: "🎤 Voice note", video: "🎥 Video", videonote: "📹 Video note", sticker: "💟 Sticker", location: "📍 Location" };
-  const preview = (m) => !m ? "" : m.deleted ? "Message deleted" : m.text ? ({ image: "📷 ", video: "🎥 " }[m.kind] || "") + mtext(m)
+  const preview = (m) => !m ? "" : m.deleted ? "Message deleted" : m.kind === "pinact" && m.sender === S.me.id && NICKLINE.test(m.text) ? "" : m.text ? ({ image: "📷 ", video: "🎥 " }[m.kind] || "") + mtext(m)
     : m.kind === "file" ? "📎 " + ((m.attachment || {}).name || "File") : KIND_LABEL[m.kind] || "";
 
   // ------------------------------------------------------------------ offline copy (shows your chats instantly, also without internet)
@@ -215,7 +217,7 @@
   function connect() {
     if (!TOKEN) return;
     const ws = WS = new WebSocket(`${location.origin.replace(/^http/, "ws")}/api/ws?token=${encodeURIComponent(TOKEN)}&device=${TAB}`);
-    ws.onopen = async () => { wsBackoff = 1000; setLive(true); sendVis(); await resync(); flushOutbox(); };
+    ws.onopen = async () => { wsBackoff = 1000; setLive(true); sendVis(); if (T.us) usPresence(T.us.cid, true); await resync(); flushOutbox(); };
     ws.onmessage = (e) => onEvent(JSON.parse(e.data));
     ws.onclose = (e) => {
       setLive(false);
@@ -260,6 +262,12 @@
   function onEvent(e) {
     if (e.t === "hello" || e.t === "update") { if (e.t === "update" || (e.version && String(e.version) !== String(APP_V))) checkUpdate(true); return; }
     if (e.t === "touch") { onTouchEvent(e); return; }
+    if (e.t === "us_here" || e.t === "us_tap" || e.t === "us_sync" || e.t === "us_invite") { onUsEvent(e); return; }
+    if (e.t === "pins") {
+      const c = conv(e.conv); if (!c) return; c.pins = e.pins || []; P.k[c.id] = 0; cacheSave();
+      if (S.cur === c.id) { drawPinbar(); drawChat(); }
+      return;
+    }
     if (e.t === "msg" || e.t === "upd") {
       upsert(e.msg);
       const c = conv(e.msg.conv_id);
@@ -436,6 +444,7 @@
         <button class="icon dedi-heart" id="bHeartC" title="A little note" aria-label="A little note">♥</button>${c.kind === "direct" ? '<button class="icon" id="bUs" title="Touch" aria-label="Touch">🫶</button>' : ""}<button class="icon" id="bSearch" title="Search">🔍</button></div>
       <div class="searchbar" id="sbar" hidden><input type="search" id="sq" placeholder="Search in this chat"><button class="cbtn" id="sclose">✕</button></div>
       <div class="home" id="home" hidden></div>
+      <div class="pinbar" id="pinbar" hidden></div>
       <div class="log" id="log"></div>
       <button class="jump" id="bJump" aria-label="Jump to newest message" tabindex="-1"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><b class="jbadge"></b></button>
       <div class="dock" id="dock">
@@ -452,6 +461,7 @@
       </div>`;
     $("#bBack").onclick = () => { if (NAV.chat && NAV.depth === NAV.chat) history.back(); else { NAV.chat = 0; leaveChat(); navSync(); } };
     const bus = $("#bUs"); if (bus) bus.onclick = () => usOpen(c.id);
+    drawPinbar();
     $("#bSearch").onclick = () => { $("#sbar").hidden = false; $("#sq").focus(); };
     $("#bHeartC").onclick = heartNotes;
     $("#sclose").onclick = () => { $("#sbar").hidden = true; S.search = ""; drawChat(); };
@@ -614,7 +624,9 @@
     let html = S.older[c.id] && !S.search ? `<button class="older" id="bOlder">Show earlier messages</button>` : "", lastDay = "";
     const seen = S.seen[c.id], fresh = new Set();
     let prevSender = 0;
+    const pinIds = new Set((c.pins || []).map((p) => p.id));
     for (const m of shown) {
+      if (m.kind === "pinact" && m.sender === S.me.id && NICKLINE.test(m.text)) continue;
       const day = dayLabel(m.created);
       if (day !== lastDay) { html += `<div class="day">${day}</div>`; lastDay = day; }
       const mine = m.sender === S.me.id;
@@ -627,10 +639,10 @@
       prevSender = m.kind === "petact" ? 0 : m.sender;  // the pet speaking: a thought cloud instead of a normal bubble
       if (pop && !atBottom && !S.search && !mine && !m.deleted && m.created >= JUMP.last) JUMP.n++;
       if (m.kind === "touch" && !m.deleted) { html += touchChip(m, pop); continue; }
-      html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""} ${ps ? "petsay" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
+      html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" || m.kind === "pinact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""} ${ps ? "petsay" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
         ${ps ? `<span class="psav" aria-hidden="true">${esc((petOf(c) || {}).emoji || "🐾")}</span>` : ""}${who ? `<div class="msg-who">${esc(dn(who).split(" ")[0])}</div>` : ""}<div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
         ${rxPill(m)}
-        <div class="meta">${S.stars.has(m.id) ? "⭐ " : ""}${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
+        <div class="meta">${pinIds.has(m.id) ? "📌 " : ""}${S.stars.has(m.id) ? "⭐ " : ""}${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
     }
     if (list.length) JUMP.last = Math.max(JUMP.last, list[list.length - 1].created || 0);
     log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : c.kind === "bot" ? "Ask me anything, or tell me what to remember ✨" : c.kind === "pet" ? "Say hello 🐾" : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
@@ -645,6 +657,7 @@
     });
     $$(".msg", log).forEach(bindPress);
     S.seen[c.id] = fresh;
+    drawPinbar();
     if (atBottom) log.scrollTo({ top: log.scrollHeight, behavior: seen ? "smooth" : "auto" });
     jumpUpdate();
     drawHeader();
@@ -758,6 +771,7 @@
   try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyStyle); } catch { }
 
   const photoSwitch = () => `<label class="swrow"><span><b>Photo backgrounds</b><small>Turn off to use the plain background on this device (nice on a computer)</small></span><input type="checkbox" class="swtog" id="tphotobg" ${store.get("photobg", true) === false ? "" : "checked"}></label>`;
+  const wpAspect = () => { const w = Math.min(screen.width || innerWidth, screen.height || innerHeight), h = Math.max(screen.width || innerWidth, screen.height || innerHeight); return Math.max(.4, Math.min(.8, w / h)); };
   function wallpaperPreview(blob, d) {  // full-screen look at a photo before it becomes the chat background
     return new Promise((res) => {
       const url = URL.createObjectURL(blob); let dim = d.dim ?? 25;
@@ -770,7 +784,7 @@
           <div class="msg"><div class="bub"><div class="txt">Then it's yours.</div></div></div>
         </div>
         <div class="wpv-bot"><label>Darken <input type="range" min="0" max="70" value="${dim}"></label>
-          <div class="wpv-btns"><button class="sbtn" data-c>Cancel</button><button class="big-btn" data-ok>Set wallpaper</button></div></div>`;
+          <div class="wpv-btns"><button class="sbtn" data-c>Cancel</button><button class="sbtn" data-adj>Adjust</button><button class="big-btn" data-ok>Set wallpaper</button></div></div>`;
       document.body.appendChild(o);
       const log = $(".wpv-log", o), dm = $(".wpv-dim", o);
       paintStyle(o, log, { bg: "none", bubble: d.bubble, mine: d.mine, theirs: d.theirs });
@@ -784,6 +798,7 @@
       document.addEventListener("keydown", key);
       $("input", o).oninput = (e) => { dim = +e.target.value; paint(); };
       $$("[data-c]", o).forEach((b) => b.onclick = () => done(null));
+      $("[data-adj]", o).onclick = () => done({ adjust: true, dim });
       $("[data-ok]", o).onclick = () => done({ dim });
     });
   }
@@ -838,7 +853,13 @@
     $("#tphoto", s).onchange = async (e) => {
       const f = e.target.files[0]; e.target.value = ""; if (!f) return;
       try {
-        const img = await shrinkImage(f, 1600), pick = await wallpaperPreview(img, d); if (!pick) return;
+        const memo = {}; let img = null, pick = null;
+        for (;;) {  // crop to the phone screen, look at it in a chat, "Adjust" goes back to the crop
+          const ed = await editPhoto(f, { aspect: wpAspect(), title: "Wallpaper", max: 1600, memo }); if (!ed) return;
+          img = new File([ed], "wallpaper.jpg", { type: "image/jpeg" });
+          pick = await wallpaperPreview(img, d); if (!pick) return;
+          if (!pick.adjust) break; d.dim = pick.dim;
+        }
         toast("Uploading…"); const fd = new FormData(); fd.append("file", img, img.name);
         const att = await api("/api/files", { body: fd }); d.bg = "photo:" + att.id; d.dim = pick.dim; store.set("photobg", true); draw();
       } catch (x) { toast(x.message); }
@@ -863,52 +884,192 @@
     draw();
   }
 
-  // ------------------------------------------------------------------ photo cropper (profile photo): drag to move, pinch / slider / wheel to zoom
-  function cropImage(file, out = 512) {
-    return new Promise(async (resolve) => {
-      const bmp = await createImageBitmap(file).catch(() => null);
-      if (!bmp) { toast("That photo can't be opened"); return resolve(null); }
-      const s = sheet(`<h3>Move and scale</h3>
-        <div class="crop" id="crop"><canvas id="ccan"></canvas><div class="crop-ring"></div></div>
-        <div class="row colors"><span>➖</span><input type="range" id="czoom" min="100" max="400" value="100" style="flex:1"><span>➕</span></div>
-        <div class="row" style="margin-top:12px"><button class="big-btn ghost" id="ccancel" style="flex:1">Cancel</button><button class="big-btn" id="cdone" style="flex:1">Done</button></div>`);
-      const box = $("#crop", s), can = $("#ccan", s), ctx = can.getContext("2d");
-      const D = box.clientWidth || 300, dpr = window.devicePixelRatio || 1;
-      can.width = can.height = Math.round(D * dpr); can.style.width = can.style.height = D + "px";
-      const base = Math.max(D / bmp.width, D / bmp.height);  // smallest scale that still fills the circle
-      let z = 1, x = 0, y = 0;  // zoom, and offset of the photo's centre from the box centre (css px)
-      const clamp = () => {
-        const w = bmp.width * base * z, h = bmp.height * base * z;
-        x = Math.max(-(w - D) / 2, Math.min((w - D) / 2, x)); y = Math.max(-(h - D) / 2, Math.min((h - D) / 2, y));
+  // ------------------------------------------------------------------ shared photo editor: pan, pinch, double-tap, crop frame, rotate, flip, brightness and contrast (no libraries)
+  // editPhoto(file, { aspect, round, title, presets, max, memo }) -> Promise<JPEG Blob | null (cancelled)>
+  //   aspect: lock the frame to w/h (wallpaper, profile photo); presets: show Original / Free / 1:1 / 4:3 / 16:9; round: circle mask; memo: {} that remembers the last edit
+  const PE_PRESETS = [["Original", 0], ["Free", -1], ["1:1", 1], ["4:3", 4 / 3], ["16:9", 16 / 9]];
+  async function editPhoto(file, o = {}) {
+    const bmp = await createImageBitmap(file).catch(() => null);
+    if (!bmp) { toast("That photo can't be opened"); return null; }
+    return new Promise((resolve) => {
+      const iw = bmp.width, ih = bmp.height, max = o.max || 2048, locked = o.aspect > 0, KEYS = ["cx", "cy", "k", "ang", "sx", "fx", "fy", "fw", "fh"], Q = Math.PI / 2;
+      const ov = document.createElement("div"); ov.className = "pe";
+      ov.innerHTML = `<div class="pe-top"><button class="pe-b" data-c>Cancel</button><b>${esc(o.title || "Edit photo")}</b><button class="pe-b pe-ok" data-ok>Done</button></div>
+        <div class="pe-stage" id="peS"><canvas class="pe-img"></canvas><canvas class="pe-fr"></canvas></div>
+        <div class="pe-bot">
+          <div class="pe-tune" hidden><label>Brightness<input type="range" id="peB" min="60" max="140" value="100"></label><label>Contrast<input type="range" id="peC" min="60" max="140" value="100"></label></div>
+          ${!locked && o.presets ? `<div class="pe-presets">${PE_PRESETS.map(([n, a]) => `<button data-a="${a}">${n}</button>`).join("")}</div>` : ""}
+          <div class="pe-tools"><button data-t="rot"><i>⟲</i>Rotate</button><button data-t="flip"><i>⇋</i>Flip</button><button data-t="tune"><i>☀</i>Tune</button><button data-t="reset"><i>↺</i>Reset</button></div>
+        </div>`;
+      document.body.appendChild(ov);
+      const stage = $("#peS", ov), cImg = $(".pe-img", ov), cFr = $(".pe-fr", ov), gI = cImg.getContext("2d"), gF = cFr.getContext("2d"), tuneBox = $(".pe-tune", ov);
+      let W = 0, H = 0, dpr = 1, rotN = 0, flip = false, asp = locked ? o.aspect : (o.presets ? 0 : 0), tune = { b: 100, c: 100 }, raf = 0, goal = null, fin = false;
+      const s = { cx: 0, cy: 0, k: 1, ang: 0, sx: 1, fx: 0, fy: 0, fw: 0, fh: 0 };
+      const rdims = (r = rotN) => (r & 1) ? [ih, iw] : [iw, ih];
+      const fitFrame = (a) => {
+        const pad = 22, aw = W - pad * 2, ah = H - pad * 2; let w = aw, h = w / a; if (h > ah) { h = ah; w = h * a; }
+        return { fx: (W - w) / 2, fy: (H - h) / 2, fw: w, fh: h };
       };
-      const paint = () => {
-        clamp(); const k = base * z * dpr;
-        ctx.clearRect(0, 0, can.width, can.height);
-        ctx.drawImage(bmp, (can.width - bmp.width * k) / 2 + x * dpr, (can.height - bmp.height * k) / 2 + y * dpr, bmp.width * k, bmp.height * k);
+      const frameFor = (a, r = rotN) => { const [rw, rh] = rdims(r); return fitFrame(a > 0 ? a : rw / rh); };
+      const minK = (st, r = rotN) => { const [rw, rh] = rdims(r); return Math.max(st.fw / rw, st.fh / rh); };
+      const clampSt = (st, r = rotN) => {  // the photo always covers the frame
+        const [rw, rh] = rdims(r), mk = minK(st, r); st.k = Math.max(mk, Math.min(st.k, mk * 8));
+        const hw = rw * st.k / 2, hh = rh * st.k / 2;
+        st.cx = Math.max(st.fx + st.fw - hw, Math.min(st.fx + hw, st.cx)); st.cy = Math.max(st.fy + st.fh - hh, Math.min(st.fy + hh, st.cy)); return st;
       };
-      const zoomTo = (nz) => { const r = Math.max(1, Math.min(4, nz)) / z; x *= r; y *= r; z *= r; $("#czoom", s).value = Math.round(z * 100); paint(); };
-      const pts = new Map(); let last = null;
-      box.onpointerdown = (e) => { box.setPointerCapture(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]); last = null; };
-      box.onpointermove = (e) => {
+      const fresh = (fr) => { const st = { ...s, ...fr, ang: rotN * Q, sx: flip ? -1 : 1 }; st.k = minK(st); st.cx = fr.fx + fr.fw / 2; st.cy = fr.fy + fr.fh / 2; return st; };
+      const zoomAbout = (st, px, py, f) => {
+        const mk = minK(st), nk = Math.max(mk, Math.min(st.k * f, mk * 8)), r = nk / st.k;
+        st.cx = px + (st.cx - px) * r; st.cy = py + (st.cy - py) * r; st.k = nk; return st;
+      };
+      const draw = () => {
+        gI.setTransform(dpr, 0, 0, dpr, 0, 0); gI.clearRect(0, 0, W, H); gI.imageSmoothingQuality = "high";
+        gI.translate(s.cx, s.cy); gI.rotate(s.ang); gI.scale(s.sx * s.k, s.k); gI.drawImage(bmp, -iw / 2, -ih / 2);
+        gF.setTransform(dpr, 0, 0, dpr, 0, 0); gF.clearRect(0, 0, W, H);
+        gF.fillStyle = "rgba(0,0,0,.58)"; gF.beginPath(); gF.rect(0, 0, W, H);
+        if (o.round) gF.ellipse(s.fx + s.fw / 2, s.fy + s.fh / 2, s.fw / 2, s.fh / 2, 0, 0, Math.PI * 2); else gF.rect(s.fx, s.fy, s.fw, s.fh);
+        gF.fill("evenodd");
+        gF.strokeStyle = "rgba(255,255,255,.92)"; gF.lineWidth = 1.5;
+        if (o.round) { gF.beginPath(); gF.ellipse(s.fx + s.fw / 2, s.fy + s.fh / 2, s.fw / 2, s.fh / 2, 0, 0, Math.PI * 2); gF.stroke(); }
+        else {
+          gF.strokeRect(s.fx, s.fy, s.fw, s.fh); gF.strokeStyle = "rgba(255,255,255,.28)"; gF.lineWidth = 1; gF.beginPath();
+          for (let i = 1; i < 3; i++) { gF.moveTo(s.fx + s.fw * i / 3, s.fy); gF.lineTo(s.fx + s.fw * i / 3, s.fy + s.fh); gF.moveTo(s.fx, s.fy + s.fh * i / 3); gF.lineTo(s.fx + s.fw, s.fy + s.fh * i / 3); }
+          gF.stroke();
+          if (asp === -1) {  // handles on the corners when the frame is free
+            gF.strokeStyle = "#fff"; gF.lineWidth = 4; gF.lineCap = "round"; gF.beginPath(); const L = 18;
+            [[s.fx, s.fy, 1, 1], [s.fx + s.fw, s.fy, -1, 1], [s.fx, s.fy + s.fh, 1, -1], [s.fx + s.fw, s.fy + s.fh, -1, -1]].forEach(([x, y, dx, dy]) => { gF.moveTo(x + dx * L, y); gF.lineTo(x, y); gF.lineTo(x, y + dy * L); });
+            gF.stroke();
+          }
+        }
+      };
+      const go = (to) => {  // glide to a new state with a soft spring
+        cancelAnimationFrame(raf); goal = to;
+        if (reduceMotion()) { Object.assign(s, to); goal = null; draw(); return; }
+        const from = { ...s }, t0 = performance.now(), D = 360;
+        const step = (t_) => {
+          const t = Math.min(1, (t_ - t0) / D), e = t >= 1 ? 1 : 1 - Math.exp(-8 * t) * Math.cos(6 * t);
+          KEYS.forEach((key) => { s[key] = from[key] + (to[key] - from[key]) * e; }); draw();
+          if (t < 1) raf = requestAnimationFrame(step); else goal = null;
+        };
+        raf = requestAnimationFrame(step);
+      };
+      const stop = () => { cancelAnimationFrame(raf); if (goal) { Object.assign(s, goal); goal = null; } };
+      const layout = () => {
+        W = stage.clientWidth; H = stage.clientHeight; dpr = Math.min(2, window.devicePixelRatio || 1);
+        [cImg, cFr].forEach((c) => { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); c.style.width = W + "px"; c.style.height = H + "px"; });
+      };
+      const marks = () => $$(".pe-presets button", ov).forEach((b) => b.classList.toggle("on", +b.dataset.a === asp));
+      const filt = () => { cImg.style.filter = tune.b === 100 && tune.c === 100 ? "" : `brightness(${tune.b / 100}) contrast(${tune.c / 100})`; };
+      layout();
+      const m = o.memo && o.memo.st;
+      if (m && m.W === W && m.H === H) { rotN = m.rotN; flip = m.flip; asp = m.asp; tune = { ...m.tune }; Object.assign(s, m.s); $("#peB", ov).value = tune.b; $("#peC", ov).value = tune.c; filt(); }
+      else Object.assign(s, fresh(frameFor(asp)));
+      marks(); draw();
+
+      // ---- gestures: one finger pans, two pinch, double-tap zooms or resets, wheel zooms, a corner resizes the free frame
+      const pts = new Map(); let pinch = null, tapT = 0, tapX = 0, tapY = 0, rz = null;
+      const rel = (e) => { const r = stage.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+      const cornerAt = (x, y) => {
+        if (asp !== -1 || o.round) return null;
+        for (const [cx, cy, id] of [[s.fx, s.fy, "tl"], [s.fx + s.fw, s.fy, "tr"], [s.fx, s.fy + s.fh, "bl"], [s.fx + s.fw, s.fy + s.fh, "br"]]) if (Math.hypot(x - cx, y - cy) < 34) return id;
+        return null;
+      };
+      stage.addEventListener("pointerdown", (e) => {
+        try { stage.setPointerCapture(e.pointerId); } catch { }
+        stop(); const [x, y] = rel(e); pts.set(e.pointerId, [x, y]); pinch = null;
+        if (pts.size === 1) {
+          rz = cornerAt(x, y);
+          const t = performance.now();
+          if (!rz && t - tapT < 320 && Math.hypot(x - tapX, y - tapY) < 26) {  // double-tap
+            tapT = 0; const st = { ...s };
+            if (s.k > minK(s) * 1.08) { st.k = minK(s); st.cx = s.fx + s.fw / 2; st.cy = s.fy + s.fh / 2; } else zoomAbout(st, x, y, minK(s) * 2.5 / s.k);
+            go(clampSt(st));
+          } else { tapT = t; tapX = x; tapY = y; }
+        }
+      });
+      stage.addEventListener("pointermove", (e) => {
         if (!pts.has(e.pointerId)) return;
-        const prev = pts.get(e.pointerId); pts.set(e.pointerId, [e.clientX, e.clientY]);
-        if (pts.size === 1) { x += e.clientX - prev[0]; y += e.clientY - prev[1]; paint(); }
-        else { const [a, b] = [...pts.values()], dist = Math.hypot(a[0] - b[0], a[1] - b[1]); if (last) zoomTo(z * dist / last); last = dist; }
+        const [x, y] = rel(e), [px, py] = pts.get(e.pointerId); pts.set(e.pointerId, [x, y]);
+        if (Math.hypot(x - tapX, y - tapY) > 26) tapT = 0;
+        if (pts.size === 1) {
+          if (rz) {  // drag a corner of the free frame; the opposite corner stays put
+            const L = s.fx, R = s.fx + s.fw, T_ = s.fy, B = s.fy + s.fh, pad = 10, mn = 70;
+            let l = L, r = R, t = T_, b = B; const cx = Math.max(pad, Math.min(W - pad, x)), cy = Math.max(pad, Math.min(H - pad, y));
+            if (rz[1] === "l") l = Math.min(cx, R - mn); else r = Math.max(cx, L + mn);
+            if (rz[0] === "t") t = Math.min(cy, B - mn); else b = Math.max(cy, T_ + mn);
+            s.fx = l; s.fy = t; s.fw = r - l; s.fh = b - t; clampSt(s);
+          } else { s.cx += x - px; s.cy += y - py; clampSt(s); }
+          draw();
+        } else if (pts.size === 2) {
+          const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+          if (pinch) { zoomAbout(s, mx, my, d / pinch.d); s.cx += mx - pinch.mx; s.cy += my - pinch.my; clampSt(s); draw(); }
+          pinch = { d, mx, my };
+        }
+      });
+      const lift = (e) => { pts.delete(e.pointerId); pinch = null; rz = null; if (pts.size === 1) { const [x, y] = [...pts.values()][0]; tapT = 0; tapX = x; tapY = y; } };
+      stage.addEventListener("pointerup", lift); stage.addEventListener("pointercancel", lift);
+      stage.addEventListener("wheel", (e) => { e.preventDefault(); stop(); const [x, y] = rel(e); zoomAbout(s, x, y, Math.exp(-e.deltaY * .0016)); clampSt(s); draw(); }, { passive: false });
+      const ro = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
+        if (fin || !stage.clientWidth || (stage.clientWidth === W && stage.clientHeight === H)) return;
+        stop(); layout(); Object.assign(s, fresh(frameFor(asp === -1 ? 0 : asp))); draw();
+      }) : null;
+      if (ro) ro.observe(stage);
+
+      // ---- tools
+      const setAspect = (a) => {
+        asp = a; marks(); stop();
+        const st = a === -1 ? { ...s } : { ...s, ...frameFor(a) }; if (a !== -1) { st.cx = st.fx + st.fw / 2; st.cy = st.fy + st.fh / 2; st.k = 0; }
+        go(clampSt(st));
       };
-      box.onpointerup = box.onpointercancel = (e) => { pts.delete(e.pointerId); last = null; };
-      box.onwheel = (e) => { e.preventDefault(); zoomTo(z * (e.deltaY < 0 ? 1.08 : 1 / 1.08)); };
-      $("#czoom", s).oninput = (e) => zoomTo(+e.target.value / 100);
-      const finish = (v) => { s.remove(); resolve(v); };
-      $("#ccancel", s).onclick = () => finish(null);
-      s.onclick = (e) => { if (e.target === s) finish(null); };
-      $("#cdone", s).onclick = () => {
-        clamp(); const o = document.createElement("canvas"); o.width = o.height = out;
-        const k = base * z * out / D;
-        o.getContext("2d").drawImage(bmp, (out - bmp.width * k) / 2 + x * out / D, (out - bmp.height * k) / 2 + y * out / D, bmp.width * k, bmp.height * k);
-        o.toBlob((b) => finish(b ? new File([b], "avatar.jpg", { type: "image/jpeg" }) : null), "image/jpeg", 0.9);
+      $$(".pe-presets button", ov).forEach((b) => b.onclick = () => { haptic([6]); setAspect(+b.dataset.a); });
+      $$(".pe-tools button", ov).forEach((b) => b.onclick = () => {
+        haptic([6]); stop(); const t = b.dataset.t;
+        if (t === "rot") {
+          rotN -= 1; const st = { ...s, ang: rotN * Q };
+          if (asp <= 0 && asp !== -1) Object.assign(st, frameFor(0)); st.k = 0;
+          if (asp <= 0 && asp !== -1) { st.cx = st.fx + st.fw / 2; st.cy = st.fy + st.fh / 2; }
+          go(clampSt(st));
+        } else if (t === "flip") { flip = !flip; go({ ...s, sx: flip ? -1 : 1 }); }
+        else if (t === "tune") { tuneBox.hidden = !tuneBox.hidden; b.classList.toggle("on", !tuneBox.hidden); }
+        else if (t === "reset") {
+          rotN = Math.round(rotN / 4) * 4; flip = false; tune = { b: 100, c: 100 }; $("#peB", ov).value = $("#peC", ov).value = 100; filt();
+          asp = locked ? o.aspect : 0; marks(); go(fresh(frameFor(asp)));
+        }
+      });
+      $("#peB", ov).oninput = (e) => { tune.b = +e.target.value; filt(); };
+      $("#peC", ov).oninput = (e) => { tune.c = +e.target.value; filt(); };
+
+      // ---- finish
+      const key = (e) => { if (e.key === "Escape") done(null); };
+      document.addEventListener("keydown", key);
+      function done(v) {
+        if (fin) return; fin = true; cancelAnimationFrame(raf); document.removeEventListener("keydown", key); if (ro) ro.disconnect();
+        ov.classList.add("closing"); setTimeout(() => { ov.remove(); try { bmp.close(); } catch { } }, 200); resolve(v);
+      }
+      layer(ov, () => done(null));
+      $("[data-c]", ov).onclick = () => done(null);
+      $("[data-ok]", ov).onclick = async () => {
+        const ok = $("[data-ok]", ov); if (ok.disabled) return; ok.disabled = true; stop();
+        try {
+          let ow = s.fw / s.k, oh = s.fh / s.k; const lim = Math.min(1, max / Math.max(ow, oh));
+          ow = Math.max(1, Math.round(ow * lim)); oh = Math.max(1, Math.round(oh * lim)); const q = ow / s.fw;
+          const c = document.createElement("canvas"); c.width = ow; c.height = oh; const g = c.getContext("2d"); g.imageSmoothingQuality = "high";
+          g.translate((s.cx - s.fx) * q, (s.cy - s.fy) * q); g.rotate(rotN * Q); g.scale((flip ? -1 : 1) * s.k * q, s.k * q); g.drawImage(bmp, -iw / 2, -ih / 2);
+          if (tune.b !== 100 || tune.c !== 100) {  // same look as the preview, done by hand because not every browser can filter a canvas
+            g.setTransform(1, 0, 0, 1, 0, 0); const im = g.getImageData(0, 0, ow, oh), d = im.data, bf = tune.b / 100, cf = tune.c / 100;
+            for (let i = 0; i < d.length; i += 4) for (let j = 0; j < 3; j++) d[i + j] = (((d[i + j] / 255 - .5) * cf + .5) * bf) * 255;
+            g.putImageData(im, 0, 0);
+          }
+          const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", .88));
+          if (o.memo) o.memo.st = { W, H, s: { ...s }, rotN, flip, asp, tune: { ...tune } };
+          done(blob);
+        } catch (x) { ok.disabled = false; toast("Couldn't save that edit"); }
       };
-      paint();
     });
+  }
+  async function cropImage(file, out = 512) {  // profile photo: a round, square-cropped picture
+    const b = await editPhoto(file, { aspect: 1, round: true, title: "Profile photo", max: Math.max(out, 768) });
+    return b ? new File([b], "avatar.jpg", { type: "image/jpeg" }) : null;
   }
 
   // ------------------------------------------------------------------ media: attach menu, captions, videos, round video notes
@@ -934,7 +1095,7 @@
     if (!files.length) return toast("Choose photos or videos");
     const items = files.map((f) => ({ f, url: URL.createObjectURL(f) })); let cur = 0, gone = false;
     const ov = document.createElement("div"); ov.className = "mpv";
-    ov.innerHTML = `<div class="mpv-top"><button class="mpv-b" data-c>Cancel</button><b id="mpvN"></b><span></span></div>
+    ov.innerHTML = `<div class="mpv-top"><button class="mpv-b" data-c>Cancel</button><b id="mpvN"></b><button class="mpv-b mpv-edit" data-e>Edit</button></div>
       <div class="mpv-stage" id="mpvS"></div><div class="mpv-strip" id="mpvT"></div>
       <div class="mpv-bar"><textarea class="mpv-cap" id="mpvC" rows="1" placeholder="Add a caption…"></textarea><button class="mpv-send" data-s title="Send" aria-label="Send">➤</button></div>`;
     document.body.appendChild(ov);
@@ -948,6 +1109,7 @@
     const paint = () => {
       cur = Math.min(cur, items.length - 1); const it = items[cur];
       stage.innerHTML = isV(it) ? `<video src="${it.url}" controls playsinline></video>` : `<img src="${it.url}" alt="">`;
+      $("[data-e]", ov).style.visibility = isV(it) ? "hidden" : "visible";
       $("#mpvN", ov).textContent = items.length > 1 ? `${cur + 1} / ${items.length}` : isV(it) ? "Video" : "Photo";
       strip.innerHTML = items.map((x, i) => `<div class="mpv-th ${i === cur ? "on" : ""}" data-i="${i}">${isV(x) ? `<video src="${x.url}#t=0.1" muted playsinline preload="metadata"></video>` : `<img src="${x.url}" alt="">`}${items.length > 1 ? `<button class="mpv-x" data-x="${i}" aria-label="Remove">✕</button>` : ""}</div>`).join("")
         + (items.length < 10 ? `<label class="mpv-add" title="Add more">＋<input type="file" accept="image/*,video/*" multiple hidden></label>` : "");
@@ -961,6 +1123,11 @@
       for (let i = 0; i < list.length; i++) await sendFile(list[i], null, i === 0 ? text : "");
     };
     $("[data-s]", ov).onclick = go; $("[data-c]", ov).onclick = close;
+    $("[data-e]", ov).onclick = async () => {
+      const it = items[cur]; if (!it || isV(it)) return;
+      const b = await editPhoto(it.f, { title: "Edit photo", presets: true, memo: it.memo || (it.memo = {}) }); if (!b || gone) return;
+      URL.revokeObjectURL(it.url); it.f = new File([b], (it.f.name || "photo").replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" }); it.url = URL.createObjectURL(it.f); paint();
+    };
     cap.oninput = () => { cap.style.height = "auto"; cap.style.height = Math.min(cap.scrollHeight, 120) + "px"; };
     cap.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); go(); } };
     paint();
@@ -1817,19 +1984,54 @@
 
   function msgMenu(id) {
     const m = findMsg(id); if (!m || m.deleted) return;
-    const mine = m.sender === S.me.id, myRx = (m.reactions || {})[S.me.id];
+    const mine = m.sender === S.me.id, myRx = (m.reactions || {})[S.me.id], pinned = ((conv(S.cur) || {}).pins || []).some((p) => p.id === id);
     const s = sheet(`<div class="menu"><div class="rx">${REACTIONS.map((r, i) => `<button data-rx="${r}" class="${myRx === r ? "on" : ""}" style="animation-delay:${i * 30}ms" title="${myRx === r ? "Remove" : ""}">${r}</button>`).join("")}</div>
-      <button data-a="reply">↩️ Reply</button><button data-a="star">${S.stars.has(id) ? "☆ Unstar" : "⭐ Star"}</button>${m.text ? `<button data-a="copy">📋 Copy</button>` : ""}
+      <button data-a="reply">↩️ Reply</button>${m.id && (conv(S.cur) || {}).kind !== "self" ? `<button data-a="pin">${pinned ? "📌 Unpin" : "📌 Pin"}</button>` : ""}<button data-a="star">${S.stars.has(id) ? "☆ Unstar" : "⭐ Star"}</button>${m.text ? `<button data-a="copy">📋 Copy</button>` : ""}
       ${mine && m.text && (!m.attachment || m.kind === "image" || m.kind === "video") ? `<button data-a="edit">✏️ Edit</button>` : ""}${mine ? `<button data-a="delete" class="danger">🗑 Delete for everyone</button>` : ""}</div>`);
     $$("[data-rx]", s).forEach((b) => b.onclick = () => { s.remove(); react(id, b.dataset.rx); });
     $$("[data-a]", s).forEach((b) => b.onclick = async () => {
       s.remove(); const a = b.dataset.a;
       if (a === "reply") { S.reply = m; S.edit = null; drawReply(); $("#txt").focus(); }
       if (a === "star") toggleStar(id);
+      if (a === "pin") setPin(id, !pinned);
       if (a === "copy") navigator.clipboard.writeText(m.text).then(() => toast("Copied"));
       if (a === "edit") { S.edit = m; S.reply = null; $("#txt").value = m.text; window.growComposer(); drawReply(); $("#txt").focus(); }
       if (a === "delete" && confirm("Delete this message for everyone?")) api(`/api/messages/${id}`, { method: "DELETE" }).then(upsert).then(drawChat).catch((x) => toast(x.message));
     });
+  }
+  // ---- pinned messages: a slim bar under the header (latest pin + "2 of 3"), tap to jump and cycle, "All" lists them
+  const P = { k: {} };
+  const pinWho = (p) => p.sender === S.me.id ? "You" : (dn(userById(p.sender)) || "").split(" ")[0];
+  const pinText = (p) => p.text || ({ image: "📷 Photo", video: "🎥 Video", voice: "🎤 Voice message", videonote: "⭕ Video note", sticker: "Sticker" }[p.kind] || "📎 " + (p.name || "File"));
+  function drawPinbar() {
+    const bar = $("#pinbar"), pane = $("#chatPane"), c = conv(S.cur); if (!bar || !pane || !c) return;
+    const ps = c.pins || [], n = ps.length;
+    pane.classList.toggle("has-pins", n > 0); bar.hidden = !n;
+    if (!n) { bar.innerHTML = ""; bar.dataset.sig = ""; return; }
+    const k = (P.k[c.id] || 0) % n, p = ps[n - 1 - k], sig = c.id + ":" + p.id + ":" + n + ":" + k;
+    if (bar.dataset.sig === sig) return; bar.dataset.sig = sig;
+    bar.innerHTML = `<button class="pin-main" aria-label="Go to pinned message"><i>📌</i><span class="pin-txt"><b>${n > 1 ? `${k + 1} of ${n}` : "Pinned"}${pinWho(p) ? " · " + esc(pinWho(p)) : ""}</b><span>${esc(pinText(p).slice(0, 90))}</span></span></button><button class="pin-all" aria-label="See all pinned messages">${n > 1 ? "All" : "⋯"}</button>`;
+    $(".pin-main", bar).onclick = () => { haptic([6]); P.k[c.id] = (k + 1) % n; jumpMsg(p.id); drawPinbar(); };
+    $(".pin-all", bar).onclick = pinsSheet;
+  }
+  async function jumpMsg(id) {  // scroll to a message (loading older ones when it is far back) and flash it
+    const c = conv(S.cur); if (!c) return;
+    for (let i = 0; i < 12 && !$(`.msg[data-id="${id}"]`) && S.older[c.id]; i++) { try { await loadOlder(); } catch { break; } }
+    const t = $(`.msg[data-id="${id}"]`); if (!t) return toast("That message is too far back");
+    t.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 1400);
+  }
+  async function setPin(id, on) {
+    const c = conv(S.cur); if (!c) return;
+    try {
+      const r = await api(`/api/messages/${id}/pin`, { method: on ? "POST" : "DELETE", body: on ? {} : undefined });
+      c.pins = r.pins; P.k[c.id] = 0; cacheSave(); drawPinbar(); drawChat(); haptic([8]); toast(on ? "Pinned 📌" : "Unpinned");
+    } catch (x) { toast(x.message); }
+  }
+  function pinsSheet() {
+    const c = conv(S.cur); if (!c) return; const ps = (c.pins || []).slice().reverse();
+    const s = sheet(`<h3>📌 Pinned messages</h3><div class="pinlist">${ps.map((p) => `<div class="pinrow"><button class="pinjump" data-j="${p.id}"><b>${esc(pinWho(p))}</b><span>${esc(pinText(p).slice(0, 140))}</span></button><button class="pinx" data-u="${p.id}">Unpin</button></div>`).join("") || `<div class="hint">Nothing pinned.</div>`}</div>`);
+    $$("[data-j]", s).forEach((b) => b.onclick = () => { s.remove(); jumpMsg(+b.dataset.j); });
+    $$("[data-u]", s).forEach((b) => b.onclick = async () => { s.remove(); await setPin(+b.dataset.u, false); if ((c.pins || []).length) pinsSheet(); });
   }
   function drawReply() {
     const el = $("#replybar"); if (!el) return; const m = S.reply || S.edit;
@@ -2730,8 +2932,9 @@
   }
   function albumPhotoBind(inp) {
     inp.onchange = async () => {
-      const f = inp.files[0]; if (!f) return; inp.value = "";
+      let f = inp.files[0]; if (!f) return; inp.value = "";
       try {
+        const ed = await editPhoto(f, { title: "Album photo", presets: true }); if (!ed) return; f = new File([ed], "photo.jpg", { type: "image/jpeg" });
         const fd = new FormData(); fd.append("file", f, f.name || "photo.jpg"); const att = await api("/api/files", { body: fd });
         await api(`/api/pets/${H.cid}/log/${inp.dataset.alphoto}/photo`, { body: { file: att.id } });
         const l = H.data && H.data.log.find((x) => x.id === +inp.dataset.alphoto); if (l) l.file = att.id;
@@ -3025,10 +3228,10 @@
   function usOpen(cid, act) {
     const c = conv(cid), them = c && other(c); if (!c || c.kind !== "direct" || !them || T.us) return;
     const page = document.createElement("div"); page.className = "page us";
-    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small></div></div>
+    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small><button class="us-come" id="usCome" hidden>Come to Us 🫶</button></div></div>
       <div class="us-stage" id="usStage">
         <div class="us-aura"></div>
-        <div class="us-blob them" id="usThem" style="--bc:${blobCol(them)}" role="button" aria-label="Touch ${esc(dn(them))}">${blobFace(them)}</div>
+        <div class="us-blob them" id="usThem" style="--bc:${blobCol(them)}" role="button" aria-label="Touch ${esc(dn(them))}">${blobFace(them)}<i class="us-eyes" aria-hidden="true"><b></b><b></b></i></div>
         <div class="us-blob me" id="usMe" style="--bc:${blobCol(S.me)}">${blobFace(S.me)}</div>
         <div class="us-count" id="usCount" hidden></div>
         <div class="us-say" id="usSay" hidden></div>
@@ -3041,18 +3244,55 @@
       </div>`;
     document.body.appendChild(page);
     const U = T.us = { cid, page, them, stage: $("#usStage", page), act: act && TACT.some((a) => a.id === act) ? act : store.get("usact", "kiss"),
-      count: 0, pat: [], strengths: [], t0: 0, hits: [], timer: 0, hold: 0, holdDelay: 0, downAt: 0, last: null, poll: 0, close: null };
+      count: 0, pat: [], strengths: [], t0: 0, hits: [], timer: 0, hold: 0, holdDelay: 0, downAt: 0, last: null, poll: 0, close: null,
+      here: false, dots: {}, lm: 0, ls: 2, still: 0, hbT: 0, beating: false, down0: null };
+    usPresence(cid, true);
     const close = U.close = () => {
       if (page.classList.contains("closing")) return; page.classList.add("closing"); clearInterval(U.poll); clearTimeout(U.timer); clearTimeout(U.holdDelay); clearInterval(U.hold);
+      clearTimeout(U.still); clearTimeout(U.hbT); U.beating = false; usPresence(cid, false);
       if (U.count) send(); T.us = null; setTimeout(() => page.remove(), 200);
     };
     layer(page, close); $("#usBack", page).onclick = close;
     const blob = $("#usThem", page), mine = $("#usMe", page), cnt = $("#usCount", page), sbtn = $("#usSend", page), hint = $("#usHold", page);
     const sync = () => {
       const u = other(conv(cid)) || them; U.them = u;
-      U.stage.classList.toggle("lean", !!u.online);
-      $("#usStat", page).textContent = u.online ? "here with you" : lastSeen(u);
+      U.stage.classList.toggle("lean", !!u.online || U.here);
+      $("#usStat", page).textContent = U.here ? `${dn(u).split(" ")[0]} is here 💞` : u.online ? "online" : lastSeen(u);
     };
+    const come = $("#usCome", page); come.hidden = false;
+    U.setHere = (h) => {  // the other person came into, or left, this screen
+      if (U.here === h) return; U.here = h; page.classList.toggle("awake", h); come.hidden = h; sync();
+      if (h) haptic([18, 50, 18]); else { undot("theirs"); undot("mine"); stopBeat(); }
+    };
+    come.onclick = async () => {
+      come.disabled = true;
+      try {
+        const r = await api(`/api/us/${cid}/invite`, { body: {} });
+        toast(r.here ? "They're already here 💞" : `Asked ${dn(them).split(" ")[0]} to come 🫶`); come.textContent = "Asked ✓";
+        setTimeout(() => { if (come.isConnected) { come.disabled = false; come.textContent = "Come to Us 🫶"; } }, 120000);
+      } catch (x) { toast(x.message); come.disabled = false; }
+    };
+    // my finger and theirs, as little glowing dots (mine on their blob, theirs on mine)
+    function placeDot(kind, x, y) {
+      let d = U.dots[kind]; if (!d) { d = U.dots[kind] = document.createElement("i"); d.className = "us-dot " + kind; U.stage.appendChild(d); }
+      d.style.left = x + "px"; d.style.top = y + "px"; d.classList.add("on"); clearTimeout(d._t); d._t = setTimeout(() => undot(kind), 1600);
+    }
+    function undot(kind) { const d = U.dots[kind]; if (d) { clearTimeout(d._t); d.classList.remove("on"); } }
+    U.undot = undot; U.placeDot = placeDot;
+    // live relay: position (0..1 inside their blob), strength and action go to the other phone over the socket (20 a second at most)
+    function live(k, e) {
+      if (!U.here || !WS || WS.readyState !== 1 || !e) return;
+      const t = performance.now(); if (k === "m") { if (t - U.lm < 50) return; U.lm = t; }
+      const br = blob.getBoundingClientRect(), cl = (v) => Math.max(0, Math.min(1, v));
+      WS.send(JSON.stringify({ t: "us_tap", conv: cid, k, x: +cl((e.clientX - br.left) / br.width).toFixed(3), y: +cl((e.clientY - br.top) / br.height).toFixed(3), s: +U.ls.toFixed(1), a: U.act }));
+    }
+    // heartbeat: keep a finger still for 2 s and a slow pulse (about 70 a minute) goes to them; if both hold, the two follow each other
+    const BEAT = 857;
+    function beatFx(el) { el.classList.remove("beat"); void el.offsetWidth; el.classList.add("beat"); }
+    function hbTick() { if (!U.beating) return; live("b", U.last || U.down0); beatFx(blob); haptic([30, 80, 30]); U.hbT = setTimeout(hbTick, BEAT); }
+    function startBeat() { if (!U.downAt || !U.here) return; U.beating = true; clearInterval(U.hold); hint.hidden = true; hbTick(); }
+    function stopBeat() { clearTimeout(U.still); clearTimeout(U.hbT); U.beating = false; }
+    U.onBeat = () => { beatFx(mine); haptic([30, 80, 30]); if (U.beating) { clearTimeout(U.hbT); U.hbT = setTimeout(hbTick, BEAT); } };
     sync(); U.poll = setInterval(sync, 2500);
     const selectAct = (id, quiet) => {
       U.act = id; store.set("usact", id);
@@ -3080,6 +3320,7 @@
       wobble(blob, Math.round(((e.clientX - br.left) / br.width) * 100), Math.round(((e.clientY - br.top) / br.height) * 100));
       if (a.id === "punch") { blob.classList.remove("punched"); void blob.offsetWidth; blob.classList.add("punched"); }
       fxHit(U.stage, a, x, y, s);
+      U.ls = s; live("d", e); placeDot("mine", x, y);
       haptic(U.count === 1 ? a.vib : [Math.round(8 + s * 5)]);
       cnt.hidden = false; cnt.textContent = "×" + U.count; cnt.dataset.s = Math.round(s);
       cnt.classList.remove("bump"); void cnt.offsetWidth; cnt.classList.add("bump");
@@ -3097,12 +3338,18 @@
     U.send = send;
     blob.addEventListener("pointerdown", (e) => {
       e.preventDefault(); try { blob.setPointerCapture(e.pointerId); } catch { }
-      clearTimeout(U.timer); U.downAt = performance.now(); U.last = e; hit(e);
+      clearTimeout(U.timer); U.downAt = performance.now(); U.last = e; U.down0 = { clientX: e.clientX, clientY: e.clientY }; hit(e);
+      clearTimeout(U.still); U.still = setTimeout(startBeat, 2000);
       U.holdDelay = setTimeout(() => { U.hold = setInterval(() => { if (U.last) hit(U.last); }, 230); }, 420);
     });
-    blob.addEventListener("pointermove", (e) => { if (U.downAt) U.last = e; });
-    const up = () => {
+    blob.addEventListener("pointermove", (e) => {
+      if (!U.downAt) return; U.last = e; live("m", e);
+      const r = U.stage.getBoundingClientRect(); if (U.dots.mine) { U.placeDot("mine", e.clientX - r.left, e.clientY - r.top); }
+      if (Math.hypot(e.clientX - U.down0.clientX, e.clientY - U.down0.clientY) > 12) { stopBeat(); U.down0 = { clientX: e.clientX, clientY: e.clientY }; U.still = setTimeout(startBeat, 2000); }
+    });
+    const up = (e) => {
       if (!U.downAt) return;
+      live("u", U.last); undot("mine"); stopBeat();
       clearTimeout(U.holdDelay); clearInterval(U.hold); U.downAt = 0;
       if (U.pat.length) U.pat[U.pat.length - 1][1] = 160;
       if (U.count) U.timer = setTimeout(send, 1500);
@@ -3118,6 +3365,39 @@
       const say = $("#usSay", page); say.textContent = b.textContent.trim(); say.hidden = false; say.classList.remove("show"); void say.offsetWidth; say.classList.add("show");
       try { usSent(await api(`/api/touch/${cid}`, { body: { word: b.dataset.w, count: 1, strength: 2 } }), U); } catch (x) { toast(x.message); }
     };
+  }
+  const usPresence = (cid, here) => { if (WS && WS.readyState === 1) WS.send(JSON.stringify({ t: "us", conv: cid, here })); };
+  function onUsEvent(e) {
+    const U = T.us;
+    if (e.t === "us_invite") { if (!U || U.cid !== e.conv) toast(`${dn(userById(e.user)).split(" ")[0] || "They"} asked you to come to Us 🫶`); return; }
+    if (!U || U.cid !== e.conv || e.user === S.me.id) return;
+    if (e.t === "us_here") U.setHere(!!e.here);
+    else if (e.t === "us_tap") usTap(U, e);
+    else if (e.t === "us_sync") usSync(U);
+  }
+  function usTap(U, e) {  // their finger on my blob: it squishes at that spot, the action plays, my phone buzzes
+    const mine = $("#usMe", U.page), mr = mine.getBoundingClientRect(), sr = U.stage.getBoundingClientRect();
+    if (e.k === "b") { U.onBeat(); return; }
+    if (e.k === "u") { U.undot("theirs"); return; }
+    const x = mr.left - sr.left + e.x * mr.width, y = mr.top - sr.top + e.y * mr.height;
+    U.placeDot("theirs", x, y);
+    if (e.k !== "d") return;
+    const a = TACT.find((t) => t.id === e.a), s = e.s || 2;
+    wobble(mine, Math.round(e.x * 100), Math.round(e.y * 100));
+    if (a) { if (a.id === "punch") { mine.classList.remove("punched"); void mine.offsetWidth; mine.classList.add("punched"); } fxHit(U.stage, a, x, y, s); }
+    haptic([Math.round(8 + s * 5)]);
+  }
+  function usSync(U) {  // both touching at the same moment: the two blobs hug
+    U.stage.classList.add("hug"); setTimeout(() => U.stage.classList.remove("hug"), 2000);
+    const sr = U.stage.getBoundingClientRect(), br = $("#usThem", U.page).getBoundingClientRect();
+    for (let i = 0; i < 9; i++) {
+      const h = document.createElement("span"); h.className = "us-heart"; h.textContent = ["💞", "💗", "💖", "❤️"][i % 4];
+      h.style.left = br.left - sr.left + br.width * (.2 + Math.random() * .6) + "px"; h.style.top = br.top - sr.top + br.height * .55 + "px";
+      h.style.setProperty("--dx", Math.round(Math.random() * 120 - 60) + "px"); h.style.setProperty("--dy", -Math.round(90 + Math.random() * 120) + "px"); h.style.animationDelay = i * 60 + "ms";
+      U.stage.appendChild(h); setTimeout(() => h.remove(), 1900);
+    }
+    const line = $("#usSay", U.page); line.textContent = "in sync 💞"; line.hidden = false; line.classList.remove("show"); void line.offsetWidth; line.classList.add("show");
+    haptic([30, 40, 30, 40, 70]); pop(1.2);
   }
   function usSent(r, U) {  // what the server said about a touch we just sent
     if (r.reason === "limit") toast("Sent. To keep their phone calm, only a few buzzes go out per minute 💛");
@@ -3183,6 +3463,7 @@
   }
   function onTouchEvent(e) {
     const t = e.touch; if (!t || e.mine || t.sender === S.me.id || !isVisible()) return;
+    if (e.live) { T.shown.add(t.id); markTouchSeen(t.id); return; }  // they were in the Us screen with me: I felt it live already
     if (T.us && T.us.cid === t.conv) { T.shown.add(t.id); usIncoming(t); markTouchSeen(t.id); return; }
     touchReplay(t); markTouchSeen(t.id);
   }
@@ -3190,7 +3471,7 @@
   function touchChip(m, pop_) {
     const a = m.attachment || {}, mine = m.sender === S.me.id, act = a.action ? tact(a.action) : null;
     const n = a.count || 1, s = TSTR[Math.max(1, Math.min(5, a.strength || 1)) - 1];
-    const label = act ? `<i>${act.e}</i> ${n > 1 ? "×" + n : TNOUN[a.action][0]}<em> · ${s}</em>` : `<i>${touchEmoji({ word: a.word })}</i> ${esc(a.word || "")}`;
+    const label = act ? `<i>${act.e}</i> ${n > 1 ? "×" + n : TNOUN[a.action][0]}<em> · ${a.live ? "live" : s}</em>` : `<i>${touchEmoji({ word: a.word })}</i> ${esc(a.word || "")}`;
     return `<div class="tchip-row ${mine ? "mine" : ""} ${pop_}" data-id="${m.id || ""}"><button class="tchip" data-tc="${a.touch || 0}">${label}</button>
       <small>${mine ? "You" : esc(dn(userById(m.sender)))} · ${fmtTime(m.created)}${mine ? "" : ` · <button class="tback" data-tb="${esc(a.action || "")}">Send one back</button>`}</small></div>`;
   }
@@ -3280,13 +3561,15 @@
     let back = null; try { back = JSON.parse(sessionStorage.getItem("afra_resume") || "null"); sessionStorage.removeItem("afra_resume"); } catch { }
     if (back && Date.now() - back.t < 60000) { setTimeout(() => toast("✨ Updated"), 500); if (!want && back.cid && conv(back.cid)) setTimeout(() => openConv(back.cid), 150); }
     if (want) setTimeout(() => conv(want) && openConv(want), 400);
+    const wantU = +(new URLSearchParams(location.hash.slice(1)).get("us") || 0);
+    if (wantU) { setTimeout(() => conv(wantU) && usOpen(wantU), 800); history.replaceState(null, "", location.pathname + location.search); }
     const wantT = +(new URLSearchParams(location.hash.slice(1)).get("touch") || 0);
     if (wantT) { setTimeout(() => touchOpenById(wantT), 700); history.replaceState(null, "", location.pathname + location.search); }
     setTimeout(touchUnseenCheck, 1500);
     if ("Notification" in window && Notification.permission === "granted") enablePush(false);
   }
   document.addEventListener("visibilitychange", () => {
-    sendVis();
+    sendVis(); if (T.us && isVisible()) usPresence(T.us.cid, true);
     if (document.visibilityState === "visible") checkUpdate();
     if (isVisible() && TOKEN && S.me) {
       autoWhere();
@@ -3295,6 +3578,6 @@
       celebrateCheck(); touchUnseenCheck();
     }
   });
-  if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (e) => { if (!e.data) return; if (e.data.open) openConv(+e.data.open); if (e.data.touch) touchOpenById(+e.data.touch); });
+  if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", (e) => { if (!e.data) return; if (e.data.open) openConv(+e.data.open); if (e.data.touch) touchOpenById(+e.data.touch); if (e.data.us && conv(+e.data.us)) usOpen(+e.data.us); });
   start().catch((e) => { app.innerHTML = `<div class="setup"><h1>A.F.R.A ♥</h1><p>Something went wrong: ${esc(e.message)}</p></div>`; });
 })();
