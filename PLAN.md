@@ -13,6 +13,7 @@
 - v26 Time capsule letters: write now, open on a chosen date, sealed on the server until then. Up to 4 photos, "both of us" letters, drafts.
 - v27 Play: tic-tac-toe, this or that, who's more likely, couple's quiz, 20 questions, draw and guess. +2 coins each per game, +1 to the winner, 20 a day each.
 - v28 Shared bucket list (tick off with up to 6 photos, +3 coins once per item) and the Memories album (chat photos and videos, bucket photos, opened letters; shared favourites, slideshow). Home tab tiles.
+- v29 Chat settings: read receipts, last seen and typing (each reciprocal), hidden notification text and sender, quiet hours with your own time zone (pushes arrive silently, nudges skipped, touches can still come through), nudge on/off and timings, Enter to send on desktop, archive chats (long-press or swipe).
 
 ## Next
 1. Tune the storm size and spacing from the storm test on your phones.
@@ -128,16 +129,16 @@ The deck depends on how long you've been together, read from "Our dates" (v22, t
 Ordered roughly lightest first.
 
 ### Privacy
-- [ ] Read receipts on/off, reciprocal like WhatsApp: turn yours off and you stop seeing theirs.
-- [ ] Last seen and online: Everyone / My contacts / Nobody.
-- [ ] Typing indicator on/off.
-- [ ] Hide message text in notifications: show "New message" only. Useful for the lock screen and the watch.
+- [x] Read receipts on/off, reciprocal like WhatsApp: turn yours off and you stop seeing theirs.
+- [x] Last seen and online: Everyone / My contacts / Nobody.
+- [x] Typing indicator on/off.
+- [x] Hide message text in notifications: show "New message" only. Useful for the lock screen and the watch.
 - [ ] Chat lock: a per-chat passcode or Face ID (WebAuthn) to open a chat. Client side only; the server password rules are unchanged.
 - [ ] Disappearing messages per chat: off, 24 hours, 7 days or 90 days.
 
 ### Notifications
-- [ ] Quiet hours per person (e.g. 23:00 to 07:00). Notifications and nudges wait until morning.
-- [ ] Unread nudge settings: on/off, choose the timings (15/45 by default), and never during quiet hours.
+- [x] Quiet hours per person (e.g. 23:00 to 07:00). Notifications and nudges wait until morning.
+- [x] Unread nudge settings: on/off, choose the timings (15/45 by default), and never during quiet hours.
 - [x] "Thinking of you" tap: one button sends a soft vibration and a ♥ notification, with no message needed.
 - [ ] Optional forward to Telegram, for watches that don't show web-app alerts (Huawei Health on iPhone).
 
@@ -148,9 +149,9 @@ Ordered roughly lightest first.
 - [ ] A mood/status line ("in the lab 🧪", "sleepy 😴") shown under the name.
 
 ### Comfort
-- [ ] Enter to send on desktop (on/off).
+- [x] Enter to send on desktop (on/off).
 - [ ] Media: auto-download on Wi-Fi only (data saver), and a default photo quality.
-- [ ] Archive chats, alongside pin.
+- [x] Archive chats, alongside pin.
 - [ ] Export my own chat (.zip) for each user, not just the admin.
 - [ ] Per-chat notification tone and vibration pattern. Android/desktop only; iOS web push can't change them.
 
