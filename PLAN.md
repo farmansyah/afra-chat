@@ -12,10 +12,10 @@
 - v25 Question cards: 8 decks that unlock with time together, guess mode, and a Spicier deck both must switch on.
 - v26 Time capsule letters: write now, open on a chosen date, sealed on the server until then. Up to 4 photos, "both of us" letters, drafts.
 - v27 Play: tic-tac-toe, this or that, who's more likely, couple's quiz, 20 questions, draw and guess. +2 coins each per game, +1 to the winner, 20 a day each.
+- v28 Shared bucket list (tick off with up to 6 photos, +3 coins once per item) and the Memories album (chat photos and videos, bucket photos, opened letters; shared favourites, slideshow). Home tab tiles.
 
 ## Next
 1. Tune the storm size and spacing from the storm test on your phones.
-2. v28: Shared bucket list with album.
 
 ## Touches (Obimy + tap ME), the long game
 What we take from each:
@@ -102,8 +102,8 @@ The deck depends on how long you've been together, read from "Our dates" (v22, t
 ### Memories
 - [ ] Our dates: anniversary, birthdays, first date and a days-together counter, with a gentle reminder the day before and a small celebration screen on the day.
 - [ ] On this day: "1 year ago today you sent…", resurfacing old photos and messages from the same date.
-- [ ] Shared album: a Memories tab of all photos and videos from the chat by month, with favourites and a slideshow.
-- [ ] Time capsule letter: write a letter now that unlocks on a chosen date (anniversary, graduation, next year).
+- [x] Shared album: a Memories tab of all photos and videos from the chat by month, with favourites and a slideshow.
+- [x] Time capsule letter: write a letter now that unlocks on a chosen date (anniversary, graduation, next year).
 - [ ] Monthly "our month" recap card: messages sent, photos, longest call, top emoji, pet milestones and streaks. Shareable as an image.
 
 ### Together, apart
@@ -113,8 +113,8 @@ The deck depends on how long you've been together, read from "Our dates" (v22, t
 - [ ] Voice and video calls (WebRTC, from the roadmap).
 
 ### Play
-- [ ] Mini games in chat: tic-tac-toe, "who's more likely to", this-or-that, 20 questions, a couple's quiz ("How well do you know me?"), and draw-and-guess. Wins earn pet coins.
-- [ ] Shared bucket list: places to go, food to try and things to do together. Tick them off with a photo and they go into the album.
+- [x] Mini games in chat: tic-tac-toe, "who's more likely to", this-or-that, 20 questions, a couple's quiz ("How well do you know me?"), and draw-and-guess. Wins earn pet coins.
+- [x] Shared bucket list: places to go, food to try and things to do together. Tick them off with a photo and they go into the album.
 - [ ] Date-night spinner: a wheel of date ideas (stay-in or go-out, budget filter), and the pet suggests one on weekends.
 - [ ] Love coupons: make redeemable coupons for each other ("one free massage", "I'll cook tonight") that the other can redeem with a tap.
 - [ ] Doodle together: a shared live canvas, with the drawing sent as a sticker.
@@ -155,6 +155,8 @@ Ordered roughly lightest first.
 - [ ] Per-chat notification tone and vibration pattern. Android/desktop only; iOS web push can't change them.
 
 ### Tech debt
+- [ ] Album thumbnails: the Memories grid loads full-size photos. Add a small cached thumbnail endpoint, so the album stays fast on mobile data.
+- [ ] File links work for anyone logged in who has the file id. Check the file id against the conversation members, so only the two of you can open a photo.
 - [ ] Sync pins, appearance and these settings across devices (server-side prefs instead of localStorage).
 - [ ] Video note: letting go during the first camera-permission prompt drops the note silently. Show a hint instead.
 - [ ] Earlier roadmap: live location, stickers, WebRTC calls, admin-granted privacy.
