@@ -26,6 +26,7 @@ After=network-online.target
 User=$RUN_AS
 WorkingDirectory=$DIR/server
 Environment=CHAT_DATA=$DIR/data WEB_DIR=$DIR/web PUSH_CONTACT=mailto:afra@$DOMAIN
+EnvironmentFile=-/etc/afra-chat.env
 ExecStart=$DIR/.venv/bin/uvicorn server:app --host 127.0.0.1 --port $PORT --proxy-headers --forwarded-allow-ips 127.0.0.1 --ws-max-size 131072
 Restart=always
 RestartSec=3

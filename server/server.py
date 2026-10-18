@@ -18,6 +18,7 @@ import zipfile
 from html import escape as hesc
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -26,6 +27,8 @@ import sqlite3
 import sys
 import time
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -67,6 +70,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS messages_client ON messages(sender, client_id)
 CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, owner INTEGER, name TEXT, mime TEXT, size INTEGER, created REAL);
 CREATE TABLE IF NOT EXISTS pushes (endpoint TEXT PRIMARY KEY, user_id INTEGER, device TEXT, sub TEXT, created REAL);
 CREATE TABLE IF NOT EXISTS stars (user_id INTEGER, msg_id INTEGER, created REAL, PRIMARY KEY (user_id, msg_id));
+CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY, user_id INTEGER, text TEXT, due REAL DEFAULT 0, place TEXT DEFAULT '',
+  repeat TEXT DEFAULT '', done INTEGER DEFAULT 0, created REAL, fired REAL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS reminders_due ON reminders(done, due);
+CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, user_id INTEGER, list TEXT DEFAULT '', text TEXT, done INTEGER DEFAULT 0, created REAL);
+CREATE TABLE IF NOT EXISTS places (user_id INTEGER, name TEXT, lat REAL, lon REAL, radius REAL DEFAULT 150, PRIMARY KEY (user_id, name));
 """
 
 
@@ -85,7 +93,8 @@ with closing(db()) as _c:
     for _t in ("convs", "members"):  # chat theme: on convs = shared by both people, on members = "just for me"
         if "style" not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN style TEXT DEFAULT '{{}}'")
-    for _t, _col, _def in (("users", "bio", "TEXT DEFAULT ''"), ("members", "muted", "REAL DEFAULT 0")):  # about line; mute until (time)
+    for _t, _col, _def in (("users", "bio", "TEXT DEFAULT ''"), ("members", "muted", "REAL DEFAULT 0"),  # about line; mute until (time)
+                          ("users", "bot", "INTEGER DEFAULT 0")):  # the Assistant's account
         if _col not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN {_col} {_def}")
     _c.commit()
@@ -191,7 +200,7 @@ def throttle(key: str):
 def public(u) -> dict:
     online = bool(SOCKETS.get(u["id"]))
     return {"id": u["id"], "username": u["username"], "name": u["name"], "avatar": u["avatar"], "is_admin": bool(u["is_admin"]),
-            "online": online, "last_seen": time.time() if online else u["last_seen"], "bio": u["bio"] or ""}
+            "online": online, "last_seen": time.time() if online else u["last_seen"], "bio": u["bio"] or "", "bot": bool(u["bot"])}
 
 
 def make_code(c, kind="invite", admin_=0, by=None, note="") -> str:
@@ -383,7 +392,8 @@ def conv_view(c, cid: int, uid: int) -> dict:
     return {"id": cid, "kind": cv["kind"], "members": others, "last": msg_view(last) if last else None, "unread": unread,
             "last_at": cv["last_at"], "other_read": other_read,
             "style": json.loads(cv["style"] or "{}"), "my_style": json.loads((mine["style"] if mine else "") or "{}"),
-            "muted": (mine["muted"] or 0) if mine and (mine["muted"] or 0) > time.time() else 0}
+            "muted": (mine["muted"] or 0) if mine and (mine["muted"] or 0) > time.time() else 0,
+            "wants_loc": cv["kind"] == "bot" and bool(c.execute("SELECT 1 FROM reminders WHERE user_id=? AND done=0 AND place<>''", (uid,)).fetchone())}
 
 
 def msg_view(m) -> dict:
@@ -401,6 +411,7 @@ def list_convs(authorization: str = Header(None)):
     u = auth(authorization)
     with closing(db()) as c:
         _conv(c, [u["id"]])  # Notes to self always exists
+        _bot_conv(c, u)  # and so does the Assistant
         c.commit()
         ids = [r["conv_id"] for r in c.execute("SELECT conv_id FROM members WHERE user_id=?", (u["id"],))]
         convs = [conv_view(c, i, u["id"]) for i in ids]
@@ -513,6 +524,7 @@ async def send_message(cid: int, body: dict, authorization: str = Header(None)):
         raise ValueError("Empty message")
     with closing(db()) as c:
         _member(c, cid, u["id"])
+        is_bot = c.execute("SELECT kind FROM convs WHERE id=?", (cid,)).fetchone()["kind"] == "bot"
         if body.get("client_id"):
             dup = c.execute("SELECT * FROM messages WHERE sender=? AND client_id=?", (u["id"], body["client_id"])).fetchone()
             if dup:  # sent twice from a phone that went offline: keep one
@@ -532,6 +544,13 @@ async def send_message(cid: int, body: dict, authorization: str = Header(None)):
     with closing(db()) as c:  # muted chats stay quiet (no notification)
         quiet = {r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=? AND muted>?", (cid, time.time()))}
     asyncio.create_task(push_message(u, m, [x for x in members if x != u["id"] and x not in quiet]))
+    if is_bot:
+        if kind == "location" and isinstance(att, dict) and "lat" in att:
+            try:
+                HERE[u["id"]] = (float(att["lat"]), float(att["lon"]), time.time())
+            except (TypeError, ValueError, KeyError):
+                pass
+        asyncio.create_task(assistant_turn(cid, u["id"], m["id"]))
     return m
 
 
@@ -677,6 +696,405 @@ async def typing(cid: int, authorization: str = Header(None)):
     for x in members:
         await send_to(x, {"t": "typing", "conv": cid, "user": u["id"]})
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- the Assistant: reminders (by time or place), notes and lists, questions
+# It is a chat like any other ("Assistant", kind "bot"), one per person. Replies come from OpenRouter (the key stays on the server).
+OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+ASSISTANT_MODEL = os.environ.get("ASSISTANT_MODEL", "deepseek/deepseek-chat")
+BOT_LOCKS: dict[int, asyncio.Lock] = {}
+HERE: dict[int, tuple[float, float, float]] = {}  # user id -> (lat, lon, when): the last place their phone reported
+REPEATS = ("", "daily", "weekly", "monthly", "weekdays")
+
+
+def bot_id(c) -> int:
+    """The Assistant's own account: made the first time someone needs it. It can't log in and nobody can find it."""
+    r = c.execute("SELECT id FROM users WHERE bot=1").fetchone()
+    if r:
+        return r["id"]
+    name = "assistant"
+    while c.execute("SELECT 1 FROM users WHERE username=?", (name,)).fetchone():
+        name = "assistant." + secrets.token_hex(2)
+    return c.execute("INSERT INTO users (username, name, pw, disabled, bot, created) VALUES (?,?,?,?,?,?)",
+                     (name, "Assistant", "!", 1, 1, time.time())).lastrowid
+
+
+def _bot_conv(c, u) -> int:
+    key = f"bot:{u['id']}"
+    r = c.execute("SELECT id FROM convs WHERE key=?", (key,)).fetchone()
+    if r:
+        return r["id"]
+    b, now = bot_id(c), time.time()
+    cid = c.execute("INSERT INTO convs (kind, key, created, last_at) VALUES (?,?,?,?)", ("bot", key, now, now)).lastrowid
+    c.execute("INSERT INTO members (conv_id, user_id, last_read) VALUES (?,?,?)", (cid, u["id"], now - 1))
+    c.execute("INSERT INTO members (conv_id, user_id, last_read) VALUES (?,?,?)", (cid, b, now))
+    first = (u["name"] or u["username"]).split(" ")[0]
+    c.execute("INSERT INTO messages (conv_id, sender, kind, text, created, updated) VALUES (?,?,?,?,?,?)",
+              (cid, b, "text", f"Hi {first}! I'm your assistant 👋\n\nI can remind you of things (\"remind me to call Mum at 7pm\", "
+               "\"remind me to buy milk when I'm at the shop\"), keep notes and lists (\"add eggs to my shopping list\"), "
+               "and answer questions. Just write to me like you'd write to a friend.", now, now))
+    return cid
+
+
+def _tz(c, uid: int):
+    """The person's time zone, from the phone they used last (Jakarta if we don't know)."""
+    for (info,) in c.execute("SELECT info FROM sessions WHERE user_id=? AND info<>'' ORDER BY last_used DESC", (uid,)):
+        try:
+            name = json.loads(info).get("tz")
+            if name:
+                return ZoneInfo(name)
+        except Exception:
+            continue
+    try:
+        return ZoneInfo("Asia/Jakarta")
+    except Exception:
+        return timezone(timedelta(hours=7), "WIB")
+
+
+def _local(t: float, tz) -> str:
+    return datetime.fromtimestamp(t, tz).strftime("%a %d %b %Y %H:%M")
+
+
+def _next_due(due: float, repeat: str, tz) -> float:
+    d = datetime.fromtimestamp(due, tz)
+    while True:
+        if repeat == "daily":
+            d += timedelta(days=1)
+        elif repeat == "weekly":
+            d += timedelta(days=7)
+        elif repeat == "weekdays":
+            d += timedelta(days=1)
+            while d.weekday() >= 5:
+                d += timedelta(days=1)
+        elif repeat == "monthly":
+            y, m = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+            day = min(d.day, [31, 29 if y % 4 == 0 and (y % 100 or y % 400 == 0) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1])
+            d = d.replace(year=y, month=m, day=day)
+        else:
+            return 0
+        if d.timestamp() > time.time():
+            return d.timestamp()
+
+
+def _metres(a: tuple, b: tuple) -> float:
+    la1, lo1, la2, lo2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+    return 6371000 * 2 * math.asin(math.sqrt(h))
+
+
+def assistant_data(c, uid: int) -> dict:
+    tz = _tz(c, uid)
+    rem = [dict(r) | {"when": _local(r["due"], tz) if r["due"] else ""}
+           for r in c.execute("SELECT * FROM reminders WHERE user_id=? AND done=0 ORDER BY due=0, due, id", (uid,))]
+    notes = [dict(r) for r in c.execute("SELECT * FROM notes WHERE user_id=? ORDER BY list, done, id", (uid,))]
+    places = [dict(r) for r in c.execute("SELECT * FROM places WHERE user_id=? ORDER BY name", (uid,))]
+    return {"reminders": rem, "notes": notes, "places": places, "tz": str(tz)}
+
+
+TOOLS = [
+    {"type": "function", "function": {"name": "add_reminder", "description": "Remind the user of something at a time, and/or when they arrive at a saved place.",
+     "parameters": {"type": "object", "properties": {
+         "text": {"type": "string", "description": "What to remind them of, short, e.g. 'Call Mum'"},
+         "when": {"type": "string", "description": "Local date and time 'YYYY-MM-DD HH:MM'. Leave out for a place-only reminder."},
+         "place": {"type": "string", "description": "Name of a saved place (see Places), for 'when I get to ...' reminders"},
+         "repeat": {"type": "string", "enum": ["none", "daily", "weekly", "monthly", "weekdays"]}}, "required": ["text"]}}},
+    {"type": "function", "function": {"name": "cancel_reminder", "description": "Cancel a reminder by its id.",
+     "parameters": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}}},
+    {"type": "function", "function": {"name": "add_note", "description": "Save a note, or add an item to a named list (shopping, to-do, books...). One call per item.",
+     "parameters": {"type": "object", "properties": {"text": {"type": "string"},
+         "list": {"type": "string", "description": "List name in lower case, e.g. 'shopping'. Empty for a plain note."}}, "required": ["text"]}}},
+    {"type": "function", "function": {"name": "check_note", "description": "Tick (done=true) or untick a note or list item by id.",
+     "parameters": {"type": "object", "properties": {"id": {"type": "integer"}, "done": {"type": "boolean"}}, "required": ["id", "done"]}}},
+    {"type": "function", "function": {"name": "delete_note", "description": "Delete a note or list item by id.",
+     "parameters": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}}},
+    {"type": "function", "function": {"name": "save_place", "description": "Save where the user is right now under a name (e.g. 'home', 'office', 'the shop'), for place reminders.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+    {"type": "function", "function": {"name": "forget_place", "description": "Delete a saved place.",
+     "parameters": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}},
+]
+
+
+def run_tool(uid: int, name: str, a: dict) -> dict:
+    with closing(db()) as c:
+        tz, now = _tz(c, uid), time.time()
+        if name == "add_reminder":
+            text = str(a.get("text") or "").strip()[:300]
+            place = str(a.get("place") or "").strip().lower()[:60]
+            repeat = str(a.get("repeat") or "").replace("none", "")
+            if not text:
+                return {"error": "empty text"}
+            if repeat not in REPEATS:
+                repeat = ""
+            due = 0.0
+            if a.get("when"):
+                try:
+                    due = datetime.strptime(str(a["when"]).strip()[:16], "%Y-%m-%d %H:%M").replace(tzinfo=tz).timestamp()
+                except ValueError:
+                    return {"error": "when must look like 2026-10-18 19:00"}
+                if due < now - 60 and repeat:
+                    due = _next_due(due, repeat, tz)
+                elif due < now - 60:
+                    return {"error": "that time has already passed"}
+            if place and not c.execute("SELECT 1 FROM places WHERE user_id=? AND name=?", (uid, place)).fetchone():
+                return {"error": f"no saved place called '{place}'. Ask the user to go there, tap the paperclip, choose 'Share where I am', and tell you to save it."}
+            if not due and not place:
+                return {"error": "a reminder needs a time or a place"}
+            if c.execute("SELECT COUNT(*) FROM reminders WHERE user_id=? AND done=0", (uid,)).fetchone()[0] >= 200:
+                return {"error": "too many reminders (200); cancel some first"}
+            rid = c.execute("INSERT INTO reminders (user_id, text, due, place, repeat, created) VALUES (?,?,?,?,?,?)",
+                            (uid, text, due, place, repeat, now)).lastrowid
+            c.commit()
+            return {"ok": True, "id": rid, "when": _local(due, tz) if due else "", "place": place, "repeat": repeat or "none"}
+        if name == "cancel_reminder":
+            n = c.execute("UPDATE reminders SET done=1 WHERE id=? AND user_id=?", (int(a.get("id") or 0), uid)).rowcount
+            c.commit()
+            return {"ok": bool(n)} if n else {"error": "no such reminder"}
+        if name == "add_note":
+            text = str(a.get("text") or "").strip()[:500]
+            if not text:
+                return {"error": "empty note"}
+            if c.execute("SELECT COUNT(*) FROM notes WHERE user_id=?", (uid,)).fetchone()[0] >= 1000:
+                return {"error": "too many notes (1000); delete some first"}
+            nid = c.execute("INSERT INTO notes (user_id, list, text, created) VALUES (?,?,?,?)",
+                            (uid, str(a.get("list") or "").strip().lower()[:40], text, now)).lastrowid
+            c.commit()
+            return {"ok": True, "id": nid}
+        if name == "check_note":
+            n = c.execute("UPDATE notes SET done=? WHERE id=? AND user_id=?", (int(bool(a.get("done", True))), int(a.get("id") or 0), uid)).rowcount
+            c.commit()
+            return {"ok": True} if n else {"error": "no such note"}
+        if name == "delete_note":
+            n = c.execute("DELETE FROM notes WHERE id=? AND user_id=?", (int(a.get("id") or 0), uid)).rowcount
+            c.commit()
+            return {"ok": True} if n else {"error": "no such note"}
+        if name == "save_place":
+            pname = str(a.get("name") or "").strip().lower()[:60]
+            here = HERE.get(uid)
+            if not pname:
+                return {"error": "the place needs a name"}
+            if not here or now - here[2] > 900:
+                return {"error": "I don't know where the user is. Ask them to tap the paperclip and choose 'Share where I am' (while they're at that place)."}
+            c.execute("INSERT OR REPLACE INTO places (user_id, name, lat, lon, radius) VALUES (?,?,?,?,?)", (uid, pname, here[0], here[1], 150))
+            c.commit()
+            return {"ok": True, "name": pname}
+        if name == "forget_place":
+            n = c.execute("DELETE FROM places WHERE user_id=? AND name=?", (uid, str(a.get("name") or "").strip().lower())).rowcount
+            c.commit()
+            return {"ok": True} if n else {"error": "no such place"}
+    return {"error": "unknown tool"}
+
+
+def _prompt(c, u) -> str:
+    tz = _tz(c, u["id"])
+    d = assistant_data(c, u["id"])
+    rem = "\n".join(f"- #{r['id']} {r['text']}" + (f" at {r['when']}" if r["when"] else "") + (f" when at '{r['place']}'" if r["place"] else "")
+                    + (f" (repeats {r['repeat']})" if r["repeat"] else "") for r in d["reminders"]) or "(none)"
+    notes = "\n".join(f"- #{n['id']} [{n['list'] or 'note'}] {'[done] ' if n['done'] else ''}{n['text']}" for n in d["notes"]) or "(none)"
+    places = ", ".join(p["name"] for p in d["places"]) or "(none saved)"
+    here = HERE.get(u["id"])
+    return f"""You are the personal assistant inside A.F.R.A chat, a private messaging app. You are talking with {u['name'] or u['username']} (@{u['username']}).
+Now: {datetime.now(tz).strftime('%A %d %B %Y, %H:%M')} ({tz}).
+You can set reminders (by time, by place, or both), keep notes and lists, and answer questions. Use the tools to change reminders, notes and places: never pretend you saved something without calling a tool.
+Style: reply like a warm, capable friend texting. Short (usually 1-3 sentences), plain text, no markdown, no headings, no asterisks. Use simple English unless the user writes in another language, then reply in theirs. An emoji now and then is fine.
+When you set a reminder, confirm the exact day and time in words ("tomorrow, Sunday, at 7:00 pm"). If a time is vague ("tonight", "later"), pick a sensible time and say which. "In 10 minutes" means from now.
+Place reminders only work while A.F.R.A is open on their phone with location allowed; mention this once when you set the first one.
+To show a list, write each item on its own line starting with "• " (use "✓ " for done items).
+
+Reminders:
+{rem}
+
+Notes and lists:
+{notes}
+
+Saved places: {places}
+{"Their location was shared " + str(round((time.time() - here[2]) / 60)) + " min ago." if here else "Their current location is unknown."}"""
+
+
+def _history(c, cid: int, bot: int) -> list:
+    rows = c.execute("SELECT * FROM messages WHERE conv_id=? AND deleted=0 ORDER BY id DESC LIMIT 24", (cid,)).fetchall()[::-1]
+    out = []
+    for m in rows:
+        text = m["text"] or ""
+        if m["kind"] != "text":
+            text = {"image": "[sent a photo]", "video": "[sent a video]", "voice": "[sent a voice note]", "videonote": "[sent a video note]",
+                    "file": "[sent a file]", "sticker": "[sent a sticker]", "location": "[shared their location]"}.get(m["kind"], "") + (" " + text if text else "")
+        if text:
+            out.append({"role": "assistant" if m["sender"] == bot else "user", "content": text[:4000]})
+    return out
+
+
+async def think(uid: int, cid: int) -> str:
+    if not OPENROUTER_KEY:
+        return "I'm not switched on yet: the admin needs to add the OpenRouter key on the server."
+    with closing(db()) as c:
+        u = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        msgs = [{"role": "system", "content": _prompt(c, u)}] + _history(c, cid, bot_id(c))
+    async with httpx.AsyncClient(timeout=90) as h:
+        for _ in range(5):  # the model may use a few tools before it answers
+            r = await h.post("https://openrouter.ai/api/v1/chat/completions", json={
+                "model": ASSISTANT_MODEL, "messages": msgs, "tools": TOOLS, "temperature": 0.4, "max_tokens": 900},
+                headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "HTTP-Referer": "https://chat.farmansyah.cloud", "X-Title": "A.F.R.A chat"})
+            r.raise_for_status()
+            msg = r.json()["choices"][0]["message"]
+            calls = msg.get("tool_calls") or []
+            if not calls:
+                return re.sub(r"\*\*(.+?)\*\*", r"\1", (msg.get("content") or "").strip()) or "👍"
+            msgs.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
+            for call in calls:
+                try:
+                    args = json.loads(call["function"].get("arguments") or "{}")
+                except ValueError:
+                    args = {}
+                result = run_tool(uid, call["function"]["name"], args if isinstance(args, dict) else {})
+                msgs.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": json.dumps(result)})
+    return "Done 👍"
+
+
+async def bot_say(cid: int, uid: int, text: str):
+    with closing(db()) as c:
+        b, now = bot_id(c), time.time()
+        mid = c.execute("INSERT INTO messages (conv_id, sender, kind, text, created, updated) VALUES (?,?,?,?,?,?)",
+                        (cid, b, "text", text[:8000], now, now)).lastrowid
+        c.execute("UPDATE convs SET last_at=? WHERE id=?", (now, cid))
+        c.execute("UPDATE members SET last_read=? WHERE conv_id=? AND user_id=?", (now, cid, b))
+        c.commit()
+        m = msg_view(c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
+        bot = c.execute("SELECT * FROM users WHERE id=?", (b,)).fetchone()
+        muted = c.execute("SELECT 1 FROM members WHERE conv_id=? AND user_id=? AND muted>?", (cid, uid, now)).fetchone()
+        view = conv_view(c, cid, uid)
+    await send_to(uid, {"t": "msg", "msg": m})
+    await send_to(uid, {"t": "conv", "conv": view})  # e.g. whether it now needs to know where you are
+    if not muted:
+        asyncio.create_task(push_message(bot, m, [uid]))
+    return m
+
+
+async def assistant_turn(cid: int, uid: int, mid: int):
+    lock = BOT_LOCKS.setdefault(uid, asyncio.Lock())
+    async with lock:
+        await asyncio.sleep(0.8)  # several quick messages in a row get one answer
+        with closing(db()) as c:
+            b = bot_id(c)
+            latest = c.execute("SELECT MAX(id) FROM messages WHERE conv_id=? AND sender=?", (cid, uid)).fetchone()[0] or 0
+            if latest > mid:
+                return
+            now = time.time()
+            c.execute("UPDATE members SET last_read=? WHERE conv_id=? AND user_id=?", (now, cid, b))
+            c.commit()
+        await send_to(uid, {"t": "read", "conv": cid, "user": b, "at": now})
+
+        async def typing():
+            while True:
+                await send_to(uid, {"t": "typing", "conv": cid, "user": b})
+                await asyncio.sleep(4)
+        t = asyncio.create_task(typing())
+        try:
+            reply = await think(uid, cid)
+        except Exception as e:
+            print("assistant failed:", repr(e)[:300], flush=True)
+            reply = "Sorry, I couldn't think just now 😵‍💫 Try again in a moment."
+        finally:
+            t.cancel()
+        await bot_say(cid, uid, reply)
+
+
+async def fire_reminder(r):
+    with closing(db()) as c:
+        u = c.execute("SELECT * FROM users WHERE id=? AND disabled=0", (r["user_id"],)).fetchone()
+        if not u:
+            c.execute("UPDATE reminders SET done=1 WHERE id=?", (r["id"],))
+            c.commit()
+            return
+        tz, cid = _tz(c, u["id"]), _bot_conv(c, u)
+        nxt = _next_due(r["due"] or time.time(), r["repeat"], tz) if r["repeat"] else 0
+        if nxt:
+            c.execute("UPDATE reminders SET due=?, fired=? WHERE id=?", (nxt, time.time(), r["id"]))
+        else:
+            c.execute("UPDATE reminders SET done=1, fired=? WHERE id=?", (time.time(), r["id"]))
+        c.commit()
+    late = r["due"] and time.time() - r["due"] > 600
+    text = f"⏰ {r['text']}" + (f"\n(this was for {_local(r['due'], tz)})" if late else "") + (f"\n📍 You're at {r['place']}" if r["place"] else "")
+    if nxt:
+        text += f"\nNext time: {_local(nxt, tz)}"
+    await bot_say(cid, u["id"], text)
+
+
+async def _reminders():
+    while True:
+        try:
+            with closing(db()) as c:
+                due = c.execute("SELECT * FROM reminders WHERE done=0 AND place='' AND due>0 AND due<=?", (time.time(),)).fetchall()
+            for r in due:
+                await fire_reminder(r)
+        except Exception as e:
+            print("reminders failed:", repr(e)[:300], flush=True)
+        await asyncio.sleep(15)
+
+
+@app.get("/api/assistant")
+def assistant_get(authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        return assistant_data(c, u["id"])
+
+
+@app.delete("/api/assistant/reminders/{rid}")
+def assistant_cancel(rid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        c.execute("UPDATE reminders SET done=1 WHERE id=? AND user_id=?", (rid, u["id"]))
+        c.commit()
+    return {"ok": True}
+
+
+@app.patch("/api/assistant/notes/{nid}")
+def assistant_note(nid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        c.execute("UPDATE notes SET done=? WHERE id=? AND user_id=?", (int(bool(body.get("done"))), nid, u["id"]))
+        c.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/assistant/notes/{nid}")
+def assistant_note_del(nid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        c.execute("DELETE FROM notes WHERE id=? AND user_id=?", (nid, u["id"]))
+        c.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/assistant/places/{name}")
+def assistant_place_del(name: str, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        c.execute("DELETE FROM places WHERE user_id=? AND name=?", (u["id"], name.strip().lower()))
+        c.commit()
+    return {"ok": True}
+
+
+@app.post("/api/assistant/where")
+async def assistant_where(body: dict, authorization: str = Header(None)):
+    """The phone says where it is (only while the app is open): place reminders nearby go off."""
+    u = auth(authorization)
+    try:
+        lat, lon = float(body["lat"]), float(body["lon"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Needs lat and lon")
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("Bad location")
+    HERE[u["id"]] = (lat, lon, time.time())
+    with closing(db()) as c:
+        places = {p["name"]: p for p in c.execute("SELECT * FROM places WHERE user_id=?", (u["id"],))}
+        rows = c.execute("SELECT * FROM reminders WHERE user_id=? AND done=0 AND place<>'' AND due<=?", (u["id"], time.time())).fetchall()
+    fired = 0
+    for r in rows:
+        p = places.get(r["place"])
+        if p and _metres((lat, lon), (p["lat"], p["lon"])) <= p["radius"]:
+            await fire_reminder(r)
+            fired += 1
+    return {"ok": True, "fired": fired}
 
 
 # ---------------------------------------------------------------- files (photos, voice notes, documents, profile photos)
@@ -966,7 +1384,7 @@ def devices_of(c, uid: int) -> list:
 def admin_users(authorization: str = Header(None)):
     admin(authorization)
     with closing(db()) as c:
-        rows = c.execute("SELECT * FROM users ORDER BY created").fetchall()
+        rows = c.execute("SELECT * FROM users WHERE bot=0 ORDER BY created").fetchall()
         devs = {r["id"]: devices_of(c, r["id"]) for r in rows}
     return [{**public(r), "disabled": bool(r["disabled"]), "created": r["created"], "devices": len(devs[r["id"]]),
              "device_list": devs[r["id"]]} for r in rows]
@@ -1037,6 +1455,8 @@ async def admin_delete(uid: int, authorization: str = Header(None)):
                 (FILES / fid).unlink(missing_ok=True)
         c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         c.execute("DELETE FROM pushes WHERE user_id=?", (uid,))
+        for _t in ("reminders", "notes", "places", "stars"):
+            c.execute(f"DELETE FROM {_t} WHERE user_id=?", (uid,))
         c.execute("DELETE FROM invites WHERE used_by IS NULL AND (created_by=? OR (kind='reset' AND note=?))", (uid, str(uid)))
         c.execute("DELETE FROM users WHERE id=?", (uid,))
         c.commit()
@@ -1092,7 +1512,7 @@ def admin_stats(authorization: str = Header(None)):
     admin(authorization)
     with closing(db()) as c:
         n = lambda q: c.execute(q).fetchone()[0]
-        stats = {"users": n("SELECT COUNT(*) FROM users"), "online": len(SOCKETS), "chats": n("SELECT COUNT(*) FROM convs WHERE kind='direct'"),
+        stats = {"users": n("SELECT COUNT(*) FROM users WHERE bot=0"), "online": len(SOCKETS), "chats": n("SELECT COUNT(*) FROM convs WHERE kind='direct'"),
                  "messages": n("SELECT COUNT(*) FROM messages WHERE deleted=0"), "today": c.execute("SELECT COUNT(*) FROM messages WHERE created>?", (time.time() - 86400,)).fetchone()[0],
                  "files": n("SELECT COUNT(*) FROM files"), "files_mb": round((n("SELECT COALESCE(SUM(size),0) FROM files")) / 1048576, 1),
                  "push_devices": n("SELECT COUNT(*) FROM pushes"), "invites_open": n("SELECT COUNT(*) FROM invites WHERE kind='invite' AND used_by IS NULL")}
@@ -1205,6 +1625,9 @@ def _chat_label(c, cv, users) -> str:
     if cv["kind"] == "self":
         u = users.get(ids[0]) if ids else None
         return f"Notes to self - @{u['username'] if u else '?'}"
+    if cv["kind"] == "bot":
+        u = next((users[i] for i in ids if i in users and not users[i]["bot"]), None)
+        return f"Assistant - @{u['username'] if u else '?'}"
     return " & ".join("@" + (users[i]["username"] if i in users else "?") for i in ids)
 
 
@@ -1323,8 +1746,10 @@ def export_person(uid: int, t: str = "", authorization: str = Header(None)):
             done = set()
             for cv in c.execute("SELECT v.* FROM convs v JOIN members m ON m.conv_id=v.id WHERE m.user_id=? ORDER BY v.kind DESC, v.last_at DESC", (uid,)).fetchall():
                 _chat_bundle(c, cv, users, z, f"{_safe(_chat_label(c, cv, users))}/", done)
+            z.writestr("assistant.json", json.dumps(_assistant_export(c, uid), ensure_ascii=False, indent=1))
             z.writestr("README.txt", f"A.F.R.A chat: everything about @{u['username']} ({u['name']}).\n"
-                       "profile.json - the account (no password). Each folder is one chat (\"Notes to self\" = their private notes):\n"
+                       "profile.json - the account (no password). assistant.json - their reminders, notes, lists and saved places.\n"
+                       "Each folder is one chat (\"Notes to self\" = their private notes, \"Assistant\" = their chat with the assistant):\n"
                        "  transcript.html - open in a browser (photos shown)\n  transcript.txt - plain text\n  chat.json - all details\n  files/ - photos, voice notes, files\n")
         return _zip_response(build, f"person - @{u['username']} - {time.strftime('%Y%m%d')}.zip")
 
@@ -1341,6 +1766,35 @@ def export_notes(t: str = "", authorization: str = Header(None)):
             for cv in c.execute("SELECT * FROM convs WHERE kind='self' ORDER BY id").fetchall():
                 _chat_bundle(c, cv, users, z, f"{_safe(_chat_label(c, cv, users))}/", done)
         return _zip_response(build, f"notes to self - everyone - {time.strftime('%Y%m%d')}.zip")
+
+
+def _assistant_export(c, uid: int) -> dict:
+    tz = _tz(c, uid)
+    t = lambda x: _local(x, tz) if x else ""
+    return {"reminders": [{**dict(r), "due": t(r["due"]), "created": t(r["created"]), "fired": t(r["fired"]), "done": bool(r["done"])}
+                          for r in c.execute("SELECT * FROM reminders WHERE user_id=? ORDER BY id", (uid,))],
+            "notes": [{**dict(r), "created": t(r["created"]), "done": bool(r["done"])} for r in c.execute("SELECT * FROM notes WHERE user_id=? ORDER BY list, id", (uid,))],
+            "places": [dict(r) for r in c.execute("SELECT * FROM places WHERE user_id=? ORDER BY name", (uid,))], "time_zone": str(tz)}
+
+
+@app.get("/api/admin/export/assistant")
+def export_assistant(t: str = "", authorization: str = Header(None)):
+    """Everyone's Assistant: the chat with it plus their reminders, notes, lists and places, one folder per person."""
+    admin_q(t, authorization)
+    with closing(db()) as c:
+        users = _names(c)
+
+        def build(z):
+            done = set()
+            for cv in c.execute("SELECT * FROM convs WHERE kind='bot' ORDER BY id").fetchall():
+                folder = f"{_safe(_chat_label(c, cv, users))}/"
+                _chat_bundle(c, cv, users, z, folder, done)
+                uid = int(cv["key"].split(":")[1])
+                z.writestr(folder + "assistant.json", json.dumps(_assistant_export(c, uid), ensure_ascii=False, indent=1))
+            z.writestr("README.txt", "A.F.R.A chat: everyone's Assistant. One folder per person:\n"
+                       "  transcript.html / transcript.txt / chat.json - their chat with the assistant\n"
+                       "  assistant.json - their reminders, notes and lists, and saved places\n")
+        return _zip_response(build, f"assistant - everyone - {time.strftime('%Y%m%d')}.zip")
 
 
 @app.get("/api/admin/export/everything")
@@ -1432,8 +1886,9 @@ async def _housekeeping():
 @app.on_event("startup")
 async def _start():
     asyncio.create_task(_housekeeping())
+    asyncio.create_task(_reminders())
     with closing(db()) as c:
-        if not c.execute("SELECT 1 FROM users").fetchone():
+        if not c.execute("SELECT 1 FROM users WHERE bot=0").fetchone():
             open_ = c.execute("SELECT code FROM invites WHERE admin=1 AND used_by IS NULL AND kind='invite'").fetchone()
             code = open_["code"] if open_ else make_code(c, "invite", 1, None, "first admin")
             c.commit()

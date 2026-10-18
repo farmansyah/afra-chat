@@ -91,12 +91,13 @@
   const COLORS = ["#e5484d", "#f76b15", "#ffb224", "#30a46c", "#12a594", "#0090ff", "#3e63dd", "#8e4ec6", "#d6409f", "#978365"];
   const conv = (id) => S.convs.find((c) => c.id === id);
   const other = (c) => (c && c.members && c.members[0]) || null;
-  const title = (c) => !c ? "" : c.kind === "self" ? "Notes to self" : (other(c) ? other(c).name || "@" + other(c).username : "Chat");
+  const title = (c) => !c ? "" : c.kind === "self" ? "Notes to self" : c.kind === "bot" ? "Assistant" : (other(c) ? other(c).name || "@" + other(c).username : "Chat");
   const userById = (id) => id === S.me.id ? S.me : S.convs.flatMap((c) => c.members).find((u) => u.id === id);
 
   function avatar(u, cls = "", self = false) {
     if (self) return `<div class="av ${cls}" style="background:var(--field)">📝</div>`;
     if (!u) return `<div class="av ${cls}">?</div>`;
+    if (u.bot) return `<div class="av bot ${cls}">✨</div>`;
     const ini = (u.name || u.username || "?").trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
     const col = COLORS[(u.id || 0) % COLORS.length];
     return `<div class="av ${cls}" style="background:${col}">${u.avatar ? `<img src="${fileUrl(u.avatar)}" alt="">` : esc(ini)}</div>`;
@@ -286,9 +287,9 @@
     const items = S.convs.filter((c) => !S.filter || title(c).toLowerCase().includes(S.filter) || (other(c) && other(c).username.includes(S.filter)));
     el.innerHTML = items.map((c) => {
       const u = other(c), typing = (S.typing[c.id] || 0) > t;
-      const last = c.last ? (c.last.sender === S.me.id && c.kind !== "self" ? "You: " : "") + preview(c.last) : c.kind === "self" ? "Keep notes, links and photos for yourself" : "Say hi 👋";
+      const last = c.last ? (c.last.sender === S.me.id && c.kind !== "self" ? "You: " : "") + preview(c.last) : c.kind === "self" ? "Keep notes, links and photos for yourself" : c.kind === "bot" ? "Reminders, notes, lists, questions" : "Say hi 👋";
       return `<div class="conv ${S.cur === c.id ? "on" : ""}" data-c="${c.id}">
-        <div class="av-wrap ${u && u.online ? "on" : ""}">${avatar(u, "", c.kind === "self")}</div>
+        <div class="av-wrap ${u && u.online && !u.bot ? "on" : ""}">${avatar(u, "", c.kind === "self")}</div>
         <div class="mid"><div class="row1"><b>${esc(title(c))}</b><small>${c.last ? shortTime(c.last.created) : ""}</small></div>
           <div class="row2"><span class="${typing ? "typing" : ""}">${typing ? "typing…" : esc(last)}</span>${isMuted(c) ? `<i class="muted">🔕</i>` : ""}${c.unread ? `<span class="badge ${isMuted(c) ? "quiet" : ""}">${c.unread}</span>` : ""}</div></div></div>`;
     }).join("") || `<div class="empty">No chats yet.<br><small>Tap 💬 at the bottom right to start one.</small></div>`;
@@ -341,7 +342,7 @@
       $("#quick").classList.toggle("hide", typed);
     };
     let lastTyping = 0;
-    txt.oninput = () => { grow(); if (txt.value && now() - lastTyping > 3 && c.kind !== "self") { lastTyping = now(); api(`/api/convs/${c.id}/typing`, { body: {} }).catch(() => { }); } };
+    txt.oninput = () => { grow(); if (txt.value && now() - lastTyping > 3 && c.kind !== "self" && c.kind !== "bot") { lastTyping = now(); api(`/api/convs/${c.id}/typing`, { body: {} }).catch(() => { }); } };
     txt.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); sendText(); } if (e.key === "Escape") { S.reply = S.edit = null; drawReply(); } };
     $("#bsend").onclick = () => (txt.value.trim() || S.edit) ? sendText() : toggleVoice();
     $("#battach").onclick = attachMenu;
@@ -354,6 +355,13 @@
 
   async function drawQuick() {  // one tap sends: a heart, a hug, a few love notes (new ones each time), surprise
     const el = $("#quick"); if (!el) return;
+    if ((conv(S.cur) || {}).kind === "bot") {
+      const ex = [["⏰ Remind me", "Remind me in 10 minutes to stretch"], ["🛒 Shopping list", "Add milk to my shopping list"],
+        ["📋 My lists", "What's on my lists?"], ["📅 My reminders", "What are my reminders?"]];
+      el.innerHTML = ex.map(([l], i) => `<button data-x="${i}">${esc(l)}</button>`).join("");
+      $$("[data-x]", el).forEach((b) => b.onclick = () => { b.classList.add("sent"); setTimeout(() => b.classList.remove("sent"), 400); send({ text: ex[+b.dataset.x][1] }); });
+      return;
+    }
     const tpl = await loadTemplates(), all = tplPool(tpl.categories || []).filter(([, t]) => t.length <= 46);
     const picks = [];
     while (picks.length < 4 && all.length) picks.push(all.splice(pickWeighted(all), 1)[0][1]);
@@ -370,10 +378,10 @@
   function drawHeader() {
     const c = conv(S.cur); if (!c || !$("#chatName")) return;
     const u = other(c), typing = (S.typing[c.id] || 0) > now();
-    $("#chatAv").innerHTML = `<div class="av-wrap ${u && u.online ? "on" : ""}">${avatar(u, "sm", c.kind === "self")}</div>`;
+    $("#chatAv").innerHTML = `<div class="av-wrap ${u && u.online && !u.bot ? "on" : ""}">${avatar(u, "sm", c.kind === "self")}</div>`;
     $("#chatName").textContent = title(c);
     const st = $("#chatStat");
-    st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : [lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
+    st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : c.kind === "bot" ? "personal assistant" : [lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
     st.className = typing || (u && u.online) ? "live" : "";
     const tl = $("#typing");
     if (typing && !tl.firstChild) { tl.innerHTML = `<div class="typing-bub" title="${esc(title(c))} is typing"><i></i><i></i><i></i></div>`; scrollEnd(); }
@@ -414,21 +422,21 @@
       const day = dayLabel(m.created);
       if (day !== lastDay) { html += `<div class="day">${day}</div>`; lastDay = day; }
       const mine = m.sender === S.me.id;
-      const rx = Object.entries(m.reactions || {});
       const read = c.kind !== "self" && (c.other_read || 0) >= m.created;
       const ticks = mine && !m.deleted && c.kind !== "self" ? `<span class="ticks ${read ? "read" : ""}">${m.pending ? "🕓" : read ? "✓✓" : "✓"}</span>` : (m.pending ? "🕓" : "");
       const key = m.client_id || m.id; fresh.add(key);
       const pop = seen && !seen.has(key) ? "pop" : "";
       html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
         <div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
-        ${rx.length ? `<div class="reacts">${rx.map(([uid, e]) => `<span title="${esc((userById(+uid) || {}).name || "")}">${esc(e)}</span>`).join("")}</div>` : ""}
+        ${rxPill(m)}
         <div class="meta">${S.stars.has(m.id) ? "⭐ " : ""}${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
     }
-    log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
+    log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : c.kind === "bot" ? "Ask me anything, or tell me what to remember ✨" : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     bindVideoNotes(log);
+    $$("[data-rxs]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); navigator.vibrate && navigator.vibrate(5); rxSheet(+b.dataset.rxs); });
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
       e.stopPropagation(); const t = $(`.msg[data-id="${q.dataset.goto}"]`); if (!t) return;
       t.scrollIntoView({ behavior: "smooth", block: "center" }); t.classList.add("flash"); setTimeout(() => t.classList.remove("flash"), 1400);
@@ -450,6 +458,7 @@
     let timer = null, lastTap = 0, x0 = 0, y0 = 0, dx = 0;
     const id = +el.dataset.id; if (!id) return;
     el.addEventListener("touchstart", (e) => {
+      if (e.target.closest(".reacts")) return;
       x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; el.style.transition = "none";
       timer = setTimeout(() => { timer = null; navigator.vibrate && navigator.vibrate(10); msgMenu(id); }, 450);
     }, { passive: true });
@@ -466,16 +475,11 @@
     });
     el.addEventListener("contextmenu", (e) => { e.preventDefault(); msgMenu(id); });
     el.addEventListener("click", (e) => {
-      if (e.target.closest("a,audio,img,video,.quote,[data-vn],[data-v]")) return;
+      if (e.target.closest("a,audio,img,video,.quote,.reacts,[data-vn],[data-v]")) return;
       const t = Date.now(); if (t - lastTap < 320) { bigHeart(e.clientX, e.clientY); if ((findMsg(id) || {}).reactions?.[S.me.id] !== "❤️") react(id, "❤️"); lastTap = 0; } else lastTap = t;
     });
   }
   const findMsg = (id) => (S.msgs[S.cur] || []).find((m) => m.id === id);
-  const react = (id, e) => {
-    const m = findMsg(id), removing = m && (m.reactions || {})[S.me.id] === e;
-    if (!removing) burstAt($(`.msg[data-id="${id}"] .bub`), e);
-    return api(`/api/messages/${id}/react`, { body: { emoji: e } }).then(upsert).then(drawChat).catch((x) => toast(x.message));
-  };
 
   // ------------------------------------------------------------------ chat themes: background and bubbles (for both of you, or just for me)
   const BUBBLES = [  // id, name, my bubble, my text, (their bubble, their text)
@@ -678,10 +682,12 @@
       <label><i style="background:#ff3b5c">📸</i>Camera<input type="file" id="aCam" accept="image/*,video/*" capture="environment" hidden></label>
       <button id="aNote"><i style="background:#ff9500">⭕</i>Video note</button>
       <label><i style="background:#0a84ff">📄</i>Document<input type="file" id="aDoc" multiple hidden></label>
+      ${(conv(S.cur) || {}).kind === "bot" ? `<button id="aWhere"><i style="background:#34c759">📍</i>Share where I am</button>` : ""}
     </div>`);
     const take = (e, doc) => { const fs = [...e.target.files]; e.target.value = ""; s.remove(); if (!fs.length) return; doc ? fs.forEach((f) => sendFile(f, "file")) : mediaPreview(fs); };
     $("#aMedia", s).onchange = (e) => take(e); $("#aCam", s).onchange = (e) => take(e); $("#aDoc", s).onchange = (e) => take(e, true);
     $("#aNote", s).onclick = () => { s.remove(); recordVideoNote(); };
+    if ($("#aWhere", s)) $("#aWhere", s).onclick = () => { s.remove(); shareWhere(); };
   }
   function mediaPreview(files) {  // look before sending, with a caption (like WhatsApp)
     files = files.filter((f) => /^(image|video)\//.test(f.type)).slice(0, 10);
@@ -864,6 +870,7 @@
   // ------------------------------------------------------------------ contact info: photo, about, media, links, docs, starred
   function infoPage() {
     const c = conv(S.cur); if (!c) return;
+    if (c.kind === "bot") return assistantInfo(c);
     const u = other(c), self = c.kind === "self";
     const page = document.createElement("div"); page.className = "page info";
     const close = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
@@ -916,6 +923,126 @@
     show("media");
   }
 
+  // ------------------------------------------------------------------ the Assistant: its page (reminders, lists, places) and where you are
+  function assistantInfo(c) {
+    const page = document.createElement("div"); page.className = "page info";
+    const close = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    page.innerHTML = `<div class="top"><button class="icon" id="iBack">‹</button><h1>Assistant</h1></div>
+      <div class="page-body">
+        <div class="ihead">${avatar(other(c), "xl")}<div class="iname">Assistant</div><div class="isub">Your personal assistant · only you can see this chat</div></div>
+        <div class="iacts"><button data-i="search"><i>🔍</i>Search</button><button data-i="theme"><i>🎨</i>Theme</button>
+          <button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button></div>
+        <div class="chips tabs itabs"><button data-t="rem" class="on">⏰ Reminders</button><button data-t="notes">📝 Lists &amp; notes</button><button data-t="places">📍 Places</button></div>
+        <div id="ibody"></div>
+      </div>`;
+    document.body.appendChild(page);
+    $("#iBack", page).onclick = close;
+    $$("[data-i]", page).forEach((b) => b.onclick = () => {
+      const a = b.dataset.i;
+      if (a === "search") { close(); $("#sbar").hidden = false; $("#sq").focus(); }
+      if (a === "theme") { close(); themeSheet(); }
+      if (a === "mute") muteSheet(conv(c.id), () => { page.remove(); assistantInfo(conv(c.id)); });
+    });
+    const body = $("#ibody", page);
+    let tab = "rem";
+    const show = async (t) => {
+      tab = t; $$(".itabs button", page).forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+      let d; try { d = await api("/api/assistant"); } catch (x) { body.innerHTML = `<div class="empty">${esc(x.message)}</div>`; return; }
+      if (tab !== t) return;
+      if (t === "rem") {
+        body.innerHTML = d.reminders.map((r) => `<div class="lrow arow" data-r="${r.id}"><i>${r.place && !r.due ? "📍" : "⏰"}</i><span><b>${esc(r.text)}</b>
+            <small>${esc([r.when, r.place ? "at " + r.place : "", r.repeat ? "repeats " + r.repeat : ""].filter(Boolean).join(" · "))}</small></span>
+            <button class="ax" data-cancel="${r.id}" title="Cancel">✕</button></div>`).join("")
+          || `<div class="empty">No reminders.<br><small>Ask: “remind me to drink water at 3pm”</small></div>`;
+      } else if (t === "notes") {
+        const lists = {}; d.notes.forEach((n) => (lists[n.list] = lists[n.list] || []).push(n));
+        body.innerHTML = Object.entries(lists).map(([name, items]) => `<h4 class="alist">${esc(name ? name[0].toUpperCase() + name.slice(1) : "Notes")}<small>${items.filter((n) => !n.done).length} left</small></h4>
+            ${items.map((n) => `<div class="lrow arow ${n.done ? "done" : ""}" data-n="${n.id}"><button class="acheck" data-check="${n.id}" title="${n.done ? "Untick" : "Tick"}">${n.done ? "✓" : ""}</button>
+              <span><b>${esc(n.text)}</b></span><button class="ax" data-del="${n.id}" title="Delete">✕</button></div>`).join("")}`).join("")
+          || `<div class="empty">No notes or lists yet.<br><small>Ask: “add eggs to my shopping list”</small></div>`;
+      } else {
+        body.innerHTML = d.places.map((p) => `<div class="lrow arow"><i>📍</i><span><b>${esc(p.name)}</b><small>within ${Math.round(p.radius)} m</small></span>
+            <button class="ax" data-forget="${esc(p.name)}" title="Forget">✕</button></div>`).join("")
+          || `<div class="empty">No saved places.<br><small>At home, tap 📎 → Share where I am, then say “save this place as home”.</small></div>`;
+      }
+      const gone = (row, fn) => { row.classList.add("gone"); setTimeout(fn, 220); };
+      $$("[data-cancel]", body).forEach((b) => b.onclick = () => gone(b.closest(".arow"), () => api(`/api/assistant/reminders/${b.dataset.cancel}`, { method: "DELETE" }).then(() => show(tab)).catch((x) => toast(x.message))));
+      $$("[data-del]", body).forEach((b) => b.onclick = () => gone(b.closest(".arow"), () => api(`/api/assistant/notes/${b.dataset.del}`, { method: "DELETE" }).then(() => show(tab)).catch((x) => toast(x.message))));
+      $$("[data-forget]", body).forEach((b) => b.onclick = () => gone(b.closest(".arow"), () => api(`/api/assistant/places/${encodeURIComponent(b.dataset.forget)}`, { method: "DELETE" }).then(() => show(tab)).catch((x) => toast(x.message))));
+      $$("[data-check]", body).forEach((b) => b.onclick = () => {
+        const row = b.closest(".arow"), done = !row.classList.contains("done");
+        row.classList.toggle("done", done); b.textContent = done ? "✓" : ""; if (done) { navigator.vibrate && navigator.vibrate(8); burstAt(b, "✨", 4); }
+        api(`/api/assistant/notes/${b.dataset.check}`, { method: "PATCH", body: { done } }).then(() => setTimeout(() => show(tab), 400)).catch((x) => toast(x.message));
+      });
+    };
+    $$(".itabs button", page).forEach((b) => b.onclick = () => show(b.dataset.t));
+    show("rem");
+  }
+  function shareWhere() {  // the Assistant needs this to save a place ("save this place as home")
+    if (!navigator.geolocation) return toast("This device can't share its location");
+    toast("Finding where you are…");
+    navigator.geolocation.getCurrentPosition(async (p) => {
+      const lat = p.coords.latitude, lon = p.coords.longitude;
+      try { await api("/api/assistant/where", { body: { lat, lon } }); } catch (x) { return toast(x.message); }
+      send({ kind: "location", text: "📍 Here's where I am", attachment: { lat, lon, acc: Math.round(p.coords.accuracy || 0) } });
+    }, (e) => toast(e.code === 1 ? "Location is blocked. Allow it for this site in your browser settings." : "Couldn't find where you are"),
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 });
+  }
+  let whereAt = 0;
+  async function autoWhere() {  // place reminders: while the app is open, tell the Assistant where you are (only if it's waiting for a place)
+    if (!isVisible() || now() - whereAt < 120 || !navigator.geolocation || !navigator.permissions || !S.convs.some((c) => c.kind === "bot" && c.wants_loc)) return;
+    try { if ((await navigator.permissions.query({ name: "geolocation" })).state !== "granted") return; } catch { return; }
+    whereAt = now();
+    navigator.geolocation.getCurrentPosition((p) => api("/api/assistant/where", { body: { lat: p.coords.latitude, lon: p.coords.longitude } }).catch(() => { }), () => { }, { maximumAge: 60000, timeout: 20000 });
+  }
+  setInterval(autoWhere, 60000);
+
+  // ------------------------------------------------------------------ reactions, like WhatsApp: tap the little pill to see who reacted; tap yours to take it back
+  const rxSig = {}, rxAt = {}, rxOut = {};  // message id -> its reactions last time we drew it, when they changed (so only a change pops), a pill shrinking away
+  function rxPill(m) {
+    const o = rxOut[m.id], gone = o ? Date.now() - o.at : 1e9;
+    if (gone < 200) return (rxSig[m.id] = Object.entries(m.reactions || {}).map(([u, e]) => u + e).sort().join()), o.html.replace(/^<button /, `<button style="--rxd:-${gone}ms" `);  // a redraw mid-shrink carries on shrinking
+    const rx = Object.entries(m.reactions || {}), sig = rx.map(([u, e]) => u + e).sort().join();
+    if (m.id && rxSig[m.id] !== undefined && rxSig[m.id] !== sig) rxAt[m.id] = Date.now();
+    if (m.id) rxSig[m.id] = sig;
+    if (!rx.length || m.deleted) return "";
+    const emos = [...new Set(rx.map(([, e]) => e))].slice(0, 3), age = Date.now() - (rxAt[m.id] || 0), pop = age < 500;  // a redraw mid-pop carries on where it was
+    return `<button class="reacts ${pop ? "pop" : ""} ${(m.reactions || {})[S.me.id] ? "mine" : ""}" data-rxs="${m.id}"${pop ? ` style="--rxd:-${age}ms"` : ""}>${emos.map((e) => `<span>${esc(e)}</span>`).join("")}${rx.length > 1 ? `<b>${rx.length}</b>` : ""}</button>`;
+  }
+  function rxSheet(id) {
+    const m = findMsg(id); if (!m) return;
+    const rx = Object.entries(m.reactions || {}).map(([u, e]) => [+u, e]).sort((a, b) => (b[0] === S.me.id) - (a[0] === S.me.id));
+    const counts = {}; rx.forEach(([, e]) => { counts[e] = (counts[e] || 0) + 1; });
+    const s = sheet(`<div class="rxs"><div class="rxs-tabs"><button class="on" data-f="">All <small>${rx.length}</small></button>${Object.entries(counts).map(([e, n]) => `<button data-f="${esc(e)}">${esc(e)} <small>${n}</small></button>`).join("")}</div>
+      <div class="rxs-list">${rx.map(([uid, e], i) => {
+        const me = uid === S.me.id, u = me ? S.me : userById(uid) || {};
+        return `<button class="rxs-row ${me ? "me" : ""}" data-e="${esc(e)}" style="animation-delay:${i * 40}ms" ${me ? "data-rm" : ""}>${avatar(u, "sm")}<span><b>${me ? "You" : esc(u.name || "@" + (u.username || ""))}</b>${me ? "<small>Tap to remove</small>" : ""}</span><i>${esc(e)}</i></button>`;
+      }).join("")}</div></div>`);
+    const shut = () => { s.classList.add("closing"); setTimeout(() => s.remove(), 180); };
+    $$("[data-f]", s).forEach((b) => b.onclick = () => {
+      $$("[data-f]", s).forEach((x) => x.classList.toggle("on", x === b));
+      $$(".rxs-row", s).forEach((r) => { r.hidden = !!b.dataset.f && r.dataset.e !== b.dataset.f; });
+    });
+    const mine = $("[data-rm]", s);
+    if (mine) mine.onclick = () => { mine.classList.add("gone"); setTimeout(() => { shut(); react(id, (m.reactions || {})[S.me.id]); }, 160); };
+  }
+  const react = (id, e) => {  // add, change or take back my reaction: shows at once, the server catches up
+    const m = findMsg(id); if (!m || !e) return;
+    const before = { ...(m.reactions || {}) }, removing = before[S.me.id] === e, after = { ...before };
+    if (removing) delete after[S.me.id]; else after[S.me.id] = e;
+    const pill = $(`.msg[data-id="${id}"] .reacts`), apply = () => { const x = findMsg(id); if (x) { x.reactions = after; drawChat(); } };
+    if (removing) {
+      navigator.vibrate && navigator.vibrate(6);
+      const left = Object.values(after), span = pill && [...pill.querySelectorAll("span")].find((x) => x.textContent === e);
+      if (pill && !left.length) pill.classList.add("out");
+      else if (span && !left.includes(e)) span.classList.add("out");
+      if (pill) { pill.classList.remove("pop"); pill.removeAttribute("style"); rxOut[id] = { at: Date.now(), html: pill.outerHTML }; }
+      setTimeout(apply, pill ? 200 : 0);
+    } else { burstAt($(`.msg[data-id="${id}"] .bub`), e); apply(); }
+    return api(`/api/messages/${id}/react`, { body: { emoji: e } }).then((saved) => { const same = JSON.stringify(saved.reactions || {}) === JSON.stringify(after); upsert(saved); if (!same) drawChat(); })
+      .catch((x) => { const y = findMsg(id); if (y) { y.reactions = before; drawChat(); } toast(x.message); });
+  };
+
   function sheet(html) {
     const bg = document.createElement("div"); bg.className = "sheet-bg";
     bg.innerHTML = `<div class="sheet"><div class="grab"></div>${html}</div>`;
@@ -926,7 +1053,7 @@
   function msgMenu(id) {
     const m = findMsg(id); if (!m || m.deleted) return;
     const mine = m.sender === S.me.id, myRx = (m.reactions || {})[S.me.id];
-    const s = sheet(`<div class="menu"><div class="rx">${REACTIONS.map((r) => `<button data-rx="${r}" class="${myRx === r ? "on" : ""}">${r}</button>`).join("")}</div>
+    const s = sheet(`<div class="menu"><div class="rx">${REACTIONS.map((r, i) => `<button data-rx="${r}" class="${myRx === r ? "on" : ""}" style="animation-delay:${i * 30}ms" title="${myRx === r ? "Remove" : ""}">${r}</button>`).join("")}</div>
       <button data-a="reply">↩️ Reply</button><button data-a="star">${S.stars.has(id) ? "☆ Unstar" : "⭐ Star"}</button>${m.text ? `<button data-a="copy">📋 Copy</button>` : ""}
       ${mine && m.text && (!m.attachment || m.kind === "image" || m.kind === "video") ? `<button data-a="edit">✏️ Edit</button>` : ""}${mine ? `<button data-a="delete" class="danger">🗑 Delete for everyone</button>` : ""}</div>`);
     $$("[data-rx]", s).forEach((b) => b.onclick = () => { s.remove(); react(id, b.dataset.rx); });
@@ -1135,6 +1262,7 @@
             <div class="dl pick"><span>💬</span><span style="flex:1"><b>One chat (.zip)</b><small>Any chat or someone's Notes to self, as a transcript (.html to read, .txt) plus its files.</small>
               <span class="row" style="margin-top:6px"><select id="dlChat" class="inp" style="flex:1;padding:8px"></select><a class="sbtn" id="dlChatGo" download>Download</a></span></span></div>
             <a class="dl" href="${dl("/api/admin/export/notes")}" download><span>📝</span><span><b>Everyone's Notes to self (.zip)</b><small>One folder per person, with transcripts and files.</small></span></a>
+            <a class="dl" href="${dl("/api/admin/export/assistant")}" download><span>🤖</span><span><b>Everyone's Assistant (.zip)</b><small>Each person's chat with the assistant plus their reminders, notes, lists and saved places.</small></span></a>
             <a class="dl" href="${dl("/api/admin/export/users.csv")}" download><span>👥</span><span><b>People (spreadsheet)</b><small>Everyone with username, name, joined, last seen, messages sent. Opens in Excel, Numbers or Google Sheets. No passwords.</small></span></a>
             <a class="dl" href="${dl("/api/admin/export/chats.json")}" download><span>💬</span><span><b>All chats (JSON)</b><small>Every person, chat and message, readable. No passwords.</small></span></a>
             <div class="dl pick"><span>🗄</span><span style="flex:1"><b>Complete database (${st.db_mb} MB)</b><small>Every table and row. <b>.db</b> opens with “DB Browser for SQLite” (for a full copy or a move); <b>.json</b> is the same data as readable JSON. Passwords stay scrambled (hashed).</small>
@@ -1341,6 +1469,7 @@
   document.addEventListener("visibilitychange", () => {
     sendVis();
     if (isVisible() && TOKEN && S.me) {
+      autoWhere();
       if (!WS || WS.readyState > 1) connect(); else resync();
       if (S.cur && conv(S.cur) && conv(S.cur).unread) markRead(S.cur);
     }

@@ -75,7 +75,6 @@ button:active { transform: scale(.94); }
 .msg { touch-action: pan-y; }
 .msg::before { content: "↩️"; position: absolute; left: -34px; top: 50%; transform: translateY(-50%) scale(.4); opacity: 0; transition: .15s; font-size: 18px; }
 .msg.swipe-ready::before { opacity: 1; transform: translateY(-50%) scale(1); }
-.reacts span { animation: badgePop .35s var(--spring); }
 .burst { position: fixed; pointer-events: none; z-index: 50; font-size: 26px; animation: burst 1s var(--ease) forwards; }
 @keyframes burst { 0% { transform: translate(0, 0) scale(.4); opacity: 0; } 15% { opacity: 1; } 100% { transform: translate(var(--dx), var(--dy)) scale(1.3) rotate(var(--rot)); opacity: 0; } }
 .bigheart { position: fixed; pointer-events: none; z-index: 50; font-size: 72px; animation: bigheart .8s var(--spring) forwards; }
