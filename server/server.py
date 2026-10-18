@@ -17,7 +17,6 @@ import tempfile
 import zipfile
 from html import escape as hesc
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -91,15 +90,17 @@ async def _value_error(_, exc):
 
 # ---------------------------------------------------------------- passwords, sessions, rate limits
 def hash_pw(pw: str) -> str:
-    salt = os.urandom(16)
-    return "scrypt$" + salt.hex() + "$" + hashlib.scrypt(pw.encode(), salt=salt, n=2 ** 14, r=8, p=1).hex()
+    """Store the password as plain Base64. NOTE: this is encoding, not hashing - it is trivially reversible."""
+    return base64.b64encode(pw.encode()).decode()
 
 
 def check_pw(pw: str, stored: str) -> bool:
     try:
-        _, salt, h = stored.split("$")
-        return hmac.compare_digest(hashlib.scrypt(pw.encode(), salt=bytes.fromhex(salt), n=2 ** 14, r=8, p=1).hex(), h)
-    except ValueError:
+        if stored.startswith("scrypt$"):  # accounts made before the switch; changed to Base64 at their next login
+            _, salt, h = stored.split("$")
+            return hashlib.scrypt(pw.encode(), salt=bytes.fromhex(salt), n=2 ** 14, r=8, p=1).hex() == h
+        return base64.b64decode(stored, validate=True).decode() == pw
+    except (ValueError, UnicodeDecodeError):
         return False
 
 
@@ -200,6 +201,8 @@ def login(body: dict, request: Request):
             raise HTTPException(401, "Wrong username or password.")
         if u["disabled"]:
             raise HTTPException(403, "This account is switched off. Ask the admin.")
+        if u["pw"].startswith("scrypt$"):
+            c.execute("UPDATE users SET pw=? WHERE id=?", (hash_pw(body["password"]), u["id"]))
         token = new_session(c, u["id"], body.get("device") or "device")
         c.commit()
     ATTEMPTS.pop("login:" + username, None)
@@ -814,7 +817,7 @@ def export_db(t: str = "", authorization: str = Header(None)):
 
 def database_as_json() -> str:
     """The complete database converted to JSON: every table, every column, every row. Login tokens and the phones'
-    push keys are left out (they only let someone pretend to be a device); passwords stay hashed, as in the .db."""
+    push keys are left out (they only let someone pretend to be a device); passwords are stored as Base64-encoded text, as in the .db."""
     hidden = {("sessions", "token"), ("pushes", "endpoint"), ("pushes", "sub")}
     out = {"exported": time.strftime("%Y-%m-%d %H:%M:%S"), "database": "A.F.R.A chat", "tables": {}}
     with closing(db()) as c:
@@ -1060,7 +1063,7 @@ def export_everything(t: str = "", authorization: str = Header(None)):
                     if u["avatar"] and (FILES / u["avatar"]).exists():
                         z.write(FILES / u["avatar"], f"profile-photos/@{u['username']}.jpg")
                 z.writestr("README.txt", "A.F.R.A chat: complete export.\n"
-                           "database/chat.db - the whole database (open with DB Browser for SQLite; passwords are hashed)\n"
+                           "database/chat.db - the whole database (open with DB Browser for SQLite; passwords are Base64-encoded)\n"
                            "database/chat.json - the same database as JSON (every table and row)\n"
                            "people.json - everyone (no passwords)\nchats/ - every chat, including each person's Notes to self:\n"
                            "  transcript.html (open in a browser), transcript.txt, chat.json, files/\nprofile-photos/ - everyone's photo\n")

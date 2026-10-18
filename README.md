@@ -35,7 +35,7 @@ project folder with `CHAT_DATA=data`). Docker instead: see `docker/`.
 ## How it works
 | Part | What |
 |---|---|
-| `server/server.py` | FastAPI + SQLite: accounts (scrypt passwords, sessions), chats, files, one WebSocket per device for live updates, Web Push with VAPID and encrypted payloads, admin, daily database backups (14 kept) |
+| `server/server.py` | FastAPI + SQLite: accounts (Base64-encoded passwords, sessions), chats, files, one WebSocket per device for live updates, Web Push with VAPID and encrypted payloads, admin, daily database backups (14 kept) |
 | `web/` | The app: `app.js` (one file, no build step), `sw.js` (offline + notifications), `templates.json` (the love notes) |
 | `deploy/` | Install/update on Ubuntu: a memory-capped systemd service behind Caddy |
 
