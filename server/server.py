@@ -747,6 +747,58 @@ def admin_reset(uid: int, authorization: str = Header(None)):
     return {"code": code}
 
 
+@app.delete("/api/admin/users/{uid}")
+async def admin_delete(uid: int, authorization: str = Header(None)):
+    """Removes an account for good: their chats (for both people), messages, files, devices. A copy of the
+    database is saved first in data/backups, so a mistake can still be undone by hand."""
+    me_ = admin(authorization)
+    if uid == me_["id"]:
+        raise ValueError("You can't delete your own account.")
+    with closing(db()) as c:
+        u = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+        if not u:
+            raise HTTPException(404)
+        (DATA / "backups").mkdir(parents=True, exist_ok=True)
+        dst = sqlite3.connect(DATA / "backups" / time.strftime(f"before-delete-{u['username']}-%Y%m%d-%H%M%S.db"))
+        with dst:
+            c.backup(dst)
+        dst.close()
+        convs = [r[0] for r in c.execute("SELECT conv_id FROM members WHERE user_id=?", (uid,))]
+        peers = {cid: [r[0] for r in c.execute("SELECT user_id FROM members WHERE conv_id=? AND user_id<>?", (cid, uid))]
+                 for cid in convs}
+        fids = {u["avatar"]} if u["avatar"] else set()
+        fids |= {r[0] for r in c.execute("SELECT id FROM files WHERE owner=?", (uid,))}
+        for cid in convs:
+            for (att,) in c.execute("SELECT attachment FROM messages WHERE conv_id=? AND attachment<>''", (cid,)).fetchall():
+                try:
+                    fid = json.loads(att).get("id")
+                except (ValueError, AttributeError):
+                    fid = None
+                if fid:
+                    fids.add(fid)
+            c.execute("DELETE FROM messages WHERE conv_id=?", (cid,))
+            c.execute("DELETE FROM members WHERE conv_id=?", (cid,))
+            c.execute("DELETE FROM convs WHERE id=?", (cid,))
+        for fid in fids:
+            c.execute("DELETE FROM files WHERE id=?", (fid,))
+            if re.fullmatch(r"[0-9a-f]+", str(fid)):
+                (FILES / fid).unlink(missing_ok=True)
+        c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM pushes WHERE user_id=?", (uid,))
+        c.execute("DELETE FROM invites WHERE used_by IS NULL AND (created_by=? OR (kind='reset' AND note=?))", (uid, str(uid)))
+        c.execute("DELETE FROM users WHERE id=?", (uid,))
+        c.commit()
+    for s in list(SOCKETS.pop(uid, {}).values()):
+        try:
+            await s["ws"].close(code=4401)
+        except Exception:
+            pass
+    for cid, others in peers.items():
+        for p in others:
+            await send_to(p, {"t": "conv_gone", "conv": cid})
+    return {"ok": True, "chats": len(convs), "files": len(fids)}
+
+
 @app.get("/api/admin/invites")
 def admin_invites(authorization: str = Header(None)):
     admin(authorization)

@@ -103,3 +103,5 @@ select option { background: var(--sheet); color: var(--ink); }
 .dl .row { gap: 8px; flex-wrap: nowrap; }
 .dl select.inp { min-width: 0; }
 .banner-in { background: var(--sheet); color: var(--ink); }
+
+.big-btn.danger { background: #ed4956 !important; color: #fff !important; }

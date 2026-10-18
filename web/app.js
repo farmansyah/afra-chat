@@ -205,7 +205,10 @@
       drawAll();
     } else if (e.t === "conv") {
       const i = S.convs.findIndex((c) => c.id === e.conv.id); if (i >= 0) S.convs[i] = e.conv; else S.convs.unshift(e.conv);
-      drawList();
+      drawList();    } else if (e.t === "conv_gone") {  // the admin deleted the other person's account
+      S.convs = S.convs.filter((c) => c.id !== e.conv); delete S.msgs[e.conv];
+      if (S.cur === e.conv) { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); }
+      cacheSave(); drawList(); badge();
     }
   }
   function inAppNotice(c, m) {  // a banner slides down from the top; tap to open, swipe up (or wait) to dismiss
@@ -346,8 +349,9 @@
 
   async function drawQuick() {  // one tap sends: a heart, a hug, a few love notes (new ones each time), surprise
     const el = $("#quick"); if (!el) return;
-    const tpl = await loadTemplates(), all = (tpl.categories || []).flatMap((c) => c.items).filter((t) => t.length <= 46);
-    const picks = all.sort(() => Math.random() - .5).slice(0, 4);
+    const tpl = await loadTemplates(), all = tplPool(tpl.categories || []).filter(([, t]) => t.length <= 46);
+    const picks = [];
+    while (picks.length < 4 && all.length) picks.push(all.splice(pickWeighted(all), 1)[0][1]);
     const chips = ["❤️", "🥰", "🤗", ...picks];
     el.innerHTML = chips.map((t, i) => `<button data-q="${i}" class="${t.length <= 3 ? "emo" : ""}">${esc(t)}</button>`).join("") + `<button data-q="more" title="More messages">💌 More</button>`;
     $$("[data-q]", el).forEach((b) => b.onclick = () => {
@@ -544,6 +548,14 @@
     } catch { rec = null; toast("Microphone not allowed"); }
   }
 
+  // every message with its category's weight (templates.json "weight", default 1): Miss you and Love come up more
+  const tplPool = (cats) => cats.flatMap((c) => c.items.map((t) => [Math.max(0, +c.weight || 1), t, c]));
+  function pickWeighted(pool) {
+    let r = Math.random() * pool.reduce((n, [w]) => n + w, 0);
+    for (let i = 0; i < pool.length; i++) if ((r -= pool[i][0]) < 0) return i;
+    return pool.length - 1;
+  }
+
   let TEMPLATES = null;
   async function loadTemplates() {
     if (!TEMPLATES) { try { TEMPLATES = await (await fetch("templates.json", { cache: "no-cache" })).json(); } catch { TEMPLATES = { categories: [] }; } }
@@ -557,12 +569,14 @@
       <div class="chips" id="tchips"></div><div class="tlist" id="tlist"></div>`);
     const pick = (t) => { const txt = $("#txt"); txt.value = txt.value.trim() ? txt.value.trim() + " " + t : t; window.growComposer(); s.remove(); txt.focus(); };
     const draw = () => {
-      $("#tchips", s).innerHTML = `<button data-c="random">🎲 Surprise me</button>` + cats.map((c) => `<button data-c="${esc(c.id)}" class="${!q && c.id === cur ? "on" : ""}">${esc(c.emoji)} ${esc(c.name)}</button>`).join("");
+      const tab = (c) => `<button data-c="${esc(c.id)}" class="${!q && c.id === cur ? "on" : ""}">${esc(c.emoji)} ${esc(c.name)}</button>`;
+      const fav = cats.filter((c) => (+c.weight || 1) > 1);  // favourites first, then Surprise me, then the rest
+      $("#tchips", s).innerHTML = fav.map(tab).join("") + `<button data-c="random">🎲 Surprise me</button>` + cats.filter((c) => !fav.includes(c)).map(tab).join("");
       const items = q ? all.filter(([, t]) => t.toLowerCase().includes(q)).map(([, t]) => t) : ((cats.find((c) => c.id === cur) || { items: [] }).items);
       $("#tlist", s).innerHTML = items.map((t, i) => `<button data-i="${i}">${esc(t)}</button>`).join("") || `<div class="empty">Nothing found</div>`;
       $$("[data-i]", s).forEach((b) => b.onclick = () => pick(items[+b.dataset.i]));
       $$("[data-c]", s).forEach((b) => b.onclick = () => {
-        if (b.dataset.c === "random") return pick(all[Math.floor(Math.random() * all.length)][1]);
+        if (b.dataset.c === "random") { const pool = tplPool(cats); return pick(pool[pickWeighted(pool)][1]); }
         cur = b.dataset.c; q = ""; $("#tq", s).value = ""; store.set("tplcat", cur); draw();
       });
     };
@@ -706,9 +720,25 @@
             const u = users.find((x) => x.id === +b.dataset.more);
             const m = sheet(`<h3>${esc(u.name)} <small style="color:var(--muted)">@${esc(u.username)}</small></h3><div class="menu">
               <button data-x="reset">🔑 Password reset code</button><button data-x="admin">${u.is_admin ? "Remove admin" : "🛡 Make admin"}</button>
-              <button data-x="off" class="${u.disabled ? "" : "danger"}">${u.disabled ? "✓ Switch account back on" : "Switch account off (logs them out)"}</button></div><div id="mout"></div>`);
+              <button data-x="off" class="${u.disabled ? "" : "danger"}">${u.disabled ? "✓ Switch account back on" : "Switch account off (logs them out)"}</button>
+              <button data-x="delete" class="danger">🗑 Delete account…</button></div><div id="mout"></div>`);
             $$("[data-x]", m).forEach((x) => x.onclick = async () => {
               try {
+                if (x.dataset.x === "delete") {
+                  $("#mout", m).innerHTML = `<div class="hint" style="margin:10px 0">This removes @${esc(u.username)} for good: their account, their Notes to self, and their chats with everyone (the other person loses those chats too), with all photos and files. "Switch account off" is the undoable option. A copy of the database is saved in the server's backups first.</div>
+                    <input class="inp" id="dconf" placeholder="Type ${esc(u.username)} to confirm" autocapitalize="none" autocorrect="off" autocomplete="off">
+                    <button class="big-btn danger" id="dgo" style="width:100%;margin-top:8px" disabled>Delete @${esc(u.username)}</button>`;
+                  $("#dconf", m).oninput = (ev) => { $("#dgo", m).disabled = ev.target.value.trim().replace(/^@/, "").toLowerCase() !== u.username.toLowerCase(); };
+                  $("#dconf", m).focus();
+                  $("#dgo", m).onclick = async () => {
+                    try {
+                      await api(`/api/admin/users/${u.id}`, { method: "DELETE" });
+                      S.convs = S.convs.filter((c) => !(c.kind === "direct" && c.members.some((p) => p.id === u.id)));
+                      cacheSave(); drawList(); m.remove(); toast(`@${u.username} deleted`); tab("users");
+                    } catch (e) { toast(e.message); }
+                  };
+                  return;
+                }
                 if (x.dataset.x === "reset") {
                   const r = await api(`/api/admin/users/${u.id}/reset`, { body: {} }); const link = `${location.origin}/#reset=${r.code}`;
                   $("#mout", m).innerHTML = `<div class="code">${esc(r.code)}</div><button class="big-btn gold" id="rc" style="width:100%;margin-top:8px">Send / copy reset link</button><div class="hint">Valid for 7 days. They open it and choose a new password.</div>`;

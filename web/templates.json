@@ -1,6 +1,29 @@
 {
-  "_how_to": "Ready-made messages in the chat (💌 button and the quick row above the keyboard). Edit freely: each category has an id, a name, an emoji and its messages. Short ones (under ~46 characters) also show up as one-tap quick messages.",
+  "_how_to": "Ready-made messages in the chat (💌 button and the quick row above the keyboard). Edit freely: each category has an id, a name, an emoji and its messages, and an optional weight (default 1): a category with weight 4 is 4 times as likely to show up in the quick row and in Surprise me, and its tab comes first. Short ones (under ~46 characters) also show up as one-tap quick messages.",
   "categories": [
+    {"id": "miss", "name": "Miss you", "emoji": "🥺", "weight": 4, "items": [
+      "Miss you.",
+      "Wish you were here.",
+      "Can't wait to see you.",
+      "Counting the days.",
+      "Everything reminds me of you today.",
+      "Call me when you can?",
+      "Saving up all my hugs for you.",
+      "It's too quiet without you."
+    ]},
+    {"id": "love", "name": "Love", "emoji": "❤️", "weight": 4, "items": [
+      "Love you.",
+      "Love you ❤️",
+      "Just wanted to say I love you.",
+      "I'm lucky to have you.",
+      "You make everything better.",
+      "Thinking about you, as usual.",
+      "Still smiling about yesterday.",
+      "You're my favourite person.",
+      "Glad it's you.",
+      "I like you a lot. Just so you know.",
+      "Thanks for being you."
+    ]},
     {"id": "checkin", "name": "Check in", "emoji": "👋", "items": [
       "Hey, how's your day going?",
       "Thinking of you. How are things?",
@@ -63,29 +86,6 @@
       "Sweet dreams.",
       "Phone down, eyes closed 😴",
       "Night night. Love you."
-    ]},
-    {"id": "miss", "name": "Miss you", "emoji": "🥺", "items": [
-      "Miss you.",
-      "Wish you were here.",
-      "Can't wait to see you.",
-      "Counting the days.",
-      "Everything reminds me of you today.",
-      "Call me when you can?",
-      "Saving up all my hugs for you.",
-      "It's too quiet without you."
-    ]},
-    {"id": "love", "name": "Love", "emoji": "❤️", "items": [
-      "Love you.",
-      "Love you ❤️",
-      "Just wanted to say I love you.",
-      "I'm lucky to have you.",
-      "You make everything better.",
-      "Thinking about you, as usual.",
-      "Still smiling about yesterday.",
-      "You're my favourite person.",
-      "Glad it's you.",
-      "I like you a lot. Just so you know.",
-      "Thanks for being you."
     ]},
     {"id": "proud", "name": "Proud of you", "emoji": "🏆", "items": [
       "So proud of you!",

@@ -14,7 +14,7 @@ with real push notifications.
   online/last seen, read ticks (✓ sent, ✓✓ read), unread badges (also on the app icon).
 - **Notifications** show the sender's name and the message, and open that chat when tapped. They are encrypted for
   the receiving phone (Web Push, RFC 8291), so Apple's and Google's push services can't read them.
-- **Admin:** people (see who's online, switch an account off, make admin, password-reset codes) and invites.
+- **Admin:** people (see who's online, switch an account off or delete it, make admin, password-reset codes) and invites.
 
 ## On an iPhone (iOS 16.4+)
 1. Open the invite link you received (or the chat's address) in **Safari**.
