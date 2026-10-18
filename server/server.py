@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY, user_id INTEGER, t
 CREATE INDEX IF NOT EXISTS reminders_due ON reminders(done, due);
 CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, user_id INTEGER, list TEXT DEFAULT '', text TEXT, done INTEGER DEFAULT 0, created REAL);
 CREATE TABLE IF NOT EXISTS places (user_id INTEGER, name TEXT, lat REAL, lon REAL, radius REAL DEFAULT 150, PRIMARY KEY (user_id, name));
+CREATE TABLE IF NOT EXISTS pets (id INTEGER PRIMARY KEY, conv_id INTEGER UNIQUE, bot_id INTEGER, user_a INTEGER, user_b INTEGER,
+  name TEXT, species TEXT, born REAL, hunger REAL DEFAULT 80, joy REAL DEFAULT 80, energy REAL DEFAULT 80, stats_at REAL,
+  xp INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, last_care_day TEXT DEFAULT '',
+  last_nudge_day TEXT DEFAULT '', cds TEXT DEFAULT '{}', sleep_until REAL DEFAULT 0, UNIQUE (user_a, user_b));
+CREATE TABLE IF NOT EXISTS pet_days (pet_id INTEGER, day TEXT, data TEXT DEFAULT '{}', PRIMARY KEY (pet_id, day));
 """
 
 
@@ -95,6 +100,7 @@ with closing(db()) as _c:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN style TEXT DEFAULT '{{}}'")
     for _t, _col, _def in (("users", "bio", "TEXT DEFAULT ''"), ("members", "muted", "REAL DEFAULT 0"),  # about line; mute until (time)
                           ("users", "bot", "INTEGER DEFAULT 0"),
+                          ("reminders", "home_id", "INTEGER DEFAULT 0"), ("notes", "home_id", "INTEGER DEFAULT 0"),  # shared with a couple in Home (the pet's chat)
                           ("invites", "for_name", "TEXT DEFAULT ''")):  # who an invite is for (shown on the welcome screen)  # the Assistant's account
         if _col not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN {_col} {_def}")
@@ -384,7 +390,7 @@ def _member(c, cid: int, uid: int):
 
 def conv_view(c, cid: int, uid: int) -> dict:
     cv = c.execute("SELECT * FROM convs WHERE id=?", (cid,)).fetchone()
-    others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>?", (cid, uid))]
+    others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>? AND (u.bot<>2 OR ?<>'pet')", (cid, uid, cv["kind"]))]
     mine = c.execute("SELECT last_read, style, muted FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
     last = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
     unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND created>?",
@@ -394,6 +400,7 @@ def conv_view(c, cid: int, uid: int) -> dict:
             "last_at": cv["last_at"], "other_read": other_read,
             "style": json.loads(cv["style"] or "{}"), "my_style": json.loads((mine["style"] if mine else "") or "{}"),
             "muted": (mine["muted"] or 0) if mine and (mine["muted"] or 0) > time.time() else 0,
+            "pet": pet_view(c, c.execute("SELECT * FROM pets WHERE conv_id=?", (cid,)).fetchone()) if cv["kind"] == "pet" else None,
             "wants_loc": cv["kind"] == "bot" and bool(c.execute("SELECT 1 FROM reminders WHERE user_id=? AND done=0 AND place<>''", (uid,)).fetchone())}
 
 
@@ -525,7 +532,8 @@ async def send_message(cid: int, body: dict, authorization: str = Header(None)):
         raise ValueError("Empty message")
     with closing(db()) as c:
         _member(c, cid, u["id"])
-        is_bot = c.execute("SELECT kind FROM convs WHERE id=?", (cid,)).fetchone()["kind"] == "bot"
+        ckind = c.execute("SELECT kind FROM convs WHERE id=?", (cid,)).fetchone()["kind"]
+        is_bot = ckind == "bot"
         if body.get("client_id"):
             dup = c.execute("SELECT * FROM messages WHERE sender=? AND client_id=?", (u["id"], body["client_id"])).fetchone()
             if dup:  # sent twice from a phone that went offline: keep one
@@ -552,6 +560,8 @@ async def send_message(cid: int, body: dict, authorization: str = Header(None)):
             except (TypeError, ValueError, KeyError):
                 pass
         asyncio.create_task(assistant_turn(cid, u["id"], m["id"]))
+    if ckind == "pet":
+        asyncio.create_task(pet_turn(cid, u["id"], m["id"]))
     return m
 
 
@@ -786,8 +796,8 @@ def _metres(a: tuple, b: tuple) -> float:
 def assistant_data(c, uid: int) -> dict:
     tz = _tz(c, uid)
     rem = [dict(r) | {"when": _local(r["due"], tz) if r["due"] else ""}
-           for r in c.execute("SELECT * FROM reminders WHERE user_id=? AND done=0 ORDER BY due=0, due, id", (uid,))]
-    notes = [dict(r) for r in c.execute("SELECT * FROM notes WHERE user_id=? ORDER BY list, done, id", (uid,))]
+           for r in c.execute("SELECT * FROM reminders WHERE user_id=? AND done=0 AND home_id=0 ORDER BY due=0, due, id", (uid,))]
+    notes = [dict(r) for r in c.execute("SELECT * FROM notes WHERE user_id=? AND home_id=0 ORDER BY list, done, id", (uid,))]
     places = [dict(r) for r in c.execute("SELECT * FROM places WHERE user_id=? ORDER BY name", (uid,))]
     return {"reminders": rem, "notes": notes, "places": places, "tz": str(tz)}
 
@@ -815,12 +825,31 @@ TOOLS = [
 ]
 
 
-def run_tool(uid: int, name: str, a: dict) -> dict:
+def _home_tools() -> list:
+    """The same tools for the couple's pet: reminders and lists, shared; no saved places."""
+    out = []
+    for t in TOOLS:
+        f = json.loads(json.dumps(t["function"]))
+        if f["name"] in ("save_place", "forget_place"):
+            continue
+        f["description"] = f["description"].replace("the user", "the couple")
+        f["parameters"]["properties"].pop("place", None)
+        out.append({"type": "function", "function": f})
+    return out
+
+
+HOME_TOOLS = _home_tools()
+
+
+def run_tool(uid: int, name: str, a: dict, home: int = 0) -> dict:
+    """`home` = a Home chat id: then reminders and notes belong to the couple (both can see them) instead of one person."""
     with closing(db()) as c:
         tz, now = _tz(c, uid), time.time()
         if name == "add_reminder":
             text = str(a.get("text") or "").strip()[:300]
             place = str(a.get("place") or "").strip().lower()[:60]
+            if home:
+                place = ""
             repeat = str(a.get("repeat") or "").replace("none", "")
             if not text:
                 return {"error": "empty text"}
@@ -840,32 +869,32 @@ def run_tool(uid: int, name: str, a: dict) -> dict:
                 return {"error": f"no saved place called '{place}'. Ask the user to go there, tap the paperclip, choose 'Share where I am', and tell you to save it."}
             if not due and not place:
                 return {"error": "a reminder needs a time or a place"}
-            if c.execute("SELECT COUNT(*) FROM reminders WHERE user_id=? AND done=0", (uid,)).fetchone()[0] >= 200:
+            if c.execute("SELECT COUNT(*) FROM reminders WHERE done=0 AND home_id=? AND (home_id>0 OR user_id=?)", (home, uid)).fetchone()[0] >= 200:
                 return {"error": "too many reminders (200); cancel some first"}
-            rid = c.execute("INSERT INTO reminders (user_id, text, due, place, repeat, created) VALUES (?,?,?,?,?,?)",
-                            (uid, text, due, place, repeat, now)).lastrowid
+            rid = c.execute("INSERT INTO reminders (user_id, text, due, place, repeat, created, home_id) VALUES (?,?,?,?,?,?,?)",
+                            (uid, text, due, place, repeat, now, home)).lastrowid
             c.commit()
             return {"ok": True, "id": rid, "when": _local(due, tz) if due else "", "place": place, "repeat": repeat or "none"}
         if name == "cancel_reminder":
-            n = c.execute("UPDATE reminders SET done=1 WHERE id=? AND user_id=?", (int(a.get("id") or 0), uid)).rowcount
+            n = c.execute("UPDATE reminders SET done=1 WHERE id=? AND home_id=? AND (home_id>0 OR user_id=?)", (int(a.get("id") or 0), home, uid)).rowcount
             c.commit()
             return {"ok": bool(n)} if n else {"error": "no such reminder"}
         if name == "add_note":
             text = str(a.get("text") or "").strip()[:500]
             if not text:
                 return {"error": "empty note"}
-            if c.execute("SELECT COUNT(*) FROM notes WHERE user_id=?", (uid,)).fetchone()[0] >= 1000:
+            if c.execute("SELECT COUNT(*) FROM notes WHERE home_id=? AND (home_id>0 OR user_id=?)", (home, uid)).fetchone()[0] >= 1000:
                 return {"error": "too many notes (1000); delete some first"}
-            nid = c.execute("INSERT INTO notes (user_id, list, text, created) VALUES (?,?,?,?)",
-                            (uid, str(a.get("list") or "").strip().lower()[:40], text, now)).lastrowid
+            nid = c.execute("INSERT INTO notes (user_id, list, text, created, home_id) VALUES (?,?,?,?,?)",
+                            (uid, str(a.get("list") or "").strip().lower()[:40], text, now, home)).lastrowid
             c.commit()
             return {"ok": True, "id": nid}
         if name == "check_note":
-            n = c.execute("UPDATE notes SET done=? WHERE id=? AND user_id=?", (int(bool(a.get("done", True))), int(a.get("id") or 0), uid)).rowcount
+            n = c.execute("UPDATE notes SET done=? WHERE id=? AND home_id=? AND (home_id>0 OR user_id=?)", (int(bool(a.get("done", True))), int(a.get("id") or 0), home, uid)).rowcount
             c.commit()
             return {"ok": True} if n else {"error": "no such note"}
         if name == "delete_note":
-            n = c.execute("DELETE FROM notes WHERE id=? AND user_id=?", (int(a.get("id") or 0), uid)).rowcount
+            n = c.execute("DELETE FROM notes WHERE id=? AND home_id=? AND (home_id>0 OR user_id=?)", (int(a.get("id") or 0), home, uid)).rowcount
             c.commit()
             return {"ok": True} if n else {"error": "no such note"}
         if name == "save_place":
@@ -924,16 +953,21 @@ def _history(c, cid: int, bot: int) -> list:
     return out
 
 
-async def think(uid: int, cid: int) -> str:
+async def think(uid: int, cid: int, pet=None) -> str:
+    """One answer from the model. With `pet` (a pets row) it is the pet in Home, speaking for the couple; otherwise the personal Assistant."""
     if not OPENROUTER_KEY:
         return "I'm not switched on yet: the admin needs to add the OpenRouter key on the server."
     with closing(db()) as c:
         u = c.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
-        msgs = [{"role": "system", "content": _prompt(c, u)}] + _history(c, cid, bot_id(c))
+        if pet:
+            msgs = [{"role": "system", "content": _pet_prompt(c, pet, u)}] + _home_history(c, cid, pet)
+        else:
+            msgs = [{"role": "system", "content": _prompt(c, u)}] + _history(c, cid, bot_id(c))
+    tools = HOME_TOOLS if pet else TOOLS
     async with httpx.AsyncClient(timeout=90) as h:
         for _ in range(5):  # the model may use a few tools before it answers
             r = await h.post("https://openrouter.ai/api/v1/chat/completions", json={
-                "model": ASSISTANT_MODEL, "messages": msgs, "tools": TOOLS, "temperature": 0.4, "max_tokens": 900},
+                "model": ASSISTANT_MODEL, "messages": msgs, "tools": tools, "temperature": 0.8 if pet else 0.4, "max_tokens": 350 if pet else 900},
                 headers={"Authorization": f"Bearer {OPENROUTER_KEY}", "HTTP-Referer": "https://chat.farmansyah.cloud", "X-Title": "A.F.R.A chat"})
             r.raise_for_status()
             msg = r.json()["choices"][0]["message"]
@@ -946,7 +980,7 @@ async def think(uid: int, cid: int) -> str:
                     args = json.loads(call["function"].get("arguments") or "{}")
                 except ValueError:
                     args = {}
-                result = run_tool(uid, call["function"]["name"], args if isinstance(args, dict) else {})
+                result = run_tool(uid, call["function"]["name"], args if isinstance(args, dict) else {}, cid if pet else 0)
                 msgs.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": json.dumps(result)})
     return "Done 👍"
 
@@ -1000,6 +1034,8 @@ async def assistant_turn(cid: int, uid: int, mid: int):
 
 
 async def fire_reminder(r):
+    if r["home_id"]:
+        return await fire_home_reminder(r)
     with closing(db()) as c:
         u = c.execute("SELECT * FROM users WHERE id=? AND disabled=0", (r["user_id"],)).fetchone()
         if not u:
@@ -1027,9 +1063,571 @@ async def _reminders():
                 due = c.execute("SELECT * FROM reminders WHERE done=0 AND place='' AND due>0 AND due<=?", (time.time(),)).fetchall()
             for r in due:
                 await fire_reminder(r)
+            await _pet_evening()  # at most once every 5 minutes; the pet's daily nudge
         except Exception as e:
             print("reminders failed:", repr(e)[:300], flush=True)
         await asyncio.sleep(15)
+
+
+# ---------------------------------------------------------------- the shared pet (Home)
+SPECIES = {"cat": "🐱", "dog": "🐶", "bunny": "🐰", "bear": "🐻", "fox": "🦊", "penguin": "🐧"}
+PET_ACTS = {  # action: (cooldown seconds, xp, emoji, what the log says)
+    "feed": (1800, 5, "🍖", "fed"), "play": (1200, 6, "🧸", "played with"),
+    "tend": (2700, 5, "🛁", "bathed"), "sleep": (10800, 4, "💤", "tucked in")}
+PET_CANNED = {
+    "feed": ["Nom nom nom! 😋", "Yum! Thank you 🥰", "So tasty! 🍖", "*happy munching* 😊"],
+    "play": ["Again again! 🎉", "That was so fun! 🧸", "Wheee! 🥳", "Best game ever 💛"],
+    "tend": ["All clean and fluffy ✨", "Ahh, that feels nice 🫧", "Sparkly! 🛁"],
+    "sleep": ["Goodnight... 💤", "Sleepy... thank you 🌙", "Cosy. Zzz 😴"],
+    "idle": ["I'm here! 🐾", "Hehe 🥰", "You two are my favourites 💛", "*wiggles happily*"]}
+PET_LOCKS: dict[int, asyncio.Lock] = {}
+PET_CHECK = [0.0]
+_ONE_OF = (["feed2", "feed_each", "tend1", "sleep1"], ["play_both", "together", "chat"], ["greet", "thanks"])
+_QUESTS = {  # id: (text, target, progress(day))
+    "feed2": ("Feed {n} twice", 2, lambda d: sum(d["feed"].values())),
+    "feed_each": ("You both feed {n} today", 2, lambda d: len(d["feed"])),
+    "tend1": ("Give {n} a bath", 1, lambda d: sum(d["tend"].values())),
+    "sleep1": ("Tuck {n} in for a nap", 1, lambda d: sum(d["sleep"].values())),
+    "play_both": ("Play with {n} together", 2, lambda d: len(d["play"])),
+    "together": ("Both of you care for {n} today", 2, lambda d: len(_carers(d))),
+    "chat": ("Chat with {n}: 6 messages in Home", 6, lambda d: sum(d["msgs"].values())),
+    "greet": ("Both say good morning to {n}", 2, lambda d: len(d["greet"])),
+    "thanks": ("Tell each other one thing you're grateful for", 2, lambda d: len(d["thanks"]))}
+
+
+def _carers(d) -> set:
+    return set(d["feed"]) | set(d["play"]) | set(d["tend"]) | set(d["sleep"])
+
+
+def _day(tz, t=None) -> str:
+    return datetime.fromtimestamp(t or time.time(), tz).strftime("%Y-%m-%d")
+
+
+def _pet_tz(c, p):
+    return _tz(c, p["user_a"])
+
+
+def _first(u) -> str:
+    return ((u["name"] or u["username"] or "?").split(" ") or ["?"])[0]
+
+
+def _pet_for(c, a: int, b: int):
+    return c.execute("SELECT * FROM pets WHERE user_a=? AND user_b=?", (min(a, b), max(a, b))).fetchone()
+
+
+def _pet_of(c, cid: int):
+    p = c.execute("SELECT * FROM pets WHERE conv_id=?", (cid,)).fetchone()
+    if not p:
+        raise HTTPException(404, "No pet here")
+    return p
+
+
+def _day_get(c, pid: int, day: str) -> dict:
+    r = c.execute("SELECT data FROM pet_days WHERE pet_id=? AND day=?", (pid, day)).fetchone()
+    try:
+        d = json.loads(r["data"]) if r else {}
+    except ValueError:
+        d = {}
+    for k in ("feed", "play", "tend", "sleep", "msgs"):
+        d.setdefault(k, {})
+    for k in ("greet", "thanks", "done"):
+        d.setdefault(k, [])
+    return d
+
+
+def _day_put(c, pid: int, day: str, d: dict):
+    c.execute("INSERT OR REPLACE INTO pet_days (pet_id, day, data) VALUES (?,?,?)", (pid, day, json.dumps(d)))
+
+
+def _quests(p, d: dict, day: str) -> list:
+    """Three quests a day, the same for both of you: one to care, one to do together, one to say."""
+    import random
+    rng = random.Random(f"{p['id']}:{day}")
+    out = []
+    for group in _ONE_OF:
+        qid = rng.choice(group)
+        text, target, prog = _QUESTS[qid]
+        n = min(prog(d), target)
+        out.append({"id": qid, "text": text.format(n=p["name"]), "progress": n, "target": target, "done": n >= target})
+    return out
+
+
+def _decayed(p, now: float):
+    """Stats drift down with time (and recover while asleep); computed when read, nothing runs in the background."""
+    t0 = p["stats_at"] or now
+    dt = max(0.0, min(now - t0, 72 * 3600))
+    asleep = min(dt, max(0.0, min(now, p["sleep_until"] or 0) - t0))
+    h, a = (dt - asleep) / 3600, asleep / 3600
+    cl = lambda v: max(0.0, min(100.0, v))
+    return cl(p["hunger"] - 4.0 * h - 1.5 * a), cl(p["joy"] - 2.5 * h - 1.0 * a), cl(p["energy"] - 2.5 * h + 12.0 * a)
+
+
+def pet_view(c, p, now=None) -> dict:
+    now = now or time.time()
+    tz = _pet_tz(c, p)
+    day = _day(tz, now)
+    yday = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    hunger, joy, energy = _decayed(p, now)
+    d = _day_get(c, p["id"], day)
+    carers = _carers(d)
+    sleeping = now < (p["sleep_until"] or 0)
+    low = min(hunger, joy, energy)
+    mood = ("sleeping" if sleeping else "hungry" if hunger < 30 else "sleepy" if energy < 25 else "lonely" if joy < 30
+            else "happy" if (hunger + joy + energy) / 3 >= 70 else "okay")
+    try:
+        cds = json.loads(p["cds"] or "{}")
+    except ValueError:
+        cds = {}
+    streak = p["streak"] if p["last_care_day"] in (day, yday) else 0
+    return {"id": p["id"], "conv": p["conv_id"], "bot": p["bot_id"], "name": p["name"], "species": p["species"],
+            "emoji": SPECIES.get(p["species"], "🐾"), "born": p["born"], "at": now, "users": [p["user_a"], p["user_b"]],
+            "hunger": round(hunger), "joy": round(joy), "energy": round(energy), "xp": p["xp"],
+            "level": p["xp"] // 60 + 1, "lvl_pct": round((p["xp"] % 60) / 60 * 100),
+            "streak": streak, "best": max(p["best_streak"], streak), "cared_today": bool(carers), "both_today": len(carers) >= 2,
+            "needs_care": (not carers) or low < 35, "mood": mood, "sad": low < 30 or p["last_care_day"] not in (day, yday),
+            "sleeping": sleeping, "cd": {k: max(0, int(cds.get(k, 0) - now)) for k in PET_ACTS}, "quests": _quests(p, d, day)}
+
+
+def _insert_msg(c, cid: int, sender: int, kind: str, text: str, att=None) -> dict:
+    now = time.time()
+    mid = c.execute("INSERT INTO messages (conv_id, sender, kind, text, attachment, created, updated) VALUES (?,?,?,?,?,?,?)",
+                    (cid, sender, kind, text[:8000], json.dumps(att) if att else "", now, now)).lastrowid
+    c.execute("UPDATE convs SET last_at=? WHERE id=?", (now, cid))
+    c.execute("UPDATE members SET last_read=? WHERE conv_id=? AND user_id=?", (now, cid, sender))
+    return msg_view(c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
+
+
+async def _bcast_msg(cid: int, m: dict, sender=None):
+    """Show a new message to everyone in the chat; with `sender`, also push to the others (unless muted)."""
+    with closing(db()) as c:
+        members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cid,))]
+        quiet = {r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=? AND muted>?", (cid, time.time()))}
+    for uid in members:
+        await send_to(uid, {"t": "msg", "msg": m})
+    if sender is not None:
+        asyncio.create_task(push_message(sender, m, [x for x in members if x != sender["id"] and x not in quiet]))
+
+
+async def home_event(cid: int, by: int = 0, act: str = "", fx: str = "", view=None):
+    with closing(db()) as c:
+        members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cid,))]
+        view = view or pet_view(c, _pet_of(c, cid))
+    for uid in members:
+        await send_to(uid, {"t": "pet", "conv": cid, "pet": view, "by": by, "act": act, "fx": fx})
+
+
+async def pet_say(cid: int, text: str, push: bool = False):
+    with closing(db()) as c:
+        p = _pet_of(c, cid)
+        m = _insert_msg(c, cid, p["bot_id"], "text", text)
+        bot = c.execute("SELECT * FROM users WHERE id=?", (p["bot_id"],)).fetchone()
+        c.commit()
+    await _bcast_msg(cid, m, bot if push else None)
+    return m
+
+
+def _sweep_day(c, p, d: dict, day: str) -> list:
+    newly = []
+    for q in _quests(p, d, day):
+        if q["done"] and q["id"] not in d["done"]:
+            d["done"].append(q["id"])
+            newly.append(q["text"])
+    if newly:
+        c.execute("UPDATE pets SET xp=xp+? WHERE id=?", (15 * len(newly), p["id"]))
+    return newly
+
+
+def pet_care(c, p, uid: int, act: str) -> dict:
+    """Someone looks after the pet. Raises ValueError (shown to them) when it's too soon or not needed."""
+    now = time.time()
+    cd, xp, emoji, _ = PET_ACTS[act]
+    tz = _pet_tz(c, p)
+    day = _day(tz, now)
+    yday = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    hunger, joy, energy = _decayed(p, now)
+    try:
+        cds = json.loads(p["cds"] or "{}")
+    except ValueError:
+        cds = {}
+    left = int(cds.get(act, 0) - now)
+    name = p["name"]
+    if left > 0:
+        raise ValueError(f"{name} needs a little break first. Try again in {left // 60 + 1} min ⏳")
+    sleep_until = p["sleep_until"] or 0
+    if act == "feed":
+        if hunger >= 95:
+            raise ValueError(f"{name} is full 🍖")
+        hunger, joy = hunger + 30, joy + 3
+    elif act == "play":
+        if energy < 15:
+            raise ValueError(f"{name} is too tired to play. Tuck them in? 💤")
+        joy, energy, hunger = joy + 22, energy - 12, hunger - 6
+    elif act == "tend":
+        joy = joy + 12
+    else:
+        if energy >= 90:
+            raise ValueError(f"{name} isn't sleepy yet 🌙")
+        energy, sleep_until = energy + 40, now + 3600
+    cds[act] = now + cd
+    d = _day_get(c, p["id"], day)
+    k = str(uid)
+    d[act][k] = d[act].get(k, 0) + 1
+    both = len(_carers(d)) >= 2
+    gain, bonus = xp, False
+    if both and "_both" not in d["done"]:
+        d["done"].append("_both")
+        gain, bonus = gain + 10, True
+    last, streak = p["last_care_day"], p["streak"]
+    if last != day:
+        streak = streak + 1 if last == yday else 1
+    newly = _sweep_day(c, p, d, day)
+    cl = lambda v: max(0.0, min(100.0, v))
+    c.execute("""UPDATE pets SET hunger=?, joy=?, energy=?, stats_at=?, xp=xp+?, streak=?, best_streak=?, last_care_day=?, cds=?, sleep_until=?
+                 WHERE id=?""", (cl(hunger), cl(joy), cl(energy), now, gain, streak, max(p["best_streak"], streak), day, json.dumps(cds),
+                                 sleep_until, p["id"]))
+    _day_put(c, p["id"], day, d)
+    return {"newly": newly, "bonus": bonus, "streak": streak}
+
+
+def _wants_reply(c, p, m, text: str) -> bool:
+    """Does this message need the pet to answer? Not the couple's own chatter: only when it's named, asked something or given a task."""
+    t = text.lower()
+    if re.search(r"(?<!\w)" + re.escape(p["name"].lower()) + r"(?!\w)", t):
+        return True
+    if re.search(r"\b(remind (us|me)|to-?do|shopping list|grocery list|our list|add .{1,40} to (the|our) list|put .{1,40} on (the|our) list|cancel (the|that|our) reminder)\b", t):
+        return True
+    if m["reply_to"]:
+        q = c.execute("SELECT sender FROM messages WHERE id=?", (m["reply_to"],)).fetchone()
+        if q and q["sender"] == p["bot_id"]:
+            return True
+    prev = c.execute("SELECT sender, created FROM messages WHERE conv_id=? AND id<? AND kind='text' ORDER BY id DESC LIMIT 1", (p["conv_id"], m["id"])).fetchone()
+    if prev and prev["sender"] == p["bot_id"] and m["created"] - prev["created"] < 180:
+        return True  # they're answering the pet
+    if "?" in text:  # a question: for the pet, unless the two of them are in the middle of talking to each other
+        talking = prev and prev["sender"] not in (p["bot_id"], m["sender"]) and m["created"] - prev["created"] < 90
+        return not talking
+    return False
+
+
+def _pet_message_effects(c, p, uid: int, m, text: str) -> list:
+    if m["kind"] != "text":
+        return []
+    day = _day(_pet_tz(c, p), m["created"])
+    d = _day_get(c, p["id"], day)
+    k, t = str(uid), text.lower()
+    d["msgs"][k] = d["msgs"].get(k, 0) + 1
+    if k not in d["greet"] and re.search(r"good\s*morning|selamat\s*pagi|\bmorning\b|\bpagi\b", t):
+        d["greet"].append(k)
+    if k not in d["thanks"] and len(text) >= 12 and re.search(
+            r"grateful|thankful|appreciate|thank you for|thanks for|bersyukur|terima kasih (atas|karena)|makasih (udah|sudah|karena)|so glad (you|we)", t):
+        d["thanks"].append(k)
+    newly = _sweep_day(c, p, d, day)
+    _day_put(c, p["id"], day, d)
+    return newly
+
+
+async def pet_turn(cid: int, uid: int, mid: int):
+    """A message arrived in Home: count it for the quests, and answer only if it was meant for the pet."""
+    try:
+        with closing(db()) as c:
+            p = c.execute("SELECT * FROM pets WHERE conv_id=?", (cid,)).fetchone()
+            m = c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
+            if not p or not m:
+                return
+            text = m["text"] or ""
+            newly = _pet_message_effects(c, p, uid, m, text)
+            ask = m["kind"] == "text" and _wants_reply(c, p, m, text)
+            done = [_insert_msg(c, cid, p["bot_id"], "petact", f"🎉 Quest done: {q}") for q in newly]
+            c.commit()
+            members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=? AND user_id<>?", (cid, p["bot_id"]))]
+        for x in done:
+            await _bcast_msg(cid, x)
+        await home_event(cid, uid, "", "quest" if newly else "")
+        if not ask:
+            return
+        import random
+        async with PET_LOCKS.setdefault(cid, asyncio.Lock()):
+            await asyncio.sleep(0.8)
+            with closing(db()) as c:
+                if (c.execute("SELECT MAX(id) FROM messages WHERE conv_id=? AND sender=?", (cid, uid)).fetchone()[0] or 0) > mid:
+                    return  # they kept typing: answer the last one
+                recent = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender=? AND created>?", (cid, p["bot_id"], time.time() - 3600)).fetchone()[0]
+
+            async def typing():
+                while True:
+                    for x in members:
+                        await send_to(x, {"t": "typing", "conv": cid, "user": p["bot_id"]})
+                    await asyncio.sleep(4)
+            t = asyncio.create_task(typing())
+            try:
+                if recent >= 30 or not OPENROUTER_KEY:
+                    reply = random.choice(PET_CANNED["idle"])
+                else:
+                    try:
+                        reply = await think(uid, cid, p)
+                    except Exception as e:
+                        print("pet failed:", repr(e)[:300], flush=True)
+                        reply = random.choice(PET_CANNED["idle"])
+            finally:
+                t.cancel()
+            if reply.strip().strip("()").lower() != "silent":
+                await pet_say(cid, reply, push=True)
+    except Exception as e:
+        print("pet turn failed:", repr(e)[:300], flush=True)
+
+
+def _pet_prompt(c, p, u) -> str:
+    v = pet_view(c, p)
+    tz = _tz(c, u["id"])
+    a, b = (c.execute("SELECT * FROM users WHERE id=?", (i,)).fetchone() for i in (p["user_a"], p["user_b"]))
+    rem = "\n".join(f"- #{r['id']} {r['text']} at {_local(r['due'], tz)}" + (f" (repeats {r['repeat']})" if r["repeat"] else "")
+                    for r in c.execute("SELECT * FROM reminders WHERE home_id=? AND done=0 ORDER BY due", (p["conv_id"],))) or "(none)"
+    notes = "\n".join(f"- #{n['id']} [{n['list'] or 'note'}] {'[done] ' if n['done'] else ''}{n['text']}"
+                      for n in c.execute("SELECT * FROM notes WHERE home_id=? ORDER BY list, done, id", (p["conv_id"],))) or "(none)"
+    qs = "; ".join(f"{q['text']} ({q['progress']}/{q['target']})" for q in v["quests"])
+    age = max(1, int((time.time() - p["born"]) // 86400))
+    return f"""You are {p['name']}, a small, sweet, playful pet {v['emoji']} ({p['species']}) who lives in "Home", the private chat of {_first(a)} and {_first(b)}, a couple. You love them both and want them to love each other.
+You are talking with {_first(u)} right now. Now: {datetime.now(tz).strftime('%A %d %B %Y, %H:%M')} ({tz}). You are {age} day(s) old.
+How you feel: fullness {v['hunger']}/100, happiness {v['joy']}/100, energy {v['energy']}/100, mood: {v['mood']}. Care streak: {v['streak']} day(s) (best {v['best']}). Level {v['level']}.
+Today's quests: {qs}.
+Style: speak briefly, 1-3 short sentences, in simple warm English (reply in their language if they write another). Light emoji. Sound like a pet: cute, curious, a little silly, never a lecturer. Do not use markdown or asterisks. Gently nudge them to be kind to each other, to say sweet things and to remember each other, but not in every message.
+You only see messages the couple write in Home. They often talk to each other, not to you: if a message is clearly not meant for you, answer exactly (silent).
+You can keep SHARED to-do lists and notes for the two of them, and SHARED reminders that notify both of them (use the tools; never pretend you saved something without calling one). Answer questions simply. If asked who you are, you are their pet.
+
+Shared reminders:
+{rem}
+
+Shared notes and lists:
+{notes}"""
+
+
+def _home_history(c, cid: int, p) -> list:
+    rows = c.execute("SELECT * FROM messages WHERE conv_id=? AND deleted=0 AND kind='text' ORDER BY id DESC LIMIT 24", (cid,)).fetchall()[::-1]
+    names = {r["id"]: _first(r) for r in c.execute("SELECT * FROM users WHERE id IN (?,?)", (p["user_a"], p["user_b"]))}
+    return [{"role": "assistant", "content": m["text"][:2000]} if m["sender"] == p["bot_id"]
+            else {"role": "user", "content": f"{names.get(m['sender'], '?')}: {m['text'][:2000]}"} for m in rows if m["text"]]
+
+
+def _pet_conv(c, a: dict, b: dict, name: str, species: str) -> int:
+    """Create the Home: a conversation of kind 'pet' with both people and the pet's hidden account."""
+    ids = sorted((a["id"], b["id"]))
+    now = time.time()
+    uname = "pet." + secrets.token_hex(3)
+    bot = c.execute("INSERT INTO users (username, name, pw, disabled, bot, created) VALUES (?,?,?,?,?,?)", (uname, name, "!", 1, 2, now)).lastrowid
+    cid = c.execute("INSERT INTO convs (kind, key, created, last_at) VALUES (?,?,?,?)", ("pet", f"pet:{ids[0]}:{ids[1]}", now, now)).lastrowid
+    for i in ids:
+        c.execute("INSERT INTO members (conv_id, user_id, last_read) VALUES (?,?,?)", (cid, i, now - 1))
+    c.execute("INSERT INTO members (conv_id, user_id, last_read) VALUES (?,?,?)", (cid, bot, now))
+    c.execute("""INSERT INTO pets (conv_id, bot_id, user_a, user_b, name, species, born, stats_at) VALUES (?,?,?,?,?,?,?,?)""",
+              (cid, bot, ids[0], ids[1], name, species, now, now))
+    _insert_msg(c, cid, bot, "text", f"Hi! I'm {name} {SPECIES[species]} I live here with you two now 🏡 Feed me, play with me, and be nice to each other. "
+                f"Tell me things like \"remind us Saturday 10am to call Mum\" and I'll keep them for both of you.")
+    return cid
+
+
+@app.post("/api/convs/{cid}/petinvite")
+async def pet_invite(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        if c.execute("SELECT kind FROM convs WHERE id=?", (cid,)).fetchone()["kind"] != "direct":
+            raise ValueError("You can share a pet in a chat with one other person.")
+        o = c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>?", (cid, u["id"])).fetchone()
+        if not o or o["bot"] or o["disabled"]:
+            raise ValueError("You can't share a pet here.")
+        if _pet_for(c, u["id"], o["id"]):
+            raise ValueError("You already share a pet 🐾")
+        if c.execute("SELECT 1 FROM messages WHERE conv_id=? AND kind='petinvite' AND deleted=0 AND created>? AND attachment LIKE '%\"pending\"%'",
+                     (cid, time.time() - 7 * 86400)).fetchone():
+            raise ValueError("You already asked. Waiting for an answer 🐾")
+        m = _insert_msg(c, cid, u["id"], "petinvite", f"🐾 {_first(u)} wants to share a pet with you",
+                        {"from": u["id"], "to": o["id"], "state": "pending"})
+        c.commit()
+    await _bcast_msg(cid, m, u)
+    return m
+
+
+@app.post("/api/pets/invite/{mid}")
+async def pet_invite_answer(mid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    answer = body.get("answer")
+    with closing(db()) as c:
+        row = c.execute("SELECT * FROM messages WHERE id=? AND kind='petinvite'", (mid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Invite not found")
+        _member(c, row["conv_id"], u["id"])
+        att = json.loads(row["attachment"] or "{}")
+        if att.get("to") != u["id"] or att.get("state") != "pending":
+            raise ValueError("This invite isn't waiting for you.")
+        inviter = c.execute("SELECT * FROM users WHERE id=?", (att["from"],)).fetchone()
+        new_cid = 0
+        if answer == "accept":
+            species = body.get("species")
+            name = re.sub(r"\s+", " ", str(body.get("name") or "")).strip()[:20]
+            if species not in SPECIES:
+                raise ValueError("Choose a pet")
+            if not name:
+                raise ValueError("Give your pet a name")
+            if _pet_for(c, u["id"], inviter["id"]):
+                raise ValueError("You already share a pet 🐾")
+            new_cid = _pet_conv(c, u, inviter, name, species)
+            att.update(state="accepted", conv=new_cid, name=name, emoji=SPECIES[species])
+        else:
+            att["state"] = "declined"
+        c.execute("UPDATE messages SET attachment=?, updated=? WHERE id=?", (json.dumps(att), time.time(), mid))
+        c.commit()
+        m = msg_view(c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
+        members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (row["conv_id"],))]
+    for x in members:
+        await send_to(x, {"t": "upd", "msg": m})
+    if new_cid:
+        for x in (u["id"], inviter["id"]):
+            with closing(db()) as c:
+                await send_to(x, {"t": "conv", "conv": conv_view(c, new_cid, x)})
+        with closing(db()) as c:
+            return {"msg": m, "conv": conv_view(c, new_cid, u["id"])}
+    return {"msg": m}
+
+
+@app.post("/api/pets/{cid}/care")
+async def pet_care_api(cid: int, body: dict, authorization: str = Header(None)):
+    import random
+    u = auth(authorization)
+    act = body.get("action")
+    if act not in PET_ACTS:
+        raise ValueError("Unknown action")
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        info = pet_care(c, p, u["id"], act)
+        p = _pet_of(c, cid)
+        _, _, emoji, verb = PET_ACTS[act]
+        out = [_insert_msg(c, cid, u["id"], "petact", f"{_first(u)} {verb} {p['name']} {emoji}")]
+        if info["bonus"]:
+            out.append(_insert_msg(c, cid, p["bot_id"], "petact", f"💞 You both cared for {p['name']} today. Bonus!"))
+        out += [_insert_msg(c, cid, p["bot_id"], "petact", f"🎉 Quest done: {q}") for q in info["newly"]]
+        last = c.execute("SELECT created FROM messages WHERE conv_id=? AND sender=? AND kind='text' ORDER BY id DESC LIMIT 1", (cid, p["bot_id"])).fetchone()
+        if not last or time.time() - last["created"] > 90:
+            out.append(_insert_msg(c, cid, p["bot_id"], "text", random.choice(PET_CANNED[act])))
+        view = pet_view(c, p)
+        c.commit()
+    for m in out:
+        await _bcast_msg(cid, m)
+    await home_event(cid, u["id"], act, "quest" if info["newly"] else "", view)
+    return view
+
+
+@app.get("/api/pets/{cid}")
+def pet_get(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        tz = _tz(c, u["id"])
+        hist = []
+        for r in c.execute("SELECT * FROM pet_days WHERE pet_id=? ORDER BY day DESC LIMIT 14", (p["id"],)):
+            d = _day_get(c, p["id"], r["day"])
+            hist.append({"day": r["day"], "cared": bool(_carers(d)), "both": len(_carers(d)) >= 2,
+                         "quests": len([x for x in d["done"] if not x.startswith("_")])})
+        names = {r["id"]: _first(r) for r in c.execute("SELECT * FROM users WHERE id IN (?,?)", (p["user_a"], p["user_b"]))}
+        rem = [dict(r) | {"when": _local(r["due"], tz), "by": names.get(r["user_id"], "")}
+               for r in c.execute("SELECT * FROM reminders WHERE home_id=? AND done=0 ORDER BY due", (cid,))]
+        notes = [dict(r) for r in c.execute("SELECT * FROM notes WHERE home_id=? ORDER BY list, done, id", (cid,))]
+        return {"pet": pet_view(c, p), "history": hist, "reminders": rem, "notes": notes, "names": names}
+
+
+@app.patch("/api/pets/{cid}")
+async def pet_rename(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    name = re.sub(r"\s+", " ", str(body.get("name") or "")).strip()[:20]
+    if not name:
+        raise ValueError("Give your pet a name")
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        c.execute("UPDATE pets SET name=? WHERE id=?", (name, p["id"]))
+        c.execute("UPDATE users SET name=? WHERE id=?", (name, p["bot_id"]))
+        m = _insert_msg(c, cid, u["id"], "petact", f"{_first(u)} renamed {p['name']} to {name} ✏️")
+        c.commit()
+    await _bcast_msg(cid, m)
+    await home_event(cid, u["id"])
+    with closing(db()) as c:
+        return conv_view(c, cid, u["id"])
+
+
+@app.delete("/api/pets/{cid}/reminders/{rid}")
+def pet_reminder_del(cid: int, rid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        c.execute("UPDATE reminders SET done=1 WHERE id=? AND home_id=?", (rid, cid))
+        c.commit()
+    return {"ok": True}
+
+
+@app.patch("/api/pets/{cid}/notes/{nid}")
+def pet_note(cid: int, nid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        c.execute("UPDATE notes SET done=? WHERE id=? AND home_id=?", (int(bool(body.get("done"))), nid, cid))
+        c.commit()
+    return {"ok": True}
+
+
+@app.delete("/api/pets/{cid}/notes/{nid}")
+def pet_note_del(cid: int, nid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        c.execute("DELETE FROM notes WHERE id=? AND home_id=?", (nid, cid))
+        c.commit()
+    return {"ok": True}
+
+
+async def fire_home_reminder(r):
+    """A shared reminder is due: the pet says it in Home and both people get a notification."""
+    with closing(db()) as c:
+        p = c.execute("SELECT * FROM pets WHERE conv_id=?", (r["home_id"],)).fetchone()
+        if not p:
+            c.execute("UPDATE reminders SET done=1 WHERE id=?", (r["id"],))
+            c.commit()
+            return
+        tz = _pet_tz(c, p)
+        nxt = _next_due(r["due"] or time.time(), r["repeat"], tz) if r["repeat"] else 0
+        if nxt:
+            c.execute("UPDATE reminders SET due=?, fired=? WHERE id=?", (nxt, time.time(), r["id"]))
+        else:
+            c.execute("UPDATE reminders SET done=1, fired=? WHERE id=?", (time.time(), r["id"]))
+        c.commit()
+    late = r["due"] and time.time() - r["due"] > 600
+    text = f"⏰ Reminder for you both: {r['text']}" + (f"\n(this was for {_local(r['due'], tz)})" if late else "")
+    await pet_say(p["conv_id"], text)
+    await push_to([p["user_a"], p["user_b"]], {"title": p["name"], "body": f"⏰ {r['text']}"[:180], "conv": p["conv_id"], "icon": "/icon-512.png"})
+
+
+async def _pet_evening():
+    """Once a day after 19:00 (the pair's time zone): if nobody has cared for the pet yet, nudge both. Called from the reminder loop."""
+    if time.time() - PET_CHECK[0] < 300:
+        return
+    PET_CHECK[0] = time.time()
+    todo = []
+    with closing(db()) as c:
+        for p in c.execute("SELECT * FROM pets").fetchall():
+            lt = datetime.now(_pet_tz(c, p))
+            day = lt.strftime("%Y-%m-%d")
+            if p["last_nudge_day"] == day or not 19 <= lt.hour < 23:
+                continue
+            c.execute("UPDATE pets SET last_nudge_day=? WHERE id=?", (day, p["id"]))
+            v = pet_view(c, p)
+            if not v["cared_today"]:
+                todo.append((p, v))
+        c.commit()
+    for p, v in todo:
+        need = "is hungry" if v["hunger"] < 55 else "wants to play" if v["joy"] < 55 else "is waiting for you"
+        body = f"{p['name']} {need} and misses you both 🥺 " + (f"Keep your {v['streak']}-day streak going 🔥" if v["streak"] else "Come and say hi 🐾")
+        await pet_say(p["conv_id"], body)
+        await push_to([p["user_a"], p["user_b"]], {"title": p["name"], "body": body, "conv": p["conv_id"], "icon": "/icon-512.png"})
 
 
 @app.get("/api/assistant")
@@ -1456,6 +2054,14 @@ async def admin_delete(uid: int, authorization: str = Header(None)):
                 (FILES / fid).unlink(missing_ok=True)
         c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
         c.execute("DELETE FROM pushes WHERE user_id=?", (uid,))
+        for cid in convs:  # a Home goes with its people: the pet, its days, its hidden account, the shared lists and reminders
+            p = c.execute("SELECT * FROM pets WHERE conv_id=?", (cid,)).fetchone()
+            if p:
+                c.execute("DELETE FROM pet_days WHERE pet_id=?", (p["id"],))
+                c.execute("DELETE FROM pets WHERE id=?", (p["id"],))
+                c.execute("DELETE FROM users WHERE id=? AND bot=2", (p["bot_id"],))
+            c.execute("DELETE FROM reminders WHERE home_id=?", (cid,))
+            c.execute("DELETE FROM notes WHERE home_id=?", (cid,))
         for _t in ("reminders", "notes", "places", "stars"):
             c.execute(f"DELETE FROM {_t} WHERE user_id=?", (uid,))
         c.execute("DELETE FROM invites WHERE used_by IS NULL AND (created_by=? OR (kind='reset' AND note=?))", (uid, str(uid)))
@@ -1672,6 +2278,9 @@ def _chat_label(c, cv, users) -> str:
     if cv["kind"] == "bot":
         u = next((users[i] for i in ids if i in users and not users[i]["bot"]), None)
         return f"Assistant - @{u['username'] if u else '?'}"
+    if cv["kind"] == "pet":
+        pet = c.execute("SELECT name FROM pets WHERE conv_id=?", (cv["id"],)).fetchone()
+        return f"Home - {pet['name'] if pet else '?'} - " + " & ".join("@" + users[i]["username"] for i in ids if i in users and not users[i]["bot"])
     return " & ".join("@" + (users[i]["username"] if i in users else "?") for i in ids)
 
 
@@ -1839,6 +2448,36 @@ def export_assistant(t: str = "", authorization: str = Header(None)):
                        "  transcript.html / transcript.txt / chat.json - their chat with the assistant\n"
                        "  assistant.json - their reminders, notes and lists, and saved places\n")
         return _zip_response(build, f"assistant - everyone - {time.strftime('%Y%m%d')}.zip")
+
+
+@app.get("/api/admin/export/pets")
+def export_pets(t: str = "", authorization: str = Header(None)):
+    """Everyone's pets: each Home chat as a transcript, plus the pet's stats, days of care, and the shared lists and reminders."""
+    admin_q(t, authorization)
+    with closing(db()) as c:
+        users = _names(c)
+
+        def build(z):
+            done = set()
+            for cv in c.execute("SELECT * FROM convs WHERE kind='pet' ORDER BY id").fetchall():
+                folder = f"{_safe(_chat_label(c, cv, users))}/"
+                _chat_bundle(c, cv, users, z, folder, done)
+                p = c.execute("SELECT * FROM pets WHERE conv_id=?", (cv["id"],)).fetchone()
+                if not p:
+                    continue
+                tz = _pet_tz(c, p)
+                z.writestr(folder + "pet.json", json.dumps({
+                    "pet": {**dict(p), "born": _local(p["born"], tz)},
+                    "now": pet_view(c, p),
+                    "days": {r["day"]: json.loads(r["data"] or "{}") for r in c.execute("SELECT * FROM pet_days WHERE pet_id=? ORDER BY day", (p["id"],))},
+                    "shared_reminders": [{**dict(r), "due": _local(r["due"], tz) if r["due"] else "", "done": bool(r["done"])}
+                                         for r in c.execute("SELECT * FROM reminders WHERE home_id=? ORDER BY id", (cv["id"],))],
+                    "shared_notes": [{**dict(r), "done": bool(r["done"])} for r in c.execute("SELECT * FROM notes WHERE home_id=? ORDER BY list, id", (cv["id"],))]},
+                    ensure_ascii=False, indent=1))
+            z.writestr("README.txt", "A.F.R.A chat: everyone's pets. One folder per Home:\n"
+                       "  transcript.html / transcript.txt / chat.json - the Home chat\n"
+                       "  pet.json - the pet's stats and streak, each day's care and quests, and the shared lists and reminders\n")
+        return _zip_response(build, f"pets - everyone - {time.strftime('%Y%m%d')}.zip")
 
 
 @app.get("/api/admin/export/everything")

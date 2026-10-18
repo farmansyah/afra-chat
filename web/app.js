@@ -174,7 +174,7 @@
   const COLORS = ["#e5484d", "#f76b15", "#ffb224", "#30a46c", "#12a594", "#0090ff", "#3e63dd", "#8e4ec6", "#d6409f", "#978365"];
   const conv = (id) => S.convs.find((c) => c.id === id);
   const other = (c) => (c && c.members && c.members[0]) || null;
-  const title = (c) => !c ? "" : c.kind === "self" ? "Notes to self" : c.kind === "bot" ? "Assistant" : (other(c) ? other(c).name || "@" + other(c).username : "Chat");
+  const title = (c) => !c ? "" : c.kind === "self" ? "Notes to self" : c.kind === "bot" ? "Assistant" : c.kind === "pet" ? (c.pet ? c.pet.name : "Home") : (other(c) ? other(c).name || "@" + other(c).username : "Chat");
   const userById = (id) => id === S.me.id ? S.me : S.convs.flatMap((c) => c.members).find((u) => u.id === id);
 
   function avatar(u, cls = "", self = false) {
@@ -294,7 +294,9 @@
       const i = S.convs.findIndex((c) => c.id === e.conv.id); if (i >= 0) S.convs[i] = e.conv; else S.convs.unshift(e.conv);
       if (S.cur === e.conv.id) applyStyle();
       if (e.styled && e.by !== S.me.id && S.cur === e.conv.id) toast(`${(userById(e.by) || {}).name || "They"} changed the chat theme`);
-      cacheSave(); drawList();    } else if (e.t === "conv_gone") {  // the admin deleted the other person's account
+      cacheSave(); drawList();    } else if (e.t === "pet") {
+      onPetEvent(e);
+    } else if (e.t === "conv_gone") {  // the admin deleted the other person's account
       S.convs = S.convs.filter((c) => c.id !== e.conv); delete S.msgs[e.conv];
       if (S.cur === e.conv) { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); }
       cacheSave(); drawList(); badge();
@@ -393,9 +395,9 @@
     items.sort((x, y) => rank(x.id) - rank(y.id));  // pinned chats first (the sort keeps everything else in order)
     el.innerHTML = items.map((c) => {
       const u = other(c), typing = (S.typing[c.id] || 0) > t;
-      const last = c.last ? (c.last.sender === S.me.id && c.kind !== "self" ? "You: " : "") + preview(c.last) : c.kind === "self" ? "Keep notes, links and photos for yourself" : c.kind === "bot" ? "Reminders, notes, lists, questions" : "Say hi 👋";
-      return `<div class="conv ${S.cur === c.id ? "on" : ""}" data-c="${c.id}">
-        <div class="av-wrap ${u && u.online && !u.bot ? "on" : ""}">${avatar(u, "", c.kind === "self")}</div>
+      const last = c.kind === "pet" && c.pet ? petSub(c) : c.last ? (c.last.sender === S.me.id && c.kind !== "self" ? "You: " : "") + preview(c.last) : c.kind === "self" ? "Keep notes, links and photos for yourself" : c.kind === "bot" ? "Reminders, notes, lists, questions" : "Say hi 👋";
+      return `<div class="conv ${S.cur === c.id ? "on" : ""} ${c.kind === "pet" && c.pet && c.pet.needs_care ? "needs" : ""}" data-c="${c.id}">
+        <div class="av-wrap ${u && u.online && !u.bot && c.kind !== "pet" ? "on" : ""}">${cav(c)}</div>
         <div class="mid"><div class="row1"><b>${esc(title(c))}</b>${pins.includes(c.id) ? `<i class="pin" title="Pinned">📌</i>` : ""}<small>${c.last ? shortTime(c.last.created) : ""}</small></div>
           <div class="row2"><span class="${typing ? "typing" : ""}">${typing ? "typing…" : esc(last)}</span>${isMuted(c) ? `<i class="muted">🔕</i>` : ""}${c.unread ? `<span class="badge ${isMuted(c) ? "quiet" : ""}">${c.unread}</span>` : ""}</div></div></div>`;
     }).join("") || `<div class="empty">No chats yet.<br><small>Tap 💬 at the bottom right to start one.</small></div>`;
@@ -426,6 +428,7 @@
         <div class="who"><b id="chatName"></b><small id="chatStat"></small></div>
         <button class="icon" id="bTheme" title="Chat theme">🎨</button><button class="icon" id="bSearch" title="Search">🔍</button></div>
       <div class="searchbar" id="sbar" hidden><input type="search" id="sq" placeholder="Search in this chat"><button class="cbtn" id="sclose">✕</button></div>
+      <div class="home" id="home" hidden></div>
       <div class="log" id="log"></div>
       <div class="dock" id="dock">
         <div class="typing-line" id="typing"></div>
@@ -462,7 +465,8 @@
     const dock = $("#dock"), logEl = $("#log");  // the glass bar floats over the chat: keep the last message clear of it
     if (window.ResizeObserver) (dockRO && dockRO.disconnect(), dockRO = new ResizeObserver(() => { const near = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 160; logEl.style.paddingBottom = (dock.offsetHeight + 6) + "px"; if (near) logEl.scrollTop = logEl.scrollHeight; })).observe(dock);
     window.growComposer = grow; grow(); drawQuick();
-    applyStyle(); drawHeader(); drawChat(); scrollEnd(true);
+    pane.classList.toggle("is-pet", c.kind === "pet");
+    applyStyle(); drawHeader(); drawHome(); drawChat(); scrollEnd(true);
     if (focus && !matchMedia("(pointer: coarse)").matches) txt.focus();
   }
 
@@ -495,8 +499,11 @@
 
   async function drawQuick() {  // one tap sends: a heart, a hug, a few love notes (new ones each time), surprise
     const el = $("#quick"); if (!el) return;
-    if ((conv(S.cur) || {}).kind === "bot") {
-      const ex = [["⏰ Remind me", "Remind me in 10 minutes to stretch"], ["🛒 Shopping list", "Add milk to my shopping list"],
+    const ck = (conv(S.cur) || {}).kind;
+    if (ck === "bot" || ck === "pet") {
+      const pn = ck === "pet" ? (petOf(conv(S.cur)) || {}).name || "buddy" : "";
+      const ex = ck === "pet" ? [["💬 Hi " + pn, "Hi " + pn + "! How are you?"], ["⏰ Remind us", "Remind us both to take a walk in 30 minutes"], ["🛒 Our list", "Add milk to our shopping list"], ["📋 What's on?", "What's on our lists and reminders?"]]
+        : [["⏰ Remind me", "Remind me in 10 minutes to stretch"], ["🛒 Shopping list", "Add milk to my shopping list"],
         ["📋 My lists", "What's on my lists?"], ["📅 My reminders", "What are my reminders?"]];
       el.innerHTML = ex.map(([l], i) => `<button data-x="${i}">${esc(l)}</button>`).join("");
       $$("[data-x]", el).forEach((b) => b.onclick = () => { b.classList.add("sent"); setTimeout(() => b.classList.remove("sent"), 400); send({ text: ex[+b.dataset.x][1] }); });
@@ -535,10 +542,10 @@
   function drawHeader() {
     const c = conv(S.cur); if (!c || !$("#chatName")) return;
     const u = other(c), typing = (S.typing[c.id] || 0) > now();
-    $("#chatAv").innerHTML = `<div class="av-wrap ${u && u.online && !u.bot ? "on" : ""}">${avatar(u, "sm", c.kind === "self")}</div>`;
+    $("#chatAv").innerHTML = `<div class="av-wrap ${u && u.online && !u.bot && c.kind !== "pet" ? "on" : ""}">${cav(c, "sm")}</div>`;
     $("#chatName").textContent = title(c);
     const st = $("#chatStat");
-    st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : c.kind === "bot" ? "personal assistant" : [lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
+    st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : c.kind === "bot" ? "personal assistant" : c.kind === "pet" ? "Home · you & " + ((u && u.name) || "them").split(" ")[0] : [lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
     st.className = typing || (u && u.online) ? "live" : "";
     const tl = $("#typing");
     if (typing && !tl.firstChild) { tl.innerHTML = `<div class="typing-bub" title="${esc(title(c))} is typing"><i></i><i></i><i></i></div>`; scrollEnd(); }
@@ -550,6 +557,7 @@
 
   function bubbleBody(m, list) {
     if (m.deleted) return `<div class="txt">This message was deleted</div>`;
+    if (m.kind === "petinvite") return petInviteCard(m, conv(m.conv_id) || {});
     const a = m.attachment;
     let html = "";
     if (m.reply_to) {
@@ -583,16 +591,16 @@
       const ticks = mine && !m.deleted && c.kind !== "self" ? `<span class="ticks ${read ? "read" : ""}">${m.pending ? "🕓" : read ? "✓✓" : "✓"}</span>` : (m.pending ? "🕓" : "");
       const key = m.client_id || m.id; fresh.add(key);
       const pop = seen && !seen.has(key) ? "pop" : "";
-      html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
+      html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
         <div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
         ${rxPill(m)}
         <div class="meta">${S.stars.has(m.id) ? "⭐ " : ""}${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
     }
-    log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : c.kind === "bot" ? "Ask me anything, or tell me what to remember ✨" : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
+    log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : c.kind === "bot" ? "Ask me anything, or tell me what to remember ✨" : c.kind === "pet" ? "Say hello 🐾" : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
-    bindVideoNotes(log);
+    bindVideoNotes(log); bindPetCards(log);
     $$("[data-rxs]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); navigator.vibrate && navigator.vibrate(5); rxSheet(+b.dataset.rxs); });
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
       e.stopPropagation(); const t = $(`.msg[data-id="${q.dataset.goto}"]`); if (!t) return;
@@ -870,12 +878,14 @@
       <button id="aNote"><i style="background:#ff9500">⭕</i>Video note</button>
       <button id="aLetter"><i style="background:#e5484d">💌</i>Love notes</button>
       <label><i style="background:#0a84ff">📄</i>Document<input type="file" id="aDoc" multiple hidden></label>
+      ${(conv(S.cur) || {}).kind === "direct" && !(other(conv(S.cur)) || {}).bot ? `<button id="aPet"><i style="background:#f59e0b">🐾</i>Share a pet</button>` : ""}
       ${(conv(S.cur) || {}).kind === "bot" ? `<button id="aWhere"><i style="background:#34c759">📍</i>Share where I am</button>` : ""}
     </div>`);
     const take = (e, doc) => { const fs = [...e.target.files]; e.target.value = ""; s.remove(); if (!fs.length) return; doc ? fs.forEach((f) => sendFile(f, "file")) : mediaPreview(fs); };
     $("#aMedia", s).onchange = (e) => take(e); $("#aCam", s).onchange = (e) => take(e); $("#aDoc", s).onchange = (e) => take(e, true);
     $("#aNote", s).onclick = () => { s.remove(); recordVideoNote(); };
     $("#aLetter", s).onclick = () => { s.remove(); openTemplates(); };
+    if ($("#aPet", s)) $("#aPet", s).onclick = () => { s.remove(); sharePet(); };
     if ($("#aWhere", s)) $("#aWhere", s).onclick = () => { s.remove(); shareWhere(); };
   }
   function mediaPreview(files) {  // look before sending, with a caption (like WhatsApp)
@@ -1077,6 +1087,7 @@
   function infoPage() {
     const c = conv(S.cur); if (!c) return;
     if (c.kind === "bot") return assistantInfo(c);
+    if (c.kind === "pet" && c.pet) return petInfo(c);
     const u = other(c), self = c.kind === "self";
     const page = document.createElement("div"); page.className = "page info";
     const close = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
@@ -1085,7 +1096,7 @@
         <div class="ihead">${avatar(u, "xl", self)}<div class="iname">${esc(title(c))}</div>
           ${self ? `<div class="isub">Only you can see this chat</div>` : `<div class="isub">@${esc(u.username)}${lastSeen(u) ? " · " + esc(lastSeen(u)) : ""}</div>${u.bio ? `<div class="ibio">${esc(u.bio)}</div>` : ""}`}</div>
         <div class="iacts"><button data-i="search"><i>🔍</i>Search</button><button data-i="theme"><i>🎨</i>Theme</button>
-          ${self ? "" : `<button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button>`}</div>
+          ${self ? "" : `<button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button>`}${c.kind === "direct" && !(u || {}).bot ? `<button data-i="pet"><i>🐾</i>Share a pet</button>` : ""}</div>
         <div class="chips tabs itabs"><button data-t="media" class="on">Media</button><button data-t="links">Links</button><button data-t="docs">Docs</button><button data-t="starred">⭐ Starred</button></div>
         <div id="ibody"></div>
       </div>`;
@@ -1096,6 +1107,7 @@
       if (a === "search") { close(); $("#sbar").hidden = false; $("#sq").focus(); }
       if (a === "theme") { close(); themeSheet(); }
       if (a === "mute") muteSheet(conv(c.id), () => { page.remove(); infoPage(); });
+      if (a === "pet") { close(); sharePet(); }
     });
     const body = $("#ibody", page);
     const when = (m) => `${dayLabel(m.created)} · ${fmtTime(m.created)}`;
@@ -1127,6 +1139,204 @@
     };
     $$(".itabs button", page).forEach((b) => b.onclick = () => show(b.dataset.t));
     show("media");
+  }
+
+  // ------------------------------------------------------------------ Home: the pet you share (cosy scene, care buttons, daily quests)
+  const PET_SPECIES = [["cat", "🐱"], ["dog", "🐶"], ["bunny", "🐰"], ["bear", "🐻"], ["fox", "🦊"], ["penguin", "🐧"]];
+  const PET_ACTS = [["feed", "🍖", "Feed"], ["play", "🧸", "Play"], ["tend", "🛁", "Bathe"], ["sleep", "💤", "Tuck in"]];
+  const PET_FLY = { feed: "🍖", play: "🧸", tend: "🫧", sleep: "🌙" };
+  const petOf = (c) => (c && c.kind === "pet" && c.pet) || null;
+  const petNight = () => { const h = new Date().getHours(); return h >= 21 || h < 6; };
+  const petMood = (p) => p.sleeping ? "asleep" : p.sad ? "sad" : petNight() && p.energy < 70 ? "sleepy" : p.mood === "hungry" ? "hungry" : p.mood === "happy" ? "happy" : p.mood === "sleepy" ? "sleepy" : p.mood === "lonely" ? "lonely" : "okay";
+  const petWord = (p) => ({ asleep: "is sleeping", sad: "misses you", sleepy: "is sleepy", hungry: "is hungry", happy: "is happy", lonely: "wants company", okay: "is doing fine" })[petMood(p)];
+  const petSub = (c) => { const p = petOf(c); return p ? `${p.streak ? "🔥 " + p.streak + " · " : ""}${p.name} ${petWord(p)}` : ""; };
+  const cav = (c, cls = "") => petOf(c) ? `<div class="av pet-av ${cls}">${petOf(c).emoji}</div>` : avatar(other(c), cls, c.kind === "self");
+  const petLeft = (p, k) => { if (!p._t) p._t = Date.now(); return Math.max(0, Math.ceil((p.cd[k] || 0) - (Date.now() - p._t) / 1000)); };
+  const petFmt = (s) => s >= 60 ? Math.ceil(s / 60) + "m" : s + "s";
+  let petFxSeen = {};
+
+  function drawHome(fx) {
+    const box = $("#home"), c = conv(S.cur), p = petOf(c);
+    if (!box) return;
+    box.hidden = !p; if (!p) return;
+    if (!p._t) p._t = Date.now();
+    const mood = petMood(p), night = petNight(), names = {};
+    [S.me, other(c)].forEach((u) => { if (u) names[u.id] = (u.name || u.username || "").split(" ")[0]; });
+    const done = p.quests.filter((q) => q.done).length;
+    const bar = (k, ico, v) => `<div class="pbar ${v < 30 ? "low" : ""}" title="${k}"><i>${ico}</i><span><em style="width:${v}%"></em></span><b>${v}</b></div>`;
+    if (!box.firstChild || box.dataset.pet !== String(p.id)) {  // first paint: build the scene once, then only update it (keeps the animations running)
+      box.dataset.pet = p.id;
+      box.innerHTML = `<div class="hscene"><div class="hsky"><span class="hsun">☀️</span><span class="hmoon">🌙</span><span class="hstar s1">✦</span><span class="hstar s2">✦</span><span class="hstar s3">✦</span><span class="hcloud">☁️</span></div>
+        <div class="hfloor"></div><div class="hrug"></div><div class="hstage"><div class="hpet" id="hpet"></div><div class="hshadow"></div><div class="hzzz">💤</div><div class="htear">💧</div></div>
+        <div class="hsay" id="hsay"></div>
+        <button class="hinfo" id="hinfo" title="${esc(p.name)}'s page">🐾</button></div>
+        <div class="hmeta"><div class="hstreak" id="hstreak"></div><button class="hq" id="hq"></button></div>
+        <div class="hbars" id="hbars"></div><div class="hquests" id="hquests" hidden></div><div class="hacts" id="hacts"></div>`;
+      $("#hinfo", box).onclick = infoPage;
+      $("#hpet", box).onclick = () => { const e = $("#hpet", box); e.classList.remove("hop"); void e.offsetWidth; e.classList.add("hop"); burstAt(e, "💗", 3); };
+      $("#hq", box).onclick = () => { const q = $("#hquests", box); q.hidden = !q.hidden; $("#hq", box).classList.toggle("open", !q.hidden); };
+      $("#hacts", box).onclick = (e) => { const b = e.target.closest("[data-act]"); if (b) petCare(b.dataset.act, b); };
+    }
+    box.dataset.mood = mood; box.classList.toggle("night", night || p.sleeping); box.classList.toggle("needs", p.needs_care);
+    $("#hpet", box).textContent = p.emoji;
+    $(".hzzz", box).hidden = !(mood === "asleep" || mood === "sleepy");
+    $(".htear", box).hidden = mood !== "sad";
+    $("#hstreak", box).innerHTML = `<b>🔥 ${p.streak}</b><small>day${p.streak === 1 ? "" : "s"} · best ${p.best} · Lv ${p.level}</small>${p.both_today ? `<span class="hboth">💞 both today</span>` : p.cared_today ? `<span class="hboth one">needs you both</span>` : ""}`;
+    $("#hq", box).innerHTML = `📋 Quests <b>${done}/${p.quests.length}</b>`;
+    $("#hbars", box).innerHTML = bar("Fullness", "🍖", p.hunger) + bar("Happiness", "💗", p.joy) + bar("Energy", "⚡", p.energy);
+    $("#hquests", box).innerHTML = p.quests.map((q) => `<div class="hqrow ${q.done ? "done" : ""}"><i>${q.done ? "✓" : ""}</i><span>${esc(q.text)}</span><small>${q.progress}/${q.target}</small></div>`).join("");
+    $("#hacts", box).innerHTML = PET_ACTS.map(([k, ico, lab]) => { const s = petLeft(p, k); return `<button data-act="${k}" ${s ? "disabled" : ""}><i>${ico}</i><span>${k === "tend" ? "Bathe" : lab}</span>${s ? `<small>${petFmt(s)}</small>` : ""}</button>`; }).join("");
+    if (fx) petFx(box, fx, names);
+  }
+
+  function petFx(box, fx, names) {  // food flies in, hearts burst, a little caption says who did it
+    const pet = $("#hpet", box), stage = $(".hstage", box); if (!pet || !stage) return;
+    const say = $("#hsay", box);
+    if (fx.act) {
+      const f = document.createElement("div"); f.className = "hfly"; f.textContent = PET_FLY[fx.act] || "💗"; stage.appendChild(f);
+      const a = f.animate ? f.animate([{ transform: "translate(-90px,-70px) scale(.6) rotate(-40deg)", opacity: 0 }, { transform: "translate(-30px,-90px) scale(1.2) rotate(0)", opacity: 1, offset: .4 }, { transform: "translate(0,-8px) scale(.5)", opacity: 0 }], { duration: 760, easing: "cubic-bezier(.2,.8,.2,1)" }) : null;
+      setTimeout(() => { f.remove(); pet.classList.remove("hop"); void pet.offsetWidth; pet.classList.add("hop"); burstAt(pet, fx.act === "tend" ? "🫧" : "💗", fx.act === "sleep" ? 3 : 8); if (navigator.vibrate) navigator.vibrate(12); }, a ? 640 : 0);
+      const who = fx.by === S.me.id ? "You" : names[fx.by] || "They";
+      const verb = { feed: "fed", play: "played with", tend: "bathed", sleep: "tucked in" }[fx.act];
+      const p = petOf(conv(S.cur));
+      say.textContent = `${who} ${verb} ${p ? p.name : "the pet"} ${PET_FLY[fx.act] === "🫧" ? "🛁" : PET_FLY[fx.act] === "🌙" ? "💤" : PET_FLY[fx.act]}`;
+      say.classList.remove("on"); void say.offsetWidth; say.classList.add("on");
+    }
+    if (fx.fx === "quest") petConfetti(box);
+  }
+  function petConfetti(box) {
+    const r = box.getBoundingClientRect(), cols = ["#ff5d73", "#ffb224", "#30a46c", "#0090ff", "#8e4ec6", "#ff8fb1"];
+    for (let i = 0; i < 36; i++) {
+      const d = document.createElement("i"); d.className = "confetti";
+      d.style.left = r.left + r.width / 2 + "px"; d.style.top = r.top + 70 + "px"; d.style.background = cols[i % cols.length];
+      d.style.setProperty("--dx", (Math.random() * 300 - 150) + "px"); d.style.setProperty("--dy", (120 + Math.random() * 260) + "px"); d.style.setProperty("--rot", (Math.random() * 720 - 360) + "deg");
+      d.style.animationDelay = Math.random() * 120 + "ms"; document.body.appendChild(d); setTimeout(() => d.remove(), 1700);
+    }
+    toast("🎉 Quest done!");
+  }
+  async function petCare(act, btn) {
+    const c = conv(S.cur), p = petOf(c); if (!p || btn.disabled) return;
+    btn.classList.add("press"); setTimeout(() => btn.classList.remove("press"), 300);
+    try {
+      const v = await api(`/api/pets/${c.id}/care`, { body: { action: act } });
+      v._t = Date.now(); c.pet = v;
+      if (!petFxSeen[act + S.me.id] || Date.now() - petFxSeen[act + S.me.id] > 2500) { petFxSeen[act + S.me.id] = Date.now(); drawHome({ act, by: S.me.id, fx: "" }); } else drawHome();
+      drawList();
+    } catch (x) { toast(x.message); }
+  }
+  function onPetEvent(e) {
+    const c = conv(e.conv); if (!c) { resync(); return; }
+    e.pet._t = Date.now(); c.pet = e.pet;
+    const key = e.act + e.by, dup = e.by === S.me.id && e.act && petFxSeen[key] && Date.now() - petFxSeen[key] < 2500;
+    if (S.cur === c.id) { if (e.act && e.by === S.me.id) petFxSeen[key] = Date.now(); drawHome(dup && e.fx !== "quest" ? null : { act: dup ? "" : e.act, by: e.by, fx: e.fx }); drawHeader(); }
+    cacheSave(); drawList();
+  }
+  setInterval(() => { const c = conv(S.cur), p = petOf(c); if (p && S.view === "chat" && $("#home")) { const b = $("#hacts"); if (b) $$("[data-act]", b).forEach((x) => { const s = petLeft(p, x.dataset.act); x.disabled = !!s; const sm = $("small", x); if (s) { if (sm) sm.textContent = petFmt(s); else x.insertAdjacentHTML("beforeend", `<small>${petFmt(s)}</small>`); } else if (sm) sm.remove(); }); } }, 1000);
+  setInterval(() => { const c = conv(S.cur); if (petOf(c) && S.view === "chat") drawHome(); }, 60000);  // moods and day/night drift on their own
+
+  // the invitation card inside the chat
+  function petInviteCard(m, c) {
+    const a = m.attachment || {}, mine = a.from === S.me.id, who = mine ? "You" : (other(c) || {}).name || "They";
+    let body;
+    if (a.state === "accepted") body = `<div class="pi-big">${a.emoji || "🐾"}</div><b>${esc(a.name || "Your pet")} lives in Home now</b>${a.conv && conv(a.conv) ? `<button class="pi-go" data-pgo="${a.conv}">Open Home</button>` : ""}`;
+    else if (a.state === "declined") body = `<div class="pi-big">🐾</div><b>Maybe another time</b>`;
+    else if (mine) body = `<div class="pi-big wait">🐾</div><b>Pet invite sent</b><small>Waiting…</small>`;
+    else body = `<div class="pi-big wiggle">🐾</div><b>${esc(who)} wants to share a pet with you</b><small>You'll feed it, play with it and keep a streak together.</small><div class="pi-row"><button class="pi-yes" data-pyes="${m.id}">Accept</button><button class="pi-no" data-pno="${m.id}">Not now</button></div>`;
+    return `<div class="petinv">${body}</div>`;
+  }
+  function bindPetCards(log) {
+    $$("[data-pyes]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); acceptPet(+b.dataset.pyes); });
+    $$("[data-pno]", log).forEach((b) => b.onclick = async (e) => { e.stopPropagation(); try { await api(`/api/pets/invite/${b.dataset.pno}`, { body: { answer: "decline" } }); } catch (x) { toast(x.message); } });
+    $$("[data-pgo]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); openConv(+b.dataset.pgo); });
+  }
+  function acceptPet(mid) {
+    let sp = "cat";
+    const s = sheet(`<div class="petpick"><h3>Choose your pet 🐾</h3><div class="pp-sp">${PET_SPECIES.map(([k, e]) => `<button data-sp="${k}" class="${k === sp ? "on" : ""}">${e}</button>`).join("")}</div>
+      <input id="ppName" maxlength="20" placeholder="Give it a name" autocomplete="off"><button class="pi-yes wide" id="ppGo">Welcome home</button></div>`);
+    $$("[data-sp]", s).forEach((b) => b.onclick = () => { sp = b.dataset.sp; $$("[data-sp]", s).forEach((x) => x.classList.toggle("on", x === b)); burstAt(b, b.textContent, 4); });
+    $("#ppName", s).focus();
+    $("#ppGo", s).onclick = async () => {
+      const name = $("#ppName", s).value.trim(); if (!name) return toast("Give your pet a name");
+      try {
+        const r = await api(`/api/pets/invite/${mid}`, { body: { answer: "accept", species: sp, name } });
+        s.remove(); if (r.conv && !conv(r.conv.id)) S.convs.unshift(r.conv);
+        cacheSave(); await openConv(r.conv.id); const pe = $("#hpet"); if (pe) { pe.classList.add("hop"); burstAt(pe, "💗", 10); }
+      } catch (x) { toast(x.message); }
+    };
+  }
+  async function sharePet() {
+    const c = conv(S.cur); if (!c || c.kind !== "direct") return;
+    try { await api(`/api/convs/${c.id}/petinvite`, { body: {} }); toast("Pet invite sent 🐾"); } catch (x) { toast(x.message); }
+  }
+
+  // the pet's page: stats, streak, quests, the lists and reminders you share
+  function petInfo(c) {
+    const page = document.createElement("div"); page.className = "page info petpage";
+    const close = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    const p0 = petOf(c);
+    page.innerHTML = `<div class="top"><button class="icon" id="iBack">‹</button><h1>${esc(p0.name)}</h1></div>
+      <div class="page-body">
+        <div class="ihead"><div class="av xl pet-av">${p0.emoji}</div><div class="iname" id="pName">${esc(p0.name)}</div><div class="isub" id="pSub"></div></div>
+        <div class="iacts"><button data-i="rename"><i>✏️</i>Rename</button><button data-i="search"><i>🔍</i>Search</button><button data-i="theme"><i>🎨</i>Theme</button>
+          <button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button></div>
+        <div class="chips tabs itabs"><button data-t="care" class="on">🔥 Care</button><button data-t="notes">📝 Lists</button><button data-t="rem">⏰ Reminders</button></div>
+        <div id="ibody"></div>
+      </div>`;
+    document.body.appendChild(page);
+    $("#iBack", page).onclick = close;
+    $$("[data-i]", page).forEach((b) => b.onclick = () => {
+      const a = b.dataset.i;
+      if (a === "search") { close(); $("#sbar").hidden = false; $("#sq").focus(); }
+      if (a === "theme") { close(); themeSheet(); }
+      if (a === "mute") muteSheet(conv(c.id), () => { page.remove(); petInfo(conv(c.id)); });
+      if (a === "rename") {
+        const s = sheet(`<div class="petpick"><h3>Rename ${esc(petOf(conv(c.id)).name)}</h3><input id="ppName" maxlength="20" value="${esc(petOf(conv(c.id)).name)}" autocomplete="off"><button class="pi-yes wide" id="ppGo">Save</button></div>`);
+        const go = async () => {
+          const name = $("#ppName", s).value.trim(); if (!name) return;
+          try { const cv = await api(`/api/pets/${c.id}`, { method: "PATCH", body: { name } }); const i = S.convs.findIndex((x) => x.id === c.id); if (i >= 0) S.convs[i] = cv; s.remove(); page.remove(); cacheSave(); drawList(); drawHeader(); drawHome(); petInfo(conv(c.id)); }
+          catch (x) { toast(x.message); }
+        };
+        $("#ppGo", s).onclick = go; $("#ppName", s).onkeydown = (e) => { if (e.key === "Enter") go(); }; $("#ppName", s).select();
+      }
+    });
+    const body = $("#ibody", page);
+    let tab = "care";
+    const show = async (t) => {
+      tab = t; $$(".itabs button", page).forEach((b) => b.classList.toggle("on", b.dataset.t === t));
+      let d; try { d = await api(`/api/pets/${c.id}`); } catch (x) { body.innerHTML = `<div class="empty">${esc(x.message)}</div>`; return; }
+      if (tab !== t) return;
+      const p = d.pet; p._t = Date.now(); c.pet = p;
+      $("#pSub", page).textContent = `Level ${p.level} · ${p.xp} xp · ${p.name} ${petWord(p)}`;
+      if (t === "care") {
+        const bar = (ico, lab, v) => `<div class="pbar ${v < 30 ? "low" : ""}"><i>${ico}</i><span><em style="width:${v}%"></em></span><b>${v}</b></div>`;
+        const days = [...d.history].reverse();
+        body.innerHTML = `<div class="pi-stats"><div><b>🔥 ${p.streak}</b><small>day streak</small></div><div><b>🏆 ${p.best}</b><small>best</small></div><div><b>✨ ${p.level}</b><small>level</small></div></div>
+          <div class="hbars pinfo">${bar("🍖", "Fullness", p.hunger)}${bar("💗", "Happiness", p.joy)}${bar("⚡", "Energy", p.energy)}</div>
+          <h4 class="alist">Last ${days.length} days<small>💞 = both of you cared</small></h4>
+          <div class="pi-days">${days.map((x) => `<span class="${x.both ? "both" : x.cared ? "yes" : ""}" title="${esc(x.day)}">${x.both ? "💞" : x.cared ? "✓" : "·"}<small>${esc(x.day.slice(8))}</small></span>`).join("") || `<div class="empty">No days yet.</div>`}</div>
+          <h4 class="alist">Today's quests<small>${p.quests.filter((q) => q.done).length}/${p.quests.length}</small></h4>
+          ${p.quests.map((q) => `<div class="hqrow big ${q.done ? "done" : ""}"><i>${q.done ? "✓" : ""}</i><span>${esc(q.text)}</span><small>${q.progress}/${q.target}</small></div>`).join("")}`;
+      } else if (t === "notes") {
+        const lists = {}; d.notes.forEach((n) => (lists[n.list] = lists[n.list] || []).push(n));
+        body.innerHTML = Object.entries(lists).map(([name, items]) => `<h4 class="alist">${esc(name ? name[0].toUpperCase() + name.slice(1) : "Notes")}<small>${items.filter((n) => !n.done).length} left</small></h4>
+            ${items.map((n) => `<div class="lrow arow ${n.done ? "done" : ""}"><button class="acheck" data-check="${n.id}">${n.done ? "✓" : ""}</button><span><b>${esc(n.text)}</b></span><button class="ax" data-del="${n.id}" title="Delete">✕</button></div>`).join("")}`).join("")
+          || `<div class="empty">Nothing here yet.<br><small>Tell ${esc(p.name)}: “add milk to our shopping list”</small></div>`;
+      } else {
+        body.innerHTML = d.reminders.map((r) => `<div class="lrow arow"><i>⏰</i><span><b>${esc(r.text)}</b><small>${esc([r.when, r.by ? "set by " + r.by : "", r.repeat ? "repeats " + r.repeat : ""].filter(Boolean).join(" · "))}</small></span>
+            <button class="ax" data-cancel="${r.id}" title="Done">✓</button></div>`).join("")
+          || `<div class="empty">No shared reminders.<br><small>Tell ${esc(p.name)}: “remind us both to call mom at 7pm”</small></div>`;
+      }
+      const gone = (row, fn) => { row.classList.add("gone"); setTimeout(fn, 220); };
+      $$("[data-cancel]", body).forEach((b) => b.onclick = () => gone(b.closest(".arow"), () => api(`/api/pets/${c.id}/reminders/${b.dataset.cancel}`, { method: "DELETE" }).then(() => show(tab)).catch((x) => toast(x.message))));
+      $$("[data-del]", body).forEach((b) => b.onclick = () => gone(b.closest(".arow"), () => api(`/api/pets/${c.id}/notes/${b.dataset.del}`, { method: "DELETE" }).then(() => show(tab)).catch((x) => toast(x.message))));
+      $$("[data-check]", body).forEach((b) => b.onclick = () => {
+        const row = b.closest(".arow"), done = !row.classList.contains("done");
+        row.classList.toggle("done", done); b.textContent = done ? "✓" : ""; if (done) { navigator.vibrate && navigator.vibrate(8); burstAt(b, "✨", 4); }
+        api(`/api/pets/${c.id}/notes/${b.dataset.check}`, { method: "PATCH", body: { done } }).then(() => setTimeout(() => show(tab), 400)).catch((x) => toast(x.message));
+      });
+    };
+    $$(".itabs button", page).forEach((b) => b.onclick = () => show(b.dataset.t));
+    show("care");
   }
 
   // ------------------------------------------------------------------ the Assistant: its page (reminders, lists, places) and where you are
@@ -1497,6 +1707,7 @@
           const card = (n, label) => `<div class="stat"><b>${n}</b><span>${label}</span></div>`;
           el.innerHTML = `<div class="stats">${card(st.users, "people")}${card(st.online, "online now")}${card(st.chats, "chats")}${card(st.messages, "messages")}${card(st.today, "in the last 24 h")}${card(st.push_devices, "phones with notifications")}${card(st.files, `files (${st.files_mb} MB)`)}${card(st.invites_open, "unused invites")}</div>
             <h4>Download the data</h4>
+            <a class="dl" href="${dl("/api/admin/export/pets")}" download><span>🐾</span><span><b>Everyone's pets (.zip)</b><small>Every Home chat as a transcript, with each pet's stats, streak, daily care and the lists and reminders you share.</small></span></a>
             <a class="dl" href="${dl("/api/admin/export/everything")}" download><span>📦</span><span><b>Everything (.zip)</b><small>The complete database, every chat (and everyone's Notes to self) as readable transcripts, all photos, voice notes and files, and profile photos.</small></span></a>
             <div class="dl pick"><span>👤</span><span style="flex:1"><b>One person (.zip)</b><small>Their profile and photo, every chat they're in, their Notes to self, with all files.</small>
               <span class="row" style="margin-top:6px"><select id="dlUser" class="inp" style="flex:1;padding:8px"></select><a class="sbtn" id="dlUserGo" download>Download</a></span></span></div>
