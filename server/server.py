@@ -100,6 +100,7 @@ with closing(db()) as _c:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN style TEXT DEFAULT '{{}}'")
     for _t, _col, _def in (("users", "bio", "TEXT DEFAULT ''"), ("members", "muted", "REAL DEFAULT 0"),  # about line; mute until (time)
                           ("users", "bot", "INTEGER DEFAULT 0"),
+                          ("members", "nudged", "INTEGER DEFAULT 0"), ("members", "nudge_on", "INTEGER DEFAULT 1"),  # unread reminders: stage sent (0/1/2), and the per-person switch
                           ("reminders", "home_id", "INTEGER DEFAULT 0"), ("notes", "home_id", "INTEGER DEFAULT 0"),  # shared with a couple in Home (the pet's chat)
                           ("invites", "for_name", "TEXT DEFAULT ''")):  # who an invite is for (shown on the welcome screen)  # the Assistant's account
         if _col not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
@@ -207,7 +208,7 @@ def throttle(key: str):
 def public(u) -> dict:
     online = bool(SOCKETS.get(u["id"]))
     return {"id": u["id"], "username": u["username"], "name": u["name"], "avatar": u["avatar"], "is_admin": bool(u["is_admin"]),
-            "online": online, "last_seen": time.time() if online else u["last_seen"], "bio": u["bio"] or "", "bot": bool(u["bot"])}
+            "online": online, "last_seen": time.time() if online else u["last_seen"], "bio": u["bio"] or "", "bot": int(u["bot"] or 0)}
 
 
 def make_code(c, kind="invite", admin_=0, by=None, note="", for_name="") -> str:
@@ -391,7 +392,7 @@ def _member(c, cid: int, uid: int):
 def conv_view(c, cid: int, uid: int) -> dict:
     cv = c.execute("SELECT * FROM convs WHERE id=?", (cid,)).fetchone()
     others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>? AND (u.bot<>2 OR ?<>'pet')", (cid, uid, cv["kind"]))]
-    mine = c.execute("SELECT last_read, style, muted FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
+    mine = c.execute("SELECT last_read, style, muted, nudge_on FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
     last = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
     unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND created>?",
                        (cid, uid, mine["last_read"] if mine else 0)).fetchone()[0]
@@ -400,6 +401,7 @@ def conv_view(c, cid: int, uid: int) -> dict:
             "last_at": cv["last_at"], "other_read": other_read,
             "style": json.loads(cv["style"] or "{}"), "my_style": json.loads((mine["style"] if mine else "") or "{}"),
             "muted": (mine["muted"] or 0) if mine and (mine["muted"] or 0) > time.time() else 0,
+            "nudge": bool(mine["nudge_on"]) if mine and mine["nudge_on"] is not None else True,
             "pet": pet_view(c, c.execute("SELECT * FROM pets WHERE conv_id=?", (cid,)).fetchone()) if cv["kind"] == "pet" else None,
             "wants_loc": cv["kind"] == "bot" and bool(c.execute("SELECT 1 FROM reminders WHERE user_id=? AND done=0 AND place<>''", (uid,)).fetchone())}
 
@@ -544,7 +546,7 @@ async def send_message(cid: int, body: dict, authorization: str = Header(None)):
                         (cid, u["id"], body.get("client_id"), kind, text, body.get("reply_to") or None,
                          json.dumps(att) if att else "", now, now)).lastrowid
         c.execute("UPDATE convs SET last_at=? WHERE id=?", (now, cid))
-        c.execute("UPDATE members SET last_read=? WHERE conv_id=? AND user_id=?", (now, cid, u["id"]))
+        c.execute("UPDATE members SET last_read=?, nudged=0 WHERE conv_id=? AND user_id=?", (now, cid, u["id"]))
         c.commit()
         m = msg_view(c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
         members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cid,))]
@@ -662,6 +664,19 @@ async def mute(cid: int, body: dict, authorization: str = Header(None)):
     return view
 
 
+@app.put("/api/convs/{cid}/nudge")
+async def set_nudge(cid: int, body: dict, authorization: str = Header(None)):
+    """Unread reminders for me in this chat: {"on": true|false}."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        c.execute("UPDATE members SET nudge_on=?, nudged=0 WHERE conv_id=? AND user_id=?", (1 if body.get("on") else 0, cid, u["id"]))
+        c.commit()
+        view = conv_view(c, cid, u["id"])
+    await send_to(u["id"], {"t": "conv", "conv": view})
+    return view
+
+
 LINK = re.compile(r"https?://[^\s<>\"']+")
 
 
@@ -690,7 +705,7 @@ async def mark_read(cid: int, authorization: str = Header(None)):
     now = time.time()
     with closing(db()) as c:
         _member(c, cid, u["id"])
-        c.execute("UPDATE members SET last_read=? WHERE conv_id=? AND user_id=?", (now, cid, u["id"]))
+        c.execute("UPDATE members SET last_read=?, nudged=0 WHERE conv_id=? AND user_id=?", (now, cid, u["id"]))
         c.commit()
         members = [r["user_id"] for r in c.execute("SELECT user_id FROM members WHERE conv_id=?", (cid,))]
     for x in members:
@@ -1056,6 +1071,37 @@ async def fire_reminder(r):
     await bot_say(cid, u["id"], text)
 
 
+async def _nudge_unread():
+    """1:1 chats: when the other person's message is still unread, nudge at 15 and again at 45 minutes after the OLDEST unread one."""
+    t = time.time()
+    with closing(db()) as c:
+        c.execute("""UPDATE members SET nudged=0 WHERE nudged>0 AND NOT EXISTS (SELECT 1 FROM messages ms WHERE ms.conv_id=members.conv_id
+                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.created>members.last_read)""")
+        rows = c.execute("""SELECT m.conv_id, m.user_id, m.nudged, MIN(ms.created) AS oldest FROM members m
+                            JOIN convs cv ON cv.id=m.conv_id AND cv.kind='direct'
+                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.created>m.last_read
+                            WHERE m.nudge_on=1 AND m.nudged<2 AND m.muted<=?
+                            GROUP BY m.conv_id, m.user_id HAVING MIN(ms.created)<=?""", (t, t - 900)).fetchall()
+        todo = []
+        for r in rows:
+            stage = 2 if t - r["oldest"] >= 2700 and r["nudged"] == 1 else 1 if r["nudged"] == 0 else 0
+            if not stage:
+                continue
+            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
+                             ORDER BY id LIMIT 1""", (r["conv_id"], r["user_id"], r["conv_id"], r["user_id"])).fetchone()
+            sender = c.execute("SELECT * FROM users WHERE id=?", (m["sender"],)).fetchone() if m else None
+            c.execute("UPDATE members SET nudged=? WHERE conv_id=? AND user_id=?", (stage, r["conv_id"], r["user_id"]))
+            if sender:
+                todo.append((stage, r["user_id"], msg_view(m), sender))
+        c.commit()
+    for stage, uid, m, sender in todo:
+        first = ((sender["name"] or sender["username"] or "Someone").split() or ["Someone"])[0]
+        if stage == 1:
+            await push_to([uid], {"title": f"💌 {first} is waiting for you", "body": _push_body(m)[:180], "conv": m["conv_id"], "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
+        else:
+            await push_to([uid], {"title": "Still there?", "body": f"{first}'s message from 45 min ago is unread", "conv": m["conv_id"], "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
+
+
 async def _reminders():
     while True:
         try:
@@ -1064,6 +1110,7 @@ async def _reminders():
             for r in due:
                 await fire_reminder(r)
             await _pet_evening()  # at most once every 5 minutes; the pet's daily nudge
+            await _nudge_unread()
         except Exception as e:
             print("reminders failed:", repr(e)[:300], flush=True)
         await asyncio.sleep(15)
@@ -1867,14 +1914,19 @@ async def push_to(uids: list[int], payload: dict, skip_visible=True):
                 print("push failed:", e, flush=True)
 
 
-async def push_message(sender, m: dict, uids: list[int]):
-    if not uids:
-        return
+def _push_body(m: dict) -> str:
     icon = {"image": "📷", "video": "🎥", "videonote": "📹", "sticker": "", "location": "📍"}.get(m["kind"])
     body = {"image": "📷 Photo", "voice": "🎤 Voice note", "file": "📎 " + ((m.get("attachment") or {}).get("name") or "File"),
             "video": "🎥 Video", "videonote": "📹 Video note", "sticker": "Sticker", "location": "📍 Location"}.get(m["kind"], "New message")
     if m["text"]:
         body = (icon + " " if icon else "") + m["text"] if m["kind"] in ("image", "video") else m["text"]
+    return body
+
+
+async def push_message(sender, m: dict, uids: list[int]):
+    if not uids:
+        return
+    body = _push_body(m)
     await push_to(uids, {"title": sender["name"] or sender["username"], "body": body[:180], "conv": m["conv_id"],
                          "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
 

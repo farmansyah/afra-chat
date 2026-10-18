@@ -368,3 +368,132 @@ select option { background: var(--sheet); color: var(--ink); }
 .vrec.cancelling .vrec-time { color: #ff6b6b; }
 .vrec-circle { transition: transform .25s var(--spring), opacity .2s; }
 .vrec.locked .vrec-time::before { content: "🔒 "; }
+
+/* ===== v18: Liquid Glass bars, touch-first feel, review screens ===== */
+:root {
+  --glass-bg: rgba(255, 255, 255, .58); --glass-edge: rgba(255, 255, 255, .8); --glass-line: rgba(0, 0, 0, .06);
+  --glass-shadow: 0 8px 28px rgba(0, 0, 0, .12), 0 1px 3px rgba(0, 0, 0, .06);
+}
+@media (prefers-color-scheme: dark) {
+  :root { --glass-bg: rgba(30, 30, 34, .52); --glass-edge: rgba(255, 255, 255, .16); --glass-line: rgba(255, 255, 255, .08); --glass-shadow: 0 8px 28px rgba(0, 0, 0, .5), 0 1px 3px rgba(0, 0, 0, .4); }
+}
+.pane-chat > .top, .pane-chat > .searchbar, .lscroll > .top, .dock .compose .plus, .dock .compose .pill, .dock .compose .rcap, .dock .reply-bar, .dock .vrev {
+  background: var(--glass-bg); -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%);
+  border: 0; box-shadow: inset 0 1px 0 var(--glass-edge), 0 0 0 .5px var(--glass-line), var(--glass-shadow); }
+
+/* header floats over the messages */
+.pane-chat > .top { position: absolute; z-index: 6; top: calc(env(safe-area-inset-top, 0px) + 6px); left: 10px; right: 10px; min-height: 56px; padding: 6px 8px; border-radius: 28px; }
+.pane-chat > .searchbar { position: absolute; z-index: 5; top: calc(env(safe-area-inset-top, 0px) + 70px); left: 10px; right: 10px; padding: 6px 8px; border-radius: 22px; align-items: center; }
+.pane-chat > .searchbar[hidden], .pane-chat > .home[hidden] { display: none !important; }
+.pane-chat > .searchbar input { background: rgba(127, 127, 127, .16); border-radius: 16px; }
+.pane-chat > .log { padding-top: calc(env(safe-area-inset-top, 0px) + 80px); }
+.pane-chat.is-pet > .log { padding-top: 10px; }
+.pane-chat > .home { padding-top: calc(env(safe-area-inset-top, 0px) + 74px); }
+.pane-chat > .top .who { min-width: 0; cursor: pointer; }
+
+/* the chat list top bar */
+.lscroll { position: absolute; inset: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; }
+.lscroll > .top { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 6px); z-index: 6; flex: none; margin: calc(env(safe-area-inset-top, 0px) + 6px) 10px 6px; min-height: 56px; padding: 6px 12px; border-radius: 28px; }
+.lscroll .convs { flex: none; overflow: visible; }
+.fab { z-index: 7; }
+
+/* composer: separate glass capsules */
+.dock { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: none; pointer-events: none; }
+.dock > * { pointer-events: auto; }
+.dock .typing-line { pointer-events: none; }
+.dock .compose { align-items: flex-end; gap: 8px; padding: 4px 10px calc(8px + env(safe-area-inset-bottom, 0px)); }
+.dock .compose .plus { width: 46px; height: 46px; border-radius: 50%; flex: none; }
+.dock .compose .pill { border-radius: 24px; min-height: 46px; }
+.dock .compose .pill:focus-within { background: var(--glass-bg); border: 0; box-shadow: inset 0 1px 0 var(--glass-edge), 0 0 0 1.5px var(--accent), var(--glass-shadow); }
+.dock .compose .rcap { display: flex; align-items: center; flex: none; border-radius: 24px; min-height: 46px; padding: 0 2px; }
+.dock .compose .rcap .cbtn { height: 46px; }
+.dock .compose.typed .rcap { padding: 0; }
+.dock .compose .send[data-mode="send"] { width: 42px; height: 42px; margin: 2px; }
+.dock .reply-bar { margin: 0 10px 6px; padding: 8px 12px; border-radius: 20px; }
+.dock .quick { padding: 6px 10px 6px; }
+.dock .quick button { background: var(--glass-bg); -webkit-backdrop-filter: blur(16px) saturate(180%); backdrop-filter: blur(16px) saturate(180%); box-shadow: inset 0 1px 0 var(--glass-edge), 0 0 0 .5px var(--glass-line); }
+.dock.reviewing .compose, .dock.reviewing .quick { display: none; }
+.dock .vrev { display: flex; align-items: center; gap: 4px; margin: 4px 10px calc(8px + env(safe-area-inset-bottom, 0px)); padding: 3px 6px; border-radius: 28px; min-height: 52px; }
+.vrev .cbtn { width: 44px; height: 44px; }
+.vrev .vplay { color: var(--accent); font-size: 18px; }
+.vrev .send { background: var(--accent); color: var(--on-accent); font-size: 18px; }
+.vwave { flex: 1; height: 40px; display: flex; align-items: center; gap: 2px; touch-action: none; cursor: pointer; min-width: 0; }
+.vwave i { flex: 1; min-width: 2px; border-radius: 2px; background: var(--muted); opacity: .5; transition: background .1s; }
+.vwave i.on { background: var(--accent); opacity: 1; }
+.vdur { font: 600 13px var(--sans); font-variant-numeric: tabular-nums; min-width: 38px; text-align: center; color: var(--muted); }
+
+/* full-screen look at photos / videos before sending */
+.mpv { position: fixed; inset: 0; z-index: 36; background: rgba(0, 0, 0, .95); color: #fff; display: flex; flex-direction: column; animation: mpvIn .25s var(--ease); }
+.mpv.closing { opacity: 0; transition: opacity .18s; }
+@keyframes mpvIn { from { opacity: 0; transform: scale(.98); } }
+.mpv-top { display: flex; align-items: center; justify-content: space-between; padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 6px; }
+.mpv-top span { width: 70px; }
+.mpv-b { min-width: 70px; min-height: 44px; border: 0; background: transparent; color: #fff; font: 500 17px var(--sans); text-align: left; }
+.mpv-stage { flex: 1; min-height: 0; display: grid; place-items: center; padding: 0 8px; }
+.mpv-stage img, .mpv-stage video { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 10px; }
+.mpv-strip { display: flex; gap: 8px; overflow-x: auto; padding: 12px 14px 8px; scrollbar-width: none; }
+.mpv-strip::-webkit-scrollbar { display: none; }
+.mpv-th, .mpv-add { position: relative; flex: none; width: 56px; height: 56px; border-radius: 10px; border: 2px solid transparent; }
+.mpv-th.on { border-color: #fff; }
+.mpv-th img, .mpv-th video { width: 100%; height: 100%; object-fit: cover; border-radius: 8px; display: block; }
+.mpv-x { position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 1px solid rgba(255, 255, 255, .5); background: rgba(0, 0, 0, .75); color: #fff; font-size: 11px; line-height: 1; }
+.mpv-x::after { content: ""; position: absolute; inset: -12px; }
+.mpv-add { display: grid; place-items: center; border: 2px dashed rgba(255, 255, 255, .4); font-size: 24px; cursor: pointer; }
+.mpv-bar { display: flex; align-items: flex-end; gap: 8px; padding: 6px 12px calc(10px + env(safe-area-inset-bottom, 0px)); }
+.mpv-cap { flex: 1; resize: none; border: 0; outline: none; background: rgba(255, 255, 255, .14); color: #fff; border-radius: 24px; padding: 12px 16px; font: 16px/1.3 var(--sans); max-height: 120px; }
+.mpv-cap::placeholder { color: rgba(255, 255, 255, .55); }
+.mpv-send { flex: none; width: 48px; height: 48px; border-radius: 50%; border: 0; background: var(--accent); color: #fff; font-size: 20px; }
+.vrec.vrw .vrec-btns { visibility: visible; }
+.vrec.vrw .vrec-circle { cursor: pointer; }
+.vrec.vrw .vrec-circle video { width: 100%; height: 100%; object-fit: cover; border-radius: 50%; }
+.vrec.vrw .rsend { background: var(--accent); }
+
+/* info page rows */
+.irows { margin: 0 0 14px; border-radius: 14px; background: var(--field); overflow: hidden; }
+.irow { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 8px 14px; border: 0; background: transparent; color: var(--ink); text-align: left; font: inherit; cursor: pointer; }
+.irow + .irow { border-top: 1px solid var(--line); }
+.irow i { font-style: normal; font-size: 22px; width: 28px; text-align: center; flex: none; }
+.irow span { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.irow b { font: 600 15px var(--sans); }
+.irow small { color: var(--muted); font-size: 12px; margin-top: 1px; }
+.irow em { font-style: normal; color: var(--muted); font-size: 24px; flex: none; }
+.irow:active { background: var(--hover); transform: none; }
+
+/* edge swipe back (phone): the list waits underneath and slides in */
+#app { position: relative; }
+@media (max-width: 759px) {
+  #app.peek .pane-list { display: flex !important; position: absolute; inset: 0; z-index: 1; transform: translateX(calc(-18% * (1 - var(--p, 0)))); }
+  #app.peek .pane-list::after { content: ""; position: absolute; inset: 0; z-index: 30; background: #000; opacity: calc(.28 * (1 - var(--p, 0))); pointer-events: none; }
+  #app.peek .pane-chat { position: relative; z-index: 2; background: var(--bg); box-shadow: -10px 0 30px rgba(0, 0, 0, .22); }
+  #app.peek.settle .pane-list { transition: transform .26s var(--ease); }
+  #app.peek.settle .pane-list::after { transition: opacity .26s; }
+}
+#app.noanim .pane-list, #app.noanim .pane-chat { animation: none !important; }
+.page { overscroll-behavior-x: none; }
+
+/* touch: no double-tap zoom, no grey flash, 44 px targets, springy press */
+html { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+button, a, label, select, summary, input, [role="button"], .conv { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+@media (pointer: coarse) {
+  .cbtn, .top .icon { min-width: 44px; min-height: 44px; }
+  .dock .compose .pill .cbtn { min-width: 38px; position: relative; }
+  .dock .compose .pill .cbtn::after { content: ""; position: absolute; inset: -4px -3px; }
+  .chips button, .sbtn, .quick button, .tlist button { min-height: 44px; }
+  .quick button.emo { min-width: 44px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  button, .conv, .irow, .sbtn { transition: transform .35s var(--spring), background .15s; }
+  button:active, .conv:active, .sbtn:active, .chips button:active { transform: scale(.95); }
+  .dock .compose .send:active { transform: scale(.9); }
+  .irow:active { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mpv, #app.peek.settle .pane-list, #app.peek.settle .pane-list::after { animation: none; transition: none; }
+  .sheet { animation: none; }
+}
+/* people who asked for less transparency get solid bars */
+@media (prefers-reduced-transparency: reduce) {
+  .pane-chat > .top, .pane-chat > .searchbar, .lscroll > .top, .dock .compose .plus, .dock .compose .pill, .dock .compose .rcap, .dock .reply-bar, .dock .vrev, .dock .quick button {
+    background: var(--bg); -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: 0 0 0 1px var(--line); }
+  .dock .compose .pill:focus-within { background: var(--bg); }
+}

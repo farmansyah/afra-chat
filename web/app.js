@@ -120,7 +120,8 @@
     const go = (i) => tr.scrollTo({ left: Math.max(0, Math.min(cards.length - 1, i)) * (cards[0].offsetWidth + 12), behavior: "smooth" });
     tr.addEventListener("scroll", () => { const i = idx(); cnt.textContent = `${i + 1} / ${cards.length}`; cards.forEach((c, k) => c.classList.toggle("on", k === i)); }, { passive: true });
     $$("[data-n]", o).forEach((b) => b.onclick = () => go(idx() + +b.dataset.n));
-    const close = () => { document.removeEventListener("keydown", key); o.classList.add("closing"); setTimeout(() => o.remove(), 200); };
+    const close = () => { if (o.classList.contains("closing")) return; document.removeEventListener("keydown", key); o.classList.add("closing"); setTimeout(() => o.remove(), 200); };
+    layer(o, close);
     const key = (e) => { if (e.key === "Escape") close(); else if (e.key === "ArrowRight") go(idx() + 1); else if (e.key === "ArrowLeft") go(idx() - 1); };
     document.addEventListener("keydown", key);
     $$("[data-x]", o).forEach((b) => b.onclick = close);
@@ -180,6 +181,7 @@
   function avatar(u, cls = "", self = false) {
     if (self) return `<div class="av ${cls}" style="background:var(--field)">📝</div>`;
     if (!u) return `<div class="av ${cls}">?</div>`;
+    if (u.bot === 2) { const pe = (petOf(conv(S.cur)) || {}).emoji; return `<div class="av pet-av ${cls}">${pe || "🐾"}</div>`; }
     if (u.bot) return `<div class="av bot ${cls}">✨</div>`;
     const ini = (u.name || u.username || "?").trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
     const col = COLORS[(u.id || 0) % COLORS.length];
@@ -348,12 +350,12 @@
   // ------------------------------------------------------------------ screens
   function shell() {
     app.innerHTML = `
-      <section class="pane-list">
+      <section class="pane-list"><div class="lscroll">
         <div class="top"><div id="meAv" style="cursor:pointer"></div><h1>Chats<small class="greet" id="greet"></small></h1>
           <button class="icon dedi-heart" id="bHeart" title="A little note" aria-label="A little note">♥</button><button class="icon" id="bAdmin" title="Admin" hidden>🛡</button></div>
         <div id="banner"></div>
         <div class="list-tools"><input type="search" id="lq" placeholder="Search chats"></div>
-        <div class="convs" id="convs"></div>
+        <div class="convs" id="convs"></div></div>
         <button class="fab" id="bNew" title="New chat" aria-label="New chat"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 21l2.1-5.7A8.4 8.4 0 1 1 21 11.5z"/><path d="M12 8v7M8.5 11.5h7"/></svg></button>
       </section>
       <section class="pane-chat" id="chatPane"></section>`;
@@ -412,7 +414,7 @@
 
   async function openConv(cid) {
     S.cur = cid; S.reply = S.edit = null; S.search = ""; setView("chat");
-    location.hash = "c=" + cid;
+    chatEnter(cid);
     drawList(); drawChatPane(true);
     if (!S.msgs[cid]) { try { await loadConv(cid); } catch (e) { toast(e.message); } drawChat(); scrollEnd(true); }
     const c = conv(cid); if (c && c.unread) markRead(cid);
@@ -426,7 +428,7 @@
     pane.innerHTML = `
       <div class="top"><button class="icon back" id="bBack">‹</button><div id="chatAv"></div>
         <div class="who"><b id="chatName"></b><small id="chatStat"></small></div>
-        <button class="icon" id="bTheme" title="Chat theme">🎨</button><button class="icon" id="bSearch" title="Search">🔍</button></div>
+        <button class="icon dedi-heart" id="bHeartC" title="A little note" aria-label="A little note">♥</button><button class="icon" id="bSearch" title="Search">🔍</button></div>
       <div class="searchbar" id="sbar" hidden><input type="search" id="sq" placeholder="Search in this chat"><button class="cbtn" id="sclose">✕</button></div>
       <div class="home" id="home" hidden></div>
       <div class="log" id="log"></div>
@@ -437,14 +439,14 @@
         <div class="compose" id="compose">
           <button class="cbtn plus" id="battach" title="Attach" aria-label="Attach"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
           <div class="pill"><textarea id="txt" rows="1" placeholder="Message"></textarea><button class="cbtn" id="bemoji" title="Emoji">😊</button></div>
-          <button class="cbtn cam" id="bcam" title="Tap for a photo or video, hold for a video note" aria-label="Camera"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.6l1.2-1.7A1.5 1.5 0 0 1 10.5 3.5h3a1.5 1.5 0 0 1 1.2.8L15.9 6h1.6A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.4"/></svg></button>
-          <button class="cbtn send" id="bsend" title="Send">🎤</button>
+          <div class="rcap"><button class="cbtn cam" id="bcam" title="Tap for a photo or video, hold for a video note" aria-label="Camera"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5A2.5 2.5 0 0 1 6.5 6h1.6l1.2-1.7A1.5 1.5 0 0 1 10.5 3.5h3a1.5 1.5 0 0 1 1.2.8L15.9 6h1.6A2.5 2.5 0 0 1 20 8.5v8A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5z"/><circle cx="12" cy="12.5" r="3.4"/></svg></button>
+          <button class="cbtn send" id="bsend" title="Send">🎤</button></div>
           <input type="file" id="bcamfile" accept="image/*,video/*" capture hidden>
         </div>
       </div>`;
-    $("#bBack").onclick = () => { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); drawList(); };
+    $("#bBack").onclick = () => { if (NAV.chat && NAV.depth === NAV.chat) history.back(); else { NAV.chat = 0; leaveChat(); navSync(); } };
     $("#bSearch").onclick = () => { $("#sbar").hidden = false; $("#sq").focus(); };
-    $("#bTheme").onclick = themeSheet;
+    $("#bHeartC").onclick = heartNotes;
     $("#sclose").onclick = () => { $("#sbar").hidden = true; S.search = ""; drawChat(); };
     $("#sq").oninput = (e) => { S.search = e.target.value.trim().toLowerCase(); drawChat(); };
     const txt = $("#txt");
@@ -467,6 +469,7 @@
     window.growComposer = grow; grow(); drawQuick();
     pane.classList.toggle("is-pet", c.kind === "pet");
     applyStyle(); drawHeader(); drawHome(); drawChat(); scrollEnd(true);
+    if (vrev) { const v = vrev; if (v.cid === S.cur) voiceReview(v.file, v.secs); else voiceDiscard(); }
     if (focus && !matchMedia("(pointer: coarse)").matches) txt.focus();
   }
 
@@ -623,11 +626,12 @@
     let timer = null, lastTap = 0, x0 = 0, y0 = 0, dx = 0;
     const id = +el.dataset.id; if (!id) return;
     el.addEventListener("touchstart", (e) => {
-      if (e.target.closest(".reacts")) return;
+      if (e.target.closest(".reacts") || EDGE.on) return;
       x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; el.style.transition = "none";
       timer = setTimeout(() => { timer = null; navigator.vibrate && navigator.vibrate(10); msgMenu(id); }, 450);
     }, { passive: true });
     el.addEventListener("touchmove", (e) => {  // swipe right to reply
+      if (EDGE.on) { clearTimeout(timer); timer = null; return; }
       const mx = e.touches[0].clientX - x0, my = e.touches[0].clientY - y0;
       if (Math.abs(mx) > 6 || Math.abs(my) > 6) { clearTimeout(timer); timer = null; }
       if (mx > 0 && Math.abs(my) < 30) { dx = Math.min(mx, 90); el.style.transform = `translateX(${dx}px)`; el.classList.toggle("swipe-ready", dx > 60); }
@@ -738,7 +742,9 @@
       log.classList.add("styled");
       const paint = () => { dm.style.opacity = dim / 100; log.classList.toggle("on-dark", dim >= 20); };
       paint();
-      const done = (v) => { document.removeEventListener("keydown", key); o.classList.add("closing"); setTimeout(() => { o.remove(); URL.revokeObjectURL(url); }, 180); res(v); };
+      let fin = false;
+      const done = (v) => { if (fin) return; fin = true; document.removeEventListener("keydown", key); o.classList.add("closing"); setTimeout(() => { o.remove(); URL.revokeObjectURL(url); }, 180); res(v); };
+      layer(o, () => done(null));
       const key = (e) => { if (e.key === "Escape") done(null); };
       document.addEventListener("keydown", key);
       $("input", o).oninput = (e) => { dim = +e.target.value; paint(); };
@@ -888,19 +894,41 @@
     if ($("#aPet", s)) $("#aPet", s).onclick = () => { s.remove(); sharePet(); };
     if ($("#aWhere", s)) $("#aWhere", s).onclick = () => { s.remove(); shareWhere(); };
   }
-  function mediaPreview(files) {  // look before sending, with a caption (like WhatsApp)
-    files = files.filter((f) => /^(image|video)\//.test(f.type)).slice(0, 10);
+  function mediaPreview(files) {  // full-screen look before sending: play it, add a caption, remove what you don't want
+    files = files.filter(isMedia).slice(0, 10);
     if (!files.length) return toast("Choose photos or videos");
-    const urls = files.map((f) => URL.createObjectURL(f));
-    const s = sheet(`<div class="mprev">${files.map((f, i) => f.type.startsWith("video/") ? `<video src="${urls[i]}" controls playsinline muted></video>` : `<img src="${urls[i]}" alt="">`).join("")}</div>
-      <div class="caprow"><textarea class="inp" id="mcap" rows="1" placeholder="Add a caption…"></textarea><button class="cbtn send" id="msend" title="Send">➤</button></div>`);
-    const done = () => urls.forEach((u) => URL.revokeObjectURL(u));
-    s.addEventListener("click", (e) => { if (e.target === s) done(); });
-    $("#msend", s).onclick = async () => {
-      const cap = $("#mcap", s).value.trim(); s.remove(); done();
-      for (let i = 0; i < files.length; i++) await sendFile(files[i], null, i === 0 ? cap : "");
+    const items = files.map((f) => ({ f, url: URL.createObjectURL(f) })); let cur = 0, gone = false;
+    const ov = document.createElement("div"); ov.className = "mpv";
+    ov.innerHTML = `<div class="mpv-top"><button class="mpv-b" data-c>Cancel</button><b id="mpvN"></b><span></span></div>
+      <div class="mpv-stage" id="mpvS"></div><div class="mpv-strip" id="mpvT"></div>
+      <div class="mpv-bar"><textarea class="mpv-cap" id="mpvC" rows="1" placeholder="Add a caption…"></textarea><button class="mpv-send" data-s title="Send" aria-label="Send">➤</button></div>`;
+    document.body.appendChild(ov);
+    const stage = $("#mpvS", ov), strip = $("#mpvT", ov), cap = $("#mpvC", ov), isV = (it) => it.f.type.startsWith("video/");
+    const close = () => {
+      if (gone) return; gone = true; document.removeEventListener("keydown", key);
+      $$("video", ov).forEach((v) => v.pause()); items.forEach((it) => URL.revokeObjectURL(it.url)); ov.classList.add("closing"); setTimeout(() => ov.remove(), 180);
     };
-    setTimeout(() => { const c = $("#mcap", s); if (c && !matchMedia("(pointer: coarse)").matches) c.focus(); }, 150);
+    const key = (e) => { if (e.key === "Escape") close(); };
+    document.addEventListener("keydown", key); layer(ov, close);
+    const paint = () => {
+      cur = Math.min(cur, items.length - 1); const it = items[cur];
+      stage.innerHTML = isV(it) ? `<video src="${it.url}" controls playsinline></video>` : `<img src="${it.url}" alt="">`;
+      $("#mpvN", ov).textContent = items.length > 1 ? `${cur + 1} / ${items.length}` : isV(it) ? "Video" : "Photo";
+      strip.innerHTML = items.map((x, i) => `<div class="mpv-th ${i === cur ? "on" : ""}" data-i="${i}">${isV(x) ? `<video src="${x.url}#t=0.1" muted playsinline preload="metadata"></video>` : `<img src="${x.url}" alt="">`}${items.length > 1 ? `<button class="mpv-x" data-x="${i}" aria-label="Remove">✕</button>` : ""}</div>`).join("")
+        + (items.length < 10 ? `<label class="mpv-add" title="Add more">＋<input type="file" accept="image/*,video/*" multiple hidden></label>` : "");
+      $$("[data-i]", strip).forEach((d) => d.onclick = (e) => { if (e.target.closest("[data-x]")) return; cur = +d.dataset.i; paint(); });
+      $$("[data-x]", strip).forEach((b) => b.onclick = () => { URL.revokeObjectURL(items[+b.dataset.x].url); items.splice(+b.dataset.x, 1); if (!items.length) return close(); paint(); });
+      const add = $(".mpv-add input", strip);
+      if (add) add.onchange = (e) => { [...e.target.files].filter(isMedia).slice(0, 10 - items.length).forEach((f) => items.push({ f, url: URL.createObjectURL(f) })); cur = items.length - 1; paint(); };
+    };
+    const go = async () => {
+      const text = cap.value.trim(), list = items.map((it) => it.f); close();
+      for (let i = 0; i < list.length; i++) await sendFile(list[i], null, i === 0 ? text : "");
+    };
+    $("[data-s]", ov).onclick = go; $("[data-c]", ov).onclick = close;
+    cap.oninput = () => { cap.style.height = "auto"; cap.style.height = Math.min(cap.scrollHeight, 120) + "px"; };
+    cap.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer: coarse)").matches) { e.preventDefault(); go(); } };
+    paint();
   }
   function videoInfo(file) {  // size, length and a poster frame for a video (best effort: some phones say no)
     return new Promise((res) => {
@@ -929,6 +957,20 @@
     });
   }
   const fmtDur = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+  function videoNoteReview(file, secs) {  // the round clip loops; retake, throw away or send
+    const url = URL.createObjectURL(file), ov = document.createElement("div"); ov.className = "vrec vrw"; let gone = false;
+    ov.innerHTML = `<div class="vrec-circle"><video src="${url}" autoplay loop muted playsinline></video></div>
+      <div class="vrec-time">${fmtDur(secs)} · tap the clip for sound</div>
+      <div class="vrec-btns"><button data-r title="Retake" aria-label="Retake">⟲</button><button data-d title="Discard" aria-label="Discard">🗑</button><button class="rsend" data-s title="Send" aria-label="Send">➤</button></div>`;
+    document.body.appendChild(ov);
+    const vid = $("video", ov), close = () => { if (gone) return; gone = true; vid.pause(); URL.revokeObjectURL(url); ov.remove(); };
+    layer(ov, close);
+    $(".vrec-circle", ov).onclick = () => { vid.muted = !vid.muted; $(".vrec-time", ov).textContent = `${fmtDur(secs)} · ${vid.muted ? "tap the clip for sound" : "sound on"}`; };
+    $("[data-d]", ov).onclick = close;
+    $("[data-r]", ov).onclick = () => { close(); recordVideoNote(); };
+    $("[data-s]", ov).onclick = () => { close(); sendFile(file, "videonote", "", { dur: Math.round(secs) }); };
+  }
 
   let vrec = null;
   async function recordVideoNote(opts = {}) {  // round selfie video, up to 60 s, like Telegram / WhatsApp video notes
@@ -959,19 +1001,21 @@
       rec.onstop = () => {
         const secs = (Date.now() - started) / 1000, mime = (rec.mimeType || "video/mp4").split(";")[0]; close();
         if (cancelled) return;
-        if (secs < 1) return toast(hold ? "Hold a little longer to record" : "Tap ●, talk, then tap ■ to send");
-        sendFile(new File([new Blob(chunks, { type: mime })], `videonote.${mime.includes("mp4") ? "mp4" : "webm"}`, { type: mime }), "videonote", "", { dur: Math.round(secs) });
+        if (secs < 1) return toast(hold ? "Hold a little longer to record" : "Tap ●, talk, then tap ■ to review");
+        const vf = new File([new Blob(chunks, { type: mime })], `videonote.${mime.includes("mp4") ? "mp4" : "webm"}`, { type: mime });
+        if (hold && !locked) sendFile(vf, "videonote", "", { dur: Math.round(secs) });  // let go = send
+        else videoNoteReview(vf, secs);
       };
       rec.start(250); started = Date.now(); ov.classList.add("on"); $("#vFlip", ov).disabled = true;
       tick = setInterval(() => {
-        const s = (Date.now() - started) / 1000; time.textContent = "● " + fmtDur(s) + (hold && !locked ? "  ·  release to send" : "  ·  tap ■ to send");
+        const s = (Date.now() - started) / 1000; time.textContent = "● " + fmtDur(s) + (hold && !locked ? "  ·  release to send" : "  ·  tap ■ to review");
         ring.style.strokeDashoffset = 301.6 * (1 - Math.min(s / 60, 1));
         if (s >= 60) rec.stop();
       }, 200);
     };
     go.onclick = () => { if (rec) rec.stop(); else startRec(); };
     if (hold && ctl) {  // WhatsApp style: recording starts at once; slide up to lock, left to cancel, let go to send
-      if (ctl.up) { cancelled = true; close(); return; }
+      if (ctl.up) { close(); toast("Hold the camera button to record"); return; }
       startRec();
       ctl.onmove = () => {
         if (locked) return;
@@ -1003,7 +1047,8 @@
     let i = Math.max(0, media.findIndex((x) => x.id === m.id)); if (!media.length) media.push(m);
     const v = document.createElement("div"); v.className = "viewer mv"; document.body.appendChild(v);
     let hideT = 0, vid = null;
-    const close = () => { clearTimeout(hideT); if (vid) vid.pause(); v.classList.add("closing"); setTimeout(() => v.remove(), 180); document.removeEventListener("keydown", key); };
+    const close = () => { if (v.classList.contains("closing")) return; clearTimeout(hideT); if (vid) vid.pause(); v.classList.add("closing"); setTimeout(() => v.remove(), 180); document.removeEventListener("keydown", key); };
+    layer(v, close);
     const chrome = (on) => { v.classList.toggle("bare", !on); clearTimeout(hideT); if (on && vid && !vid.paused) hideT = setTimeout(() => v.classList.add("bare"), 2600); };
     const show = () => {
       const x = media[i], a = x.attachment || {}, isVid = x.kind === "video";
@@ -1090,18 +1135,19 @@
     if (c.kind === "pet" && c.pet) return petInfo(c);
     const u = other(c), self = c.kind === "self";
     const page = document.createElement("div"); page.className = "page info";
-    const close = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
     page.innerHTML = `<div class="top"><button class="icon" id="iBack">‹</button><h1>${self ? "Notes to self" : "Contact info"}</h1></div>
       <div class="page-body">
         <div class="ihead">${avatar(u, "xl", self)}<div class="iname">${esc(title(c))}</div>
           ${self ? `<div class="isub">Only you can see this chat</div>` : `<div class="isub">@${esc(u.username)}${lastSeen(u) ? " · " + esc(lastSeen(u)) : ""}</div>${u.bio ? `<div class="ibio">${esc(u.bio)}</div>` : ""}`}</div>
-        <div class="iacts"><button data-i="search"><i>🔍</i>Search</button><button data-i="theme"><i>🎨</i>Theme</button>
+        <div class="iacts"><button data-i="search"><i>🔍</i>Search</button>
           ${self ? "" : `<button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button>`}${c.kind === "direct" && !(u || {}).bot ? `<button data-i="pet"><i>🐾</i>Share a pet</button>` : ""}</div>
+        ${themeRow(c)}
         <div class="chips tabs itabs"><button data-t="media" class="on">Media</button><button data-t="links">Links</button><button data-t="docs">Docs</button><button data-t="starred">⭐ Starred</button></div>
         <div id="ibody"></div>
       </div>`;
-    document.body.appendChild(page);
-    $("#iBack", page).onclick = close;
+    document.body.appendChild(page); layer(page, close);
+    $("#iBack", page).onclick = close; bindNudge(page, c);
     $$("[data-i]", page).forEach((b) => b.onclick = () => {
       const a = b.dataset.i;
       if (a === "search") { close(); $("#sbar").hidden = false; $("#sq").focus(); }
@@ -1272,18 +1318,19 @@
   // the pet's page: stats, streak, quests, the lists and reminders you share
   function petInfo(c) {
     const page = document.createElement("div"); page.className = "page info petpage";
-    const close = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
     const p0 = petOf(c);
     page.innerHTML = `<div class="top"><button class="icon" id="iBack">‹</button><h1>${esc(p0.name)}</h1></div>
       <div class="page-body">
         <div class="ihead"><div class="av xl pet-av">${p0.emoji}</div><div class="iname" id="pName">${esc(p0.name)}</div><div class="isub" id="pSub"></div></div>
-        <div class="iacts"><button data-i="rename"><i>✏️</i>Rename</button><button data-i="search"><i>🔍</i>Search</button><button data-i="theme"><i>🎨</i>Theme</button>
+        <div class="iacts"><button data-i="rename"><i>✏️</i>Rename</button><button data-i="search"><i>🔍</i>Search</button>
           <button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button></div>
+        ${themeRow(c)}
         <div class="chips tabs itabs"><button data-t="care" class="on">🔥 Care</button><button data-t="notes">📝 Lists</button><button data-t="rem">⏰ Reminders</button></div>
         <div id="ibody"></div>
       </div>`;
-    document.body.appendChild(page);
-    $("#iBack", page).onclick = close;
+    document.body.appendChild(page); layer(page, close);
+    $("#iBack", page).onclick = close; bindNudge(page, c);
     $$("[data-i]", page).forEach((b) => b.onclick = () => {
       const a = b.dataset.i;
       if (a === "search") { close(); $("#sbar").hidden = false; $("#sq").focus(); }
@@ -1342,17 +1389,18 @@
   // ------------------------------------------------------------------ the Assistant: its page (reminders, lists, places) and where you are
   function assistantInfo(c) {
     const page = document.createElement("div"); page.className = "page info";
-    const close = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
     page.innerHTML = `<div class="top"><button class="icon" id="iBack">‹</button><h1>Assistant</h1></div>
       <div class="page-body">
         <div class="ihead">${avatar(other(c), "xl")}<div class="iname">Assistant</div><div class="isub">Your personal assistant · only you can see this chat</div></div>
-        <div class="iacts"><button data-i="search"><i>🔍</i>Search</button><button data-i="theme"><i>🎨</i>Theme</button>
+        <div class="iacts"><button data-i="search"><i>🔍</i>Search</button>
           <button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button></div>
+        ${themeRow(c)}
         <div class="chips tabs itabs"><button data-t="rem" class="on">⏰ Reminders</button><button data-t="notes">📝 Lists &amp; notes</button><button data-t="places">📍 Places</button></div>
         <div id="ibody"></div>
       </div>`;
-    document.body.appendChild(page);
-    $("#iBack", page).onclick = close;
+    document.body.appendChild(page); layer(page, close);
+    $("#iBack", page).onclick = close; bindNudge(page, c);
     $$("[data-i]", page).forEach((b) => b.onclick = () => {
       const a = b.dataset.i;
       if (a === "search") { close(); $("#sbar").hidden = false; $("#sq").focus(); }
@@ -1459,11 +1507,164 @@
       .catch((x) => { const y = findMsg(id); if (y) { y.reactions = before; drawChat(); } toast(x.message); });
   };
 
+  // ------------------------------------------------------------------ history + touch: back button, edge swipe, sheet swipe, paste / drop
+  // Every page, sheet and the open chat gets a history entry, so Android back and a desktop mouse's back button close the top one.
+  const NAV = { depth: 0, chat: 0, layers: [], silent: 0, t: 0 };
+  try { history.replaceState({ d: 0 }, "", location.href); } catch { }
+  const navNeed = () => Math.max(NAV.chat, 0, ...NAV.layers.map((l) => l.d));
+  function navSync() {  // after something closes in code, drop the leftover history entry (a short wait lets a page that is replaced by another reuse it)
+    clearTimeout(NAV.t);
+    NAV.t = setTimeout(() => { const need = navNeed(); if (NAV.depth > need) { const n = NAV.depth - need; NAV.depth = need; NAV.silent++; history.go(-n); } }, 40);
+  }
+  function navOpen(close) {
+    const L = { d: 0, close };
+    if (NAV.depth === navNeed() + 1) { L.d = NAV.depth; try { history.replaceState({ d: L.d }, "", location.href); } catch { } }
+    else { L.d = ++NAV.depth; try { history.pushState({ d: L.d }, "", location.href); } catch { } }
+    NAV.layers.push(L); return L;
+  }
+  function layer(el, closeFn) {  // register a page / sheet / overlay: back closes it, and removing it by code tidies the history
+    const L = navOpen(() => (closeFn ? closeFn() : el.remove())), rm = el.remove.bind(el);
+    el.remove = () => { const i = NAV.layers.indexOf(L); if (i >= 0) { NAV.layers.splice(i, 1); navSync(); } rm(); };
+    el._layer = L; return L;
+  }
+  function chatEnter(cid) {
+    const u = "#c=" + cid;
+    try {
+      if (!NAV.chat) { NAV.chat = ++NAV.depth; history.pushState({ d: NAV.chat }, "", u); }
+      else history.replaceState({ d: NAV.depth }, "", u);
+    } catch { }
+  }
+  function leaveChat() { S.cur = null; setView("list"); drawList(); drawChatPane(); }
+  addEventListener("popstate", (e) => {
+    if (NAV.silent > 0) { NAV.silent--; return; }
+    const nd = (e.state && e.state.d) || 0;
+    if (nd >= NAV.depth) { NAV.depth = nd; return; }
+    NAV.depth = nd;
+    for (const l of [...NAV.layers].reverse()) if (l.d > nd) { NAV.layers.splice(NAV.layers.indexOf(l), 1); l.close(); }
+    if (NAV.chat > nd) { NAV.chat = 0; leaveChat(); }
+  });
+
+  // swipe from the left edge to go back, like iOS: the page follows the finger, the one underneath slides in
+  const EDGE = { on: false };
+  (() => {
+    let id = null, sx = 0, sy = 0, lock = 0, el = null, under = null, L = null, kind = "", w = 0, ts = [];
+    const phone = () => matchMedia("(max-width: 759px)").matches;
+    const blocked = () => $(".sheet-bg,.viewer,.hn,.wpv,.vrec,.mpv");
+    document.addEventListener("touchstart", (e) => {
+      EDGE.on = false; id = null;
+      if (e.touches.length !== 1 || !S.me || blocked()) return;
+      const x = e.touches[0].clientX; if (x >= 24) return;
+      const pgs = $$(".page"), pg = pgs[pgs.length - 1];
+      if (pg && pg._layer && !pg.classList.contains("closing")) { kind = "page"; el = pg; L = pg._layer; under = pgs.length > 1 ? pgs[pgs.length - 2] : app; }
+      else if (!pg && phone() && S.view === "chat" && S.cur) { kind = "chat"; el = $("#chatPane"); under = null; L = null; }
+      else return;
+      sx = x; sy = e.touches[0].clientY; lock = 0; w = innerWidth; ts = []; id = e.touches[0].identifier; EDGE.on = true;
+    }, { passive: true, capture: true });
+    const begin = () => {
+      el.style.transition = "none"; el.style.willChange = "transform";
+      if (kind === "chat") { app.classList.remove("settle"); app.classList.add("peek"); app.style.setProperty("--p", 0); }
+      else { el.style.boxShadow = "-10px 0 30px rgba(0,0,0,.22)"; under.style.transition = "none"; under.style.willChange = "transform"; under.style.transform = "translateX(-18%)"; }
+    };
+    const move = (x) => {
+      const p = Math.min(1, x / w); el.style.transform = `translateX(${x}px)`;
+      if (kind === "chat") app.style.setProperty("--p", p); else under.style.transform = `translateX(${-18 * (1 - p)}%)`;
+    };
+    document.addEventListener("touchmove", (e) => {
+      if (id === null) return;
+      const tc = [...e.touches].find((x) => x.identifier === id); if (!tc) return;
+      const dx = tc.clientX - sx, dy = tc.clientY - sy;
+      if (!lock) {
+        if (Math.hypot(dx, dy) < 10) return;  // decide the direction first, so vertical scrolling is never touched
+        if (dx > 0 && Math.abs(dx) > Math.abs(dy)) { lock = 1; begin(); } else { lock = -1; id = null; EDGE.on = false; return; }
+      }
+      if (lock === 1) { if (e.cancelable) e.preventDefault(); const x = Math.max(0, dx); ts.push([x, performance.now()]); if (ts.length > 4) ts.shift(); move(x); }
+    }, { passive: false, capture: true });
+    const end = (e) => {
+      const was = lock === 1; id = null; lock = 0; EDGE.on = false; if (!was) return;
+      const a = ts[0], b = ts[ts.length - 1], x = b ? b[0] : 0, v = a && b && b[1] > a[1] ? (b[0] - a[0]) / (b[1] - a[1]) : 0;
+      finish(e.type !== "touchcancel" && (x / w > .35 || (v > .5 && x > 30)));
+    };
+    document.addEventListener("touchend", end, { passive: true, capture: true });
+    document.addEventListener("touchcancel", end, { passive: true, capture: true });
+    const finish = (done) => {
+      const E = el, K = kind, U = under, LL = L;
+      const dur = matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 260, tr = `transform ${dur}ms cubic-bezier(.2,.8,.2,1)`;
+      E.style.transition = tr; if (K === "page") U.style.transition = tr; else app.classList.add("settle");
+      requestAnimationFrame(() => {
+        E.style.transform = `translateX(${done ? w : 0}px)`;
+        if (K === "chat") app.style.setProperty("--p", done ? 1 : 0); else U.style.transform = done ? "" : "translateX(-18%)";
+      });
+      setTimeout(() => {
+        const clear = (n) => { n.style.transition = n.style.transform = n.style.boxShadow = n.style.willChange = ""; };
+        if (K === "page") {
+          if (done) { E.style.display = "none"; const i = NAV.layers.indexOf(LL); if (i >= 0) NAV.layers.splice(i, 1); LL.close(); navSync(); }
+          else clear(E);
+          clear(U);
+        } else {
+          if (done) { app.classList.add("noanim"); NAV.chat = 0; leaveChat(); app.classList.remove("slide"); navSync(); setTimeout(() => app.classList.remove("noanim"), 150); }
+          clear(E); app.classList.remove("peek", "settle"); app.style.removeProperty("--p");
+        }
+      }, dur + 30);
+    };
+  })();
+
+  // paste a picture, or drop photos / videos on the chat: look at them first (with a caption)
+  const isMedia = (f) => /^(image|video)\//.test(f.type);
+  document.addEventListener("paste", (e) => {
+    if (!S.cur || !S.me || $(".mpv,.sheet-bg,.page")) return;
+    const fs = [...((e.clipboardData && e.clipboardData.files) || [])].filter(isMedia);
+    if (fs.length) { e.preventDefault(); mediaPreview(fs); }
+  });
+  document.addEventListener("dragover", (e) => { if (S.cur && e.dataTransfer && [...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+  document.addEventListener("drop", (e) => {
+    if (!S.cur || !e.dataTransfer || !e.dataTransfer.files.length) return;
+    e.preventDefault();
+    const fs = [...e.dataTransfer.files].filter(isMedia);
+    fs.length ? mediaPreview(fs) : toast("Drop photos or videos");
+  });
+
+  // the Chat theme row (all info pages) and the unread-reminder switch (1:1 chats)
+  const themeRow = (c) => `<div class="irows"><button class="irow" data-i="theme"><i>🎨</i><span><b>Chat theme</b><small>Wallpaper, photo backgrounds, colours</small></span><em>›</em></button>
+    ${c && c.kind === "direct" ? `<label class="irow"><i>💌</i><span><b>Remind me about unread messages</b><small>A gentle nudge after 15 and 45 minutes</small></span><input type="checkbox" class="swtog" id="iNudge" ${c.nudge === false ? "" : "checked"}></label>` : ""}</div>`;
+  function bindNudge(page, c) {
+    const sw = $("#iNudge", page); if (!sw) return;
+    sw.onchange = async () => {
+      const on = sw.checked;
+      try { addConv(await api(`/api/convs/${c.id}/nudge`, { method: "PUT", body: { on } })); cacheSave(); toast(on ? "Unread reminders on 💌" : "Unread reminders off"); }
+      catch (x) { sw.checked = !on; toast(x.message); }
+    };
+  }
+
   function sheet(html) {
     const bg = document.createElement("div"); bg.className = "sheet-bg";
     bg.innerHTML = `<div class="sheet"><div class="grab"></div>${html}</div>`;
-    bg.onclick = (e) => { if (e.target === bg) { bg.classList.add("closing"); setTimeout(() => bg.remove(), 180); } };
-    document.body.appendChild(bg); return bg;
+    const sh = bg.firstChild, shut = () => { if (bg.classList.contains("closing")) return; bg.classList.add("closing"); setTimeout(() => bg.remove(), 180); };
+    bg.onclick = (e) => { if (e.target === bg) shut(); };
+    document.body.appendChild(bg); layer(bg, shut);
+    // swipe down from the grab handle or the top strip to close; it follows the finger and springs back if you let go early
+    let y0 = 0, dy = 0, on = false, ts = [];
+    sh.addEventListener("touchstart", (e) => {
+      on = false; const r = sh.getBoundingClientRect(), y = e.touches[0].clientY;
+      if (e.touches.length !== 1 || y - r.top > 56 || e.target.closest("input,textarea,select")) return;
+      y0 = y; dy = 0; on = true; ts = []; sh.style.animation = "none"; sh.style.transition = "none";
+    }, { passive: true });
+    sh.addEventListener("touchmove", (e) => {
+      if (!on) return; dy = e.touches[0].clientY - y0;
+      if (dy <= 0) { dy = 0; sh.style.transform = ""; return; }
+      if (e.cancelable) e.preventDefault();
+      ts.push([dy, performance.now()]); if (ts.length > 4) ts.shift();
+      sh.style.transform = `translateY(${dy}px)`; bg.style.background = `rgba(0,0,0,${.5 * (1 - Math.min(1, dy / sh.offsetHeight))})`;
+    }, { passive: false });
+    const up = (e) => {
+      if (!on) return; on = false;
+      const a = ts[0], b = ts[ts.length - 1], v = a && b && b[1] > a[1] ? (b[0] - a[0]) / (b[1] - a[1]) : 0;
+      if (e.type !== "touchcancel" && (dy > 110 || (v > .6 && dy > 24))) {
+        sh.style.transition = "transform .22s cubic-bezier(.2,.8,.2,1)"; sh.style.transform = "translateY(105%)"; bg.style.transition = "background .22s"; bg.style.background = "rgba(0,0,0,0)";
+        setTimeout(() => bg.remove(), 220);
+      } else { sh.style.transition = "transform .4s cubic-bezier(.2,.9,.3,1.25)"; sh.style.transform = ""; bg.style.background = ""; }
+    };
+    sh.addEventListener("touchend", up, { passive: true }); sh.addEventListener("touchcancel", up, { passive: true });
+    return bg;
   }
 
   function msgMenu(id) {
@@ -1522,12 +1723,44 @@
       const prevCur = S.cur; S.cur = cid; await send({ kind, text, attachment: { ...up, ...att, ...extra }, reply_to: reply }); S.cur = prevCur;
     } catch (e) { S.msgs[cid] = (S.msgs[cid] || []).filter((m) => m !== temp); if (S.cur === cid) drawChat(); toast("Couldn't send: " + e.message); }
   }
-  let rec = null;
+  let rec = null, vrev = null;
+  function voiceDiscard() {
+    if (vrev) { vrev.audio.pause(); URL.revokeObjectURL(vrev.url); vrev = null; }
+    const d = $("#dock"); if (d) d.classList.remove("reviewing"); const r = $("#vrev"); if (r) r.remove();
+  }
+  function voiceReview(file, secs) {  // after you stop: listen, scrub, then send or throw away
+    voiceDiscard(); const dock = $("#dock"); if (!dock) return;
+    const url = URL.createObjectURL(file), audio = new Audio(url), N = 40; audio.preload = "auto";
+    let bars = Array.from({ length: N }, (_, i) => .3 + .55 * Math.abs(Math.sin(i * 1.7) * Math.cos(i * .6)));
+    const el = document.createElement("div"); el.id = "vrev"; el.className = "vrev";
+    el.innerHTML = `<button class="cbtn" data-d title="Discard" aria-label="Discard">🗑</button><button class="cbtn vplay" data-p title="Play" aria-label="Play">▶</button>
+      <div class="vwave" role="slider" aria-label="Seek"></div><span class="vdur">${fmtDur(secs)}</span><button class="cbtn send" data-s title="Send" aria-label="Send">➤</button>`;
+    dock.insertBefore(el, $("#compose")); dock.classList.add("reviewing");
+    vrev = { audio, url, file, secs, cid: S.cur };
+    const wave = $(".vwave", el), play = $("[data-p]", el), dur = $(".vdur", el), len = () => (isFinite(audio.duration) && audio.duration > 0 ? audio.duration : secs);
+    const draw = () => { const p = Math.min(1, audio.currentTime / len()); wave.innerHTML = bars.map((h, i) => `<i class="${i / N < p ? "on" : ""}" style="height:${Math.round(h * 100)}%"></i>`).join(""); dur.textContent = fmtDur(audio.paused && !audio.currentTime ? secs : audio.currentTime); };
+    draw();
+    file.arrayBuffer().then((b) => { const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return; const ctx = new AC(); return ctx.decodeAudioData(b).finally(() => { try { ctx.close(); } catch { } }); }).then((buf) => {
+      if (!buf || !vrev || vrev.url !== url) return;
+      const d = buf.getChannelData(0), step = Math.max(1, Math.floor(d.length / N)), peaks = [];
+      for (let i = 0; i < N; i++) { let m = 0; for (let k = i * step; k < Math.min(d.length, (i + 1) * step); k += 24) m = Math.max(m, Math.abs(d[k])); peaks.push(m); }
+      const top = Math.max(...peaks, .001); bars = peaks.map((p) => .14 + .86 * (p / top)); draw();
+    }).catch(() => { });
+    audio.ontimeupdate = draw; audio.onended = () => { audio.currentTime = 0; play.textContent = "▶"; draw(); };
+    play.onclick = () => { if (audio.paused) { audio.play().then(() => { play.textContent = "❚❚"; }).catch(() => { }); } else { audio.pause(); play.textContent = "▶"; } };
+    const seek = (e) => { const r = wave.getBoundingClientRect(); audio.currentTime = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * len(); draw(); };
+    let drag = false;
+    wave.onpointerdown = (e) => { drag = true; try { wave.setPointerCapture(e.pointerId); } catch { } seek(e); };
+    wave.onpointermove = (e) => { if (drag) seek(e); }; wave.onpointerup = wave.onpointercancel = () => { drag = false; };
+    $("[data-d]", el).onclick = voiceDiscard;
+    $("[data-s]", el).onclick = () => { voiceDiscard(); sendFile(file, "voice"); };
+  }
   async function toggleVoice() {
     const btn = $("#bsend");
     if (rec) { rec.stop(); return; }
     if (!navigator.mediaDevices || !window.MediaRecorder) return toast(isIOS && !standalone ? "Voice notes work in the Home Screen app" : "This browser can't record");
     try {
+      voiceDiscard();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const type = ["audio/mp4", "audio/webm;codecs=opus", "audio/webm"].find((t) => MediaRecorder.isTypeSupported(t)) || "";
       const chunks = []; rec = new MediaRecorder(stream, type ? { mimeType: type } : {});
@@ -1536,9 +1769,9 @@
       rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
       rec.onstop = () => {
         clearInterval(tick); stream.getTracks().forEach((t) => t.stop()); btn.classList.remove("rec"); window.growComposer();
-        const mime = (rec.mimeType || "audio/mp4").split(";")[0]; rec = null;
-        if (Date.now() - started < 800) return toast("Tap the mic, talk, then tap ■ to send");
-        sendFile(new File([new Blob(chunks, { type: mime })], `voice.${mime.includes("mp4") ? "m4a" : "webm"}`, { type: mime }), "voice");
+        const mime = (rec.mimeType || "audio/mp4").split(";")[0], secs = (Date.now() - started) / 1000; rec = null;
+        if (secs < .8) return toast("Tap the mic, talk, then tap ■ to review");
+        voiceReview(new File([new Blob(chunks, { type: mime })], `voice.${mime.includes("mp4") ? "m4a" : "webm"}`, { type: mime }), secs);
       };
       rec.start();
     } catch { rec = null; toast("Microphone not allowed"); }
@@ -1696,7 +1929,8 @@
       <div class="chips tabs"><button data-t="home" class="on">Overview</button><button data-t="users">People</button><button data-t="inv">Invites</button></div>
       <div class="page-body" id="adm"></div>`;
     document.body.appendChild(page);
-    $("#pBack", page).onclick = () => { page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    const pclose = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
+    layer(page, pclose); $("#pBack", page).onclick = pclose;
     const dl = (path) => `${path}?t=${encodeURIComponent(TOKEN)}`;
     const tab = async (t) => {
       $$("[data-t]", page).forEach((b) => b.classList.toggle("on", b.dataset.t === t));
