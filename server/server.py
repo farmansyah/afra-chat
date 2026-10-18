@@ -70,6 +70,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS messages_client ON messages(sender, client_id)
 CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, owner INTEGER, name TEXT, mime TEXT, size INTEGER, created REAL);
 CREATE TABLE IF NOT EXISTS pushes (endpoint TEXT PRIMARY KEY, user_id INTEGER, device TEXT, sub TEXT, created REAL);
 CREATE TABLE IF NOT EXISTS stars (user_id INTEGER, msg_id INTEGER, created REAL, PRIMARY KEY (user_id, msg_id));
+CREATE TABLE IF NOT EXISTS nicknames (user_id INTEGER, other_id INTEGER, nick TEXT, PRIMARY KEY (user_id, other_id));
 CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY, user_id INTEGER, text TEXT, due REAL DEFAULT 0, place TEXT DEFAULT '',
   repeat TEXT DEFAULT '', done INTEGER DEFAULT 0, created REAL, fired REAL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS reminders_due ON reminders(done, due);
@@ -346,6 +347,38 @@ async def update_me(body: dict, authorization: str = Header(None)):
         nu = c.execute("SELECT * FROM users WHERE id=?", (u["id"],)).fetchone()
     await announce_profile(nu)
     return {**public(nu), "needs_new_pw": needs_new_pw(nu)}
+
+
+def nick_map(c, viewer_id: int) -> dict:
+    """What viewer_id calls each person (private to the viewer)."""
+    return {r[0]: r[1] for r in c.execute("SELECT other_id, nick FROM nicknames WHERE user_id=?", (viewer_id,))}
+
+
+@app.get("/api/nicknames")
+def get_nicknames(authorization: str = Header(None)):
+    """my_nicks: what I call people.  nicks_for_me: what people call me (only their name for ME is ever shown to me)."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        mine = nick_map(c, u["id"])
+        for_me = {r[0]: r[1] for r in c.execute("SELECT user_id, nick FROM nicknames WHERE other_id=?", (u["id"],))}
+    return {"my_nicks": mine, "nicks_for_me": for_me}
+
+
+@app.put("/api/nicknames/{other_id}")
+async def put_nickname(other_id: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    nick = "".join(ch for ch in str(body.get("nick") or "") if ch.isprintable() or ch == "‍").strip()[:30]
+    with closing(db()) as c:
+        if other_id == u["id"] or not c.execute("SELECT 1 FROM users WHERE id=?", (other_id,)).fetchone():
+            raise HTTPException(404, "Person not found")
+        if nick:
+            c.execute("INSERT OR REPLACE INTO nicknames (user_id, other_id, nick) VALUES (?,?,?)", (u["id"], other_id, nick))
+        else:
+            c.execute("DELETE FROM nicknames WHERE user_id=? AND other_id=?", (u["id"], other_id))
+        c.commit()
+    await send_to(u["id"], {"t": "nick", "other": other_id, "nick": nick})  # my other devices
+    await send_to(other_id, {"t": "nickfor", "user": u["id"], "nick": nick})  # the sweet note on their info page
+    return {"ok": True, "nick": nick}
 
 
 @app.post("/api/me/avatar")
@@ -1114,6 +1147,9 @@ async def _nudge_unread():
         c.commit()
     for stage, uid, m, sender in todo:
         first = ((sender["name"] or sender["username"] or "Someone").split() or ["Someone"])[0]
+        with closing(db()) as c:
+            _n = c.execute("SELECT nick FROM nicknames WHERE user_id=? AND other_id=?", (uid, sender["id"])).fetchone()
+        first = _n[0] if _n else first
         if stage == 1:
             await push_to([uid], {"title": f"💌 {first} is waiting for you", "body": _push_body(m)[:180], "conv": m["conv_id"], "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
         else:
@@ -2170,8 +2206,14 @@ async def push_message(sender, m: dict, uids: list[int]):
     if not uids:
         return
     body = _push_body(m)
-    await push_to(uids, {"title": sender["name"] or sender["username"], "body": body[:180], "conv": m["conv_id"],
-                         "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
+    with closing(db()) as c:  # each person sees the sender under the name THEY gave them
+        nicks = {r[0]: r[1] for r in c.execute(f"SELECT user_id, nick FROM nicknames WHERE other_id=? AND user_id IN ({','.join('?' * len(uids))})", [sender["id"], *uids])}
+    groups: dict[str, list[int]] = {}
+    for uid in uids:
+        groups.setdefault(nicks.get(uid) or sender["name"] or sender["username"], []).append(uid)
+    for ttl, ids in groups.items():
+        await push_to(ids, {"title": ttl, "body": body[:180], "conv": m["conv_id"],
+                            "icon": f"/api/avatar/{sender['id']}" if sender["avatar"] else "/icon-512.png"})
 
 
 @app.get("/api/push/key")

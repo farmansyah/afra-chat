@@ -153,15 +153,21 @@
   const fileUrl = (id) => `/api/files/${id}?t=${encodeURIComponent(TOKEN)}`;
 
   // ------------------------------------------------------------------ state
-  const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {}, seen: {}, stars: new Set() };
+  const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {}, seen: {}, stars: new Set(), nicks: {}, nickFor: {} };
   const app = $("#app");
   const REACTIONS = ["❤️", "🥰", "😂", "😮", "😢", "🙏", "👍", "🔥"];
   const EMOJIS = "❤️ 🥰 😘 😍 🤗 😊 😁 😂 🥹 😭 😢 🥺 😴 🤔 😮 😎 🙈 🙏 👍 👏 💪 🎉 ✨ 🔥 💯 🌹 🌸 🌙 ☀️ ☕ 🍜 🍦 📚 ✍️ 🎓 💌 💖 💕 💞 💗 🤍 💛 💙 🫶 👀 😅 🙃 😌".split(" ");
   const COLORS = ["#e5484d", "#f76b15", "#ffb224", "#30a46c", "#12a594", "#0090ff", "#3e63dd", "#8e4ec6", "#d6409f", "#978365"];
   const conv = (id) => S.convs.find((c) => c.id === id);
   const other = (c) => (c && c.members && c.members[0]) || null;
-  const title = (c) => !c ? "" : c.kind === "self" ? "Notes to self" : c.kind === "bot" ? "Assistant" : c.kind === "pet" ? (c.pet ? c.pet.name : "Home") : (other(c) ? other(c).name || "@" + other(c).username : "Chat");
+  const title = (c) => !c ? "" : c.kind === "self" ? "Notes to self" : c.kind === "bot" ? "Assistant" : c.kind === "pet" ? (c.pet ? c.pet.name : "Home") : (other(c) ? dn(other(c)) : "Chat");
   const userById = (id) => id === S.me.id ? S.me : S.convs.flatMap((c) => c.members).find((u) => u.id === id);
+  // nicknames: what I call someone is private to me; dn() is the name I see everywhere
+  const dn = (u) => !u ? "" : (S.nicks[u.id] || u.name || "@" + (u.username || ""));
+  const mtext = (m) => {  // Home captions are stored with the real first name; show my nickname for them instead
+    const n = m.kind === "petact" && m.sender !== S.me.id && S.nicks[m.sender], u = n && userById(m.sender), f = u && (u.name || u.username || "").split(" ")[0];
+    return f && m.text.startsWith(f) ? n + m.text.slice(f.length) : m.text;
+  };
 
   function avatar(u, cls = "", self = false) {
     if (self) return `<div class="av ${cls}" style="background:var(--field)">📝</div>`;
@@ -170,7 +176,7 @@
     if (u.bot) return `<div class="av bot ${cls}">✨</div>`;
     const ini = (u.name || u.username || "?").trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
     const col = COLORS[(u.id || 0) % COLORS.length];
-    return `<div class="av ${cls}" style="background:${col}">${u.avatar ? `<img src="${fileUrl(u.avatar)}" alt="">` : esc(ini)}</div>`;
+    return `<div class="av ${cls}" data-av="${u.id}" style="background:${col}">${u.avatar ? `<img src="${fileUrl(u.avatar)}" alt="">` : esc(ini)}</div>`;
   }
   const fmtTime = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   function shortTime(t) {
@@ -195,7 +201,7 @@
   const onlyEmoji = (s) => s && s.length <= 12 && /^(\p{Extended_Pictographic}|\p{Emoji_Component}|‍|️|\s)+$/u.test(s);
   const sizeTxt = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
   const KIND_LABEL = { image: "📷 Photo", voice: "🎤 Voice note", video: "🎥 Video", videonote: "📹 Video note", sticker: "💟 Sticker", location: "📍 Location" };
-  const preview = (m) => !m ? "" : m.deleted ? "Message deleted" : m.text ? ({ image: "📷 ", video: "🎥 " }[m.kind] || "") + m.text
+  const preview = (m) => !m ? "" : m.deleted ? "Message deleted" : m.text ? ({ image: "📷 ", video: "🎥 " }[m.kind] || "") + mtext(m)
     : m.kind === "file" ? "📎 " + ((m.attachment || {}).name || "File") : KIND_LABEL[m.kind] || "";
 
   // ------------------------------------------------------------------ offline copy (shows your chats instantly, also without internet)
@@ -224,6 +230,7 @@
   async function resync() {
     try {
       S.me = await api("/api/me"); pwGate();
+      try { const nk = await api("/api/nicknames"); S.nicks = nk.my_nicks || {}; S.nickFor = nk.nicks_for_me || {}; } catch { }
       S.convs = await api("/api/convs");
       try { S.stars = new Set((await api("/api/stars")).map((m) => m.id)); } catch { }
       const since = lastSync ? lastSync - 5 : 0, t0 = now();
@@ -274,13 +281,17 @@
     } else if (e.t === "presence") {
       S.convs.forEach((c) => c.members.forEach((u) => { if (u.id === e.user) { u.online = e.online; u.last_seen = e.at; } }));
       drawList(); drawHeader();
+    } else if (e.t === "nick" || e.t === "nickfor") {
+      const map = e.t === "nick" ? S.nicks : S.nickFor, id = e.t === "nick" ? e.other : e.user;
+      if (e.nick) map[id] = e.nick; else delete map[id];
+      drawAll(); refreshInfo();
     } else if (e.t === "profile") {
       S.convs.forEach((c) => c.members.forEach((u, i) => { if (u.id === e.user.id) c.members[i] = { ...u, ...e.user }; }));
       drawAll();
     } else if (e.t === "conv") {
       const i = S.convs.findIndex((c) => c.id === e.conv.id); if (i >= 0) S.convs[i] = e.conv; else S.convs.unshift(e.conv);
       if (S.cur === e.conv.id) applyStyle();
-      if (e.styled && e.by !== S.me.id && S.cur === e.conv.id) toast(`${(userById(e.by) || {}).name || "They"} changed the chat theme`);
+      if (e.styled && e.by !== S.me.id && S.cur === e.conv.id) toast(`${dn(userById(e.by)) || "They"} changed the chat theme`);
       cacheSave(); drawList();    } else if (e.t === "pet") {
       onPetEvent(e);
     } else if (e.t === "conv_gone") {  // the admin deleted the other person's account
@@ -533,7 +544,7 @@
     $("#chatAv").innerHTML = `<div class="av-wrap ${u && u.online && !u.bot && c.kind !== "pet" ? "on" : ""}">${cav(c, "sm")}</div>`;
     $("#chatName").textContent = title(c);
     const st = $("#chatStat");
-    st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : c.kind === "bot" ? "personal assistant" : c.kind === "pet" ? "Home · you & " + ((u && u.name) || "them").split(" ")[0] : [lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
+    st.textContent = !LIVE ? "connecting…" : c.kind === "self" ? "only you can see this" : typing ? "typing…" : c.kind === "bot" ? "personal assistant" : c.kind === "pet" ? "Home · you & " + (S.nicks[u && u.id] || ((u && u.name) || "them").split(" ")[0]) : [lastSeen(u), u ? "@" + u.username : ""].filter(Boolean).join("  ·  ");
     st.className = typing || (u && u.online) ? "live" : "";
     const tl = $("#typing");
     if (typing && !tl.firstChild) { tl.innerHTML = `<div class="typing-bub" title="${esc(title(c))} is typing"><i></i><i></i><i></i></div>`; scrollEnd(); }
@@ -550,7 +561,7 @@
     let html = "";
     if (m.reply_to) {
       const q = list.find((x) => x.id === m.reply_to);
-      const who = q ? (q.sender === S.me.id ? "You" : (userById(q.sender) || {}).name || "") : "";
+      const who = q ? (q.sender === S.me.id ? "You" : dn(userById(q.sender))) : "";
       html += `<div class="quote" data-goto="${m.reply_to}"><b>${esc(who)}</b> ${esc(q ? preview(q) : "Earlier message").slice(0, 120)}</div>`;
     }
     if (a && a.id) {
@@ -560,7 +571,7 @@
       else if (m.kind === "videonote") html += `<div class="vnote" data-vn><video src="${fileUrl(a.id)}#t=0.1"${a.poster ? ` poster="${fileUrl(a.poster)}"` : ""} playsinline preload="metadata"></video><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="48"/></svg><span class="vn-play">▶${a.dur ? " " + fmtDur(a.dur) : ""}</span></div>`;
       else html += `<a class="file" href="${fileUrl(a.id)}" target="_blank" download="${esc(a.name)}"><span style="font-size:28px">📄</span><span><b>${esc(a.name)}</b><small>${sizeTxt(a.size || 0)}</small></span></a>`;
     } else if (a && a.local) html += `<div class="txt">⏳ ${esc(a.name)}</div>`;
-    if (m.text) html += `<div class="txt ${onlyEmoji(m.text) ? "big" : ""}">${esc(m.text)}</div>`;
+    if (m.text) html += `<div class="txt ${onlyEmoji(m.text) ? "big" : ""}">${esc(mtext(m))}</div>`;
     return html;
   }
 
@@ -1119,14 +1130,16 @@
     if (c.kind === "bot") return assistantInfo(c);
     if (c.kind === "pet" && c.pet) return petInfo(c);
     const u = other(c), self = c.kind === "self";
-    const page = document.createElement("div"); page.className = "page info";
+    const page = document.createElement("div"); page.className = "page info"; page.dataset.cid = c.id;
     const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
     page.innerHTML = `<div class="top"><button class="icon" id="iBack">‹</button><h1>${self ? "Notes to self" : "Contact info"}</h1></div>
       <div class="page-body">
         <div class="ihead">${avatar(u, "xl", self)}<div class="iname">${esc(title(c))}</div>
-          ${self ? `<div class="isub">Only you can see this chat</div>` : `<div class="isub">@${esc(u.username)}${lastSeen(u) ? " · " + esc(lastSeen(u)) : ""}</div>${u.bio ? `<div class="ibio">${esc(u.bio)}</div>` : ""}`}</div>
+          ${self ? `<div class="isub">Only you can see this chat</div>` : `${S.nicks[u.id] ? `<div class="isub real">${esc(u.name || "")}</div>` : ""}<div class="isub">@${esc(u.username)}${lastSeen(u) ? " · " + esc(lastSeen(u)) : ""}</div>${u.bio ? `<div class="ibio">${esc(u.bio)}</div>` : ""}`}</div>
         <div class="iacts"><button data-i="search"><i>🔍</i>Search</button>
           ${self ? "" : `<button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button>`}${c.kind === "direct" && !(u || {}).bot ? `<button data-i="pet"><i>🐾</i>Share a pet</button>` : ""}</div>
+        ${self || !u || u.bot ? "" : `<div class="irows"><button class="irow" data-i="nick"><i>💕</i><span><b>Nickname</b><small>${S.nicks[u.id] ? esc(S.nicks[u.id]) : "Only you see what you call them"}</small></span><em>›</em></button></div>
+        ${S.nickFor[u.id] ? `<div class="nickfor">${esc((u.name || "").split(" ")[0] || "They")} calls you “${esc(S.nickFor[u.id])}” 💕</div>` : ""}`}
         ${themeRow(c)}
         <div class="chips tabs itabs"><button data-t="media" class="on">Media</button><button data-t="links">Links</button><button data-t="docs">Docs</button><button data-t="starred">⭐ Starred</button></div>
         <div id="ibody"></div>
@@ -1138,6 +1151,7 @@
       if (a === "search") { close(); $("#sbar").hidden = false; $("#sq").focus(); }
       if (a === "theme") { close(); themeSheet(); }
       if (a === "mute") muteSheet(conv(c.id), () => { page.remove(); infoPage(); });
+      if (a === "nick") nickSheet(u);
       if (a === "pet") { close(); sharePet(); }
     });
     const body = $("#ibody", page);
@@ -1267,7 +1281,7 @@
 
   // the invitation card inside the chat
   function petInviteCard(m, c) {
-    const a = m.attachment || {}, mine = a.from === S.me.id, who = mine ? "You" : (other(c) || {}).name || "They";
+    const a = m.attachment || {}, mine = a.from === S.me.id, who = mine ? "You" : dn(other(c)) || "They";
     let body;
     if (a.state === "accepted") body = `<div class="pi-big">${a.emoji || "🐾"}</div><b>${esc(a.name || "Your pet")} lives in Home now</b>${a.conv && conv(a.conv) ? `<button class="pi-go" data-pgo="${a.conv}">Open Home</button>` : ""}`;
     else if (a.state === "declined") body = `<div class="pi-big">🐾</div><b>Maybe another time</b>`;
@@ -1468,7 +1482,7 @@
     const s = sheet(`<div class="rxs"><div class="rxs-tabs"><button class="on" data-f="">All <small>${rx.length}</small></button>${Object.entries(counts).map(([e, n]) => `<button data-f="${esc(e)}">${esc(e)} <small>${n}</small></button>`).join("")}</div>
       <div class="rxs-list">${rx.map(([uid, e], i) => {
         const me = uid === S.me.id, u = me ? S.me : userById(uid) || {};
-        return `<button class="rxs-row ${me ? "me" : ""}" data-e="${esc(e)}" style="animation-delay:${i * 40}ms" ${me ? "data-rm" : ""}>${avatar(u, "sm")}<span><b>${me ? "You" : esc(u.name || "@" + (u.username || ""))}</b>${me ? "<small>Tap to remove</small>" : ""}</span><i>${esc(e)}</i></button>`;
+        return `<button class="rxs-row ${me ? "me" : ""}" data-e="${esc(e)}" style="animation-delay:${i * 40}ms" ${me ? "data-rm" : ""}>${avatar(u, "sm")}<span><b>${me ? "You" : esc(dn(u))}</b>${me ? "<small>Tap to remove</small>" : ""}</span><i>${esc(e)}</i></button>`;
       }).join("")}</div></div>`);
     const shut = () => { s.classList.add("closing"); setTimeout(() => s.remove(), 180); };
     $$("[data-f]", s).forEach((b) => b.onclick = () => {
@@ -1537,7 +1551,7 @@
   (() => {
     let id = null, sx = 0, sy = 0, lock = 0, el = null, under = null, L = null, kind = "", w = 0, ts = [];
     const phone = () => matchMedia("(max-width: 759px)").matches;
-    const blocked = () => $(".sheet-bg,.viewer,.hn,.wpv,.vrec,.mpv");
+    const blocked = () => $(".sheet-bg,.viewer,.avv,.hn,.wpv,.vrec,.mpv");
     document.addEventListener("touchstart", (e) => {
       EDGE.on = false; id = null;
       if (e.touches.length !== 1 || !S.me || blocked()) return;
@@ -1622,6 +1636,111 @@
       catch (x) { sw.checked = !on; toast(x.message); }
     };
   }
+
+  // ------------------------------------------------------------------ v20: profile photo viewer + nicknames
+  function refreshInfo() {
+    const pg = $(".page.info"); if (!pg || pg.classList.contains("closing") || +pg.dataset.cid !== S.cur) return;
+    const keep = pg.querySelector(".page-body").scrollTop; pg.remove(); infoPage();
+    const nb = $(".page.info .page-body"); if (nb) nb.scrollTop = keep;
+  }
+  const NICK_IDEAS = ["Sayang", "Love", "Babe", "Honey", "My person", "Cintaku"];
+  function nickSheet(u) {
+    const cur = S.nicks[u.id] || "", real = (u.name || "").split(" ")[0] || "them";
+    const s = sheet(`<h3 style="margin:4px 0 2px">What do you call ${esc(real)}?</h3>
+      <p style="color:var(--muted);margin:0 0 10px;font-size:14px">Only you see this. ${esc(real)} will see a little note that you gave one 💕</p>
+      <input id="nk" maxlength="30" value="${esc(cur)}" placeholder="A sweet name" style="width:100%;min-height:44px;font-size:17px">
+      <div class="nickchips">${NICK_IDEAS.map((n, i) => `<button class="chipn" style="animation-delay:${i * 45}ms">${esc(n)}</button>`).join("")}</div>
+      <div class="nickbtns">${cur ? `<button class="nkrm" id="nkRm">Remove</button>` : ""}<button class="nksave" id="nkSave">Save</button></div>`);
+    const nk = $("#nk", s); setTimeout(() => nk.focus(), 260);
+    $$(".chipn", s).forEach((b) => b.onclick = () => { nk.value = b.textContent; nk.focus(); });
+    const go = async (val) => {
+      try {
+        const r = await api(`/api/nicknames/${u.id}`, { method: "PUT", body: { nick: val } });
+        if (r.nick) S.nicks[u.id] = r.nick; else delete S.nicks[u.id];
+        s.remove(); drawAll(); refreshInfo(); toast(r.nick ? `Now “${r.nick}” 💕` : "Nickname removed");
+      } catch (x) { toast(x.message); }
+    };
+    $("#nkSave", s).onclick = () => go(nk.value.trim());
+    nk.onkeydown = (e) => { if (e.key === "Enter") go(nk.value.trim()); };
+    if ($("#nkRm", s)) $("#nkRm", s).onclick = () => go("");
+  }
+
+  async function changeMyPhoto(file) {
+    try { const sq = await cropImage(file, 512); if (!sq) return false; const fd = new FormData(); fd.append("file", sq, "avatar.jpg"); S.me = await api("/api/me/avatar", { body: fd }); drawAll(); if ($(".tabpage[data-tp=settings] .tp-scroll")) drawSettings(); toast("Photo updated"); return true; }
+    catch (x) { toast(x.message); return false; }
+  }
+  function photoViewer(uid, from) {
+    const u = uid === S.me.id ? S.me : userById(uid); if (!u || $(".avv")) return;
+    const mine = u.id === S.me.id, nm = mine ? u.name : dn(u), nick = !mine && S.nicks[u.id];
+    const ov = document.createElement("div"); ov.className = "avv";
+    const ini = (u.name || u.username || "?").trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+    const body = () => u.avatar ? `<img src="${fileUrl(u.avatar)}" alt="" draggable="false">` : `<span class="avv-ini" style="background:${COLORS[(u.id || 0) % COLORS.length]}">${esc(ini)}</span>`;
+    ov.innerHTML = `<div class="avv-pic">${body()}</div>
+      <div class="avv-cap"><b>${esc(nm || "")}</b><small>${nick ? esc(u.name || "") + " · " : ""}@${esc(u.username || "")}</small>${u.avatar ? "" : `<em>No photo yet</em>`}
+        ${mine ? `<label class="avv-ch"><span>${u.avatar ? "Change photo" : "Add a photo"}</span><input type="file" accept="image/*" hidden></label>` : ""}</div>
+      <button class="avv-x" aria-label="Close">✕</button>`;
+    document.body.appendChild(ov);
+    const pic = $(".avv-pic", ov), cap = $(".avv-cap", ov), x = $(".avv-x", ov);
+    const src = from && from.getBoundingClientRect ? from.getBoundingClientRect() : null;
+    const fit = () => { const w = Math.min(innerWidth, innerHeight * .6, 520); pic.style.width = pic.style.height = w + "px"; };
+    fit();
+    // spring from the tapped circle to the big picture
+    const flip = (rev) => {
+      const r = pic.getBoundingClientRect(); if (!src || !src.width) return null;
+      const dx = src.left + src.width / 2 - (r.left + r.width / 2), dy = src.top + src.height / 2 - (r.top + r.height / 2), k = src.width / r.width;
+      const a = { transform: `translate(${dx}px,${dy}px) scale(${k})` }, b = { transform: "none" };
+      return pic.animate(rev ? [b, a] : [a, b], { duration: rev ? 220 : 480, easing: rev ? "cubic-bezier(.4,0,.8,.6)" : "cubic-bezier(.2,1.15,.3,1)", fill: "both" });
+    };
+    ov.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 240, fill: "both" });
+    [cap, x].forEach((e, i) => e.animate([{ opacity: 0, transform: "translateY(14px)" }, { opacity: 1, transform: "none" }], { duration: 380, delay: 160 + i * 40, easing: "cubic-bezier(.2,1.1,.3,1)", fill: "both" }));
+    flip(false);
+    let closing = false;
+    const shut = () => {
+      if (closing) return; closing = true;
+      if (!flip(true)) pic.animate([{ transform: pic.style.transform || "none" }, { transform: "scale(.85)" }], { duration: 220, fill: "both" });
+      ov.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 240, fill: "both" });
+      setTimeout(() => ov.remove(), 250);
+    };
+    layer(ov, shut);
+    x.onclick = (e) => { e.stopPropagation(); shut(); };
+    const fi = $("input", ov);
+    if (fi) fi.onchange = async () => { const f = fi.files[0]; fi.value = ""; if (f && await changeMyPhoto(f)) { u.avatar = S.me.avatar; pic.innerHTML = body(); $(".avv-ch span", ov).textContent = "Change photo"; const em = $("em", ov); if (em) em.remove(); } };
+    cap.onclick = (e) => e.stopPropagation();
+    // pinch / double-tap zoom, drag when zoomed, swipe down to close
+    let sc = 1, tx = 0, ty = 0, moved = false, pinch = 0, p0 = null, last = 0, tmr = 0;
+    const apply = (anim) => { pic.style.transition = anim ? "transform .3s cubic-bezier(.2,1.1,.3,1)" : "none"; pic.style.transform = `translate(${tx}px,${ty}px) scale(${sc})`; };
+    const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    pic.addEventListener("touchstart", (e) => {
+      moved = false; if (e.touches.length === 2) pinch = dist(e.touches) / sc;
+      else if (e.touches.length === 1) p0 = { x: e.touches[0].clientX - tx, y: e.touches[0].clientY - ty };
+    }, { passive: true });
+    pic.addEventListener("touchmove", (e) => {
+      if (e.touches.length === 2 && pinch) { sc = Math.max(1, Math.min(5, dist(e.touches) / pinch)); moved = true; apply(); }
+      else if (e.touches.length === 1 && p0) {
+        const nx = e.touches[0].clientX - p0.x, ny = e.touches[0].clientY - p0.y;
+        if (sc > 1 || Math.abs(ny) > 6 || moved) { tx = sc > 1 ? nx : 0; ty = ny; moved = true; apply(); if (sc === 1) ov.style.background = `rgba(0,0,0,${Math.max(.2, .92 - Math.abs(ty) / 500)})`; }
+      }
+    }, { passive: true });
+    pic.addEventListener("touchend", (e) => {
+      if (e.touches.length) return; pinch = 0; p0 = null;
+      if (sc < 1.05) { sc = 1; tx = 0; if (Math.abs(ty) > 90) { shut(); return; } ty = 0; ov.style.background = ""; apply(true); }
+    });
+    ov.addEventListener("click", () => {
+      if (moved) { moved = false; return; }
+      const t = Date.now();
+      if (t - last < 300) { clearTimeout(tmr); last = 0; sc = sc > 1 ? 1 : 2.4; tx = ty = 0; apply(true); return; }
+      last = t; tmr = setTimeout(shut, 300);
+    });
+    addEventListener("resize", fit, { once: true });
+    return ov;
+  }
+  // any avatar with data-av opens the viewer (a tap on the picture, not the rest of the row)
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest("[data-av]");
+    if (!a || !S.me || e.target.closest(".rxs-row,.hm-pick,.item.person,.avv")) return;
+    e.preventDefault(); e.stopPropagation();
+    photoViewer(+a.dataset.av, a);
+  }, true);
 
   function sheet(html) {
     const bg = document.createElement("div"); bg.className = "sheet-bg";
@@ -2184,9 +2303,9 @@
 
   // ---- Lottie (loaded the first time Home shows a pet; the animations come from /pets and are cached by the service worker)
   let LOTP = null; const LOTJ = {};
-  const lottieLib = () => LOTP || (LOTP = new Promise((res) => { const s = document.createElement("script"); s.src = "vendor/lottie_light.min.js?v=19"; s.onload = () => res(window.lottie || null); s.onerror = () => res(null); document.head.appendChild(s); }));
+  const lottieLib = () => LOTP || (LOTP = new Promise((res) => { const s = document.createElement("script"); s.src = "vendor/lottie_light.min.js?v=20"; s.onload = () => res(window.lottie || null); s.onerror = () => res(null); document.head.appendChild(s); }));
   async function lotJson(code) {
-    if (!(code in LOTJ)) { try { const r = await fetch(`pets/${code}.json?v=19`); LOTJ[code] = r.ok ? await r.text() : null; } catch { LOTJ[code] = null; } }
+    if (!(code in LOTJ)) { try { const r = await fetch(`pets/${code}.json?v=20`); LOTJ[code] = r.ok ? await r.text() : null; } catch { LOTJ[code] = null; } }
     return LOTJ[code] ? JSON.parse(LOTJ[code]) : null;
   }
   async function lotMake(box, code, fb, loop = true) {
@@ -2232,7 +2351,7 @@
     const directs = S.convs.filter((c) => c.kind === "direct"), pend = H.pending || [];
     const rows = pend.map((x) => x.mine ? `<div class="hm-card hm-wait">⏳ Waiting for ${esc(x.name)}…<small>Your pet invite is on its way.</small></div>`
       : `<div class="hm-card hm-wait">🐾 ${esc(x.name)} wants to share a pet with you<button class="pi-yes" data-hacc="${x.mid}">Accept</button></div>`).join("");
-    const first = (c) => (other(c) && (other(c).name || other(c).username) || "your friend").split(" ")[0];
+    const first = (c) => S.nicks[(other(c) || {}).id] || (other(c) && (other(c).name || other(c).username) || "your friend").split(" ")[0];
     const pending = new Set(pend.filter((x) => x.mine).map((x) => x.conv));
     const cand = directs.filter((c) => !pending.has(c.id));
     let ask = "";
