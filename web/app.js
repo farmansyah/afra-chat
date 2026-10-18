@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 26;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 27;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -263,6 +263,8 @@
     if (e.t === "hello" || e.t === "update") { if (e.t === "update" || (e.version && String(e.version) !== String(APP_V))) checkUpdate(true); return; }
     if (e.t === "touch") { onTouchEvent(e); return; }
     if (e.t === "card") { onCardEvent(e); return; }
+    if (e.t === "game_draw") { onGameDraw(e); return; }
+    if (e.t === "game") { onGameEvent(e); return; }
     if (e.t === "capsule") { onCapsuleEvent(e); return; }
     if (e.t === "us_here" || e.t === "us_tap" || e.t === "us_sync" || e.t === "us_invite") { onUsEvent(e); return; }
     if (e.t === "pins") {
@@ -279,9 +281,9 @@
         if (c.kind === "pet" && e.msg.kind === "text" && e.msg.text && (userById(e.msg.sender) || {}).bot === 2) petThink(c.id, e.msg.text);
         if (e.msg.sender !== S.me.id) {
           delete S.typing[c.id];
-          if (S.cur === c.id && isVisible()) markRead(c.id); else if (e.msg.kind !== "card") c.unread = (c.unread || 0) + 1;
-          if (!isVisible() && e.msg.kind !== "touch" && e.msg.kind !== "card") toAfra({ type: "message", conv: c.id, from: title(c), text: preview(e.msg) });
-          if (e.msg.kind !== "touch" && e.msg.kind !== "card" && isVisible() && (S.cur === c.id || !isMuted(c))) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
+          if (S.cur === c.id && isVisible()) markRead(c.id); else if (e.msg.kind !== "card" && e.msg.kind !== "game") c.unread = (c.unread || 0) + 1;
+          if (!isVisible() && e.msg.kind !== "touch" && e.msg.kind !== "card" && e.msg.kind !== "game") toAfra({ type: "message", conv: c.id, from: title(c), text: preview(e.msg) });
+          if (e.msg.kind !== "touch" && e.msg.kind !== "card" && e.msg.kind !== "game" && isVisible() && (S.cur === c.id || !isMuted(c))) { sound(S.cur === c.id ? "recv" : "ping"); if (S.cur !== c.id) inAppNotice(c, e.msg); }
         }
         S.convs.sort((a, b) => (b.last_at || 0) - (a.last_at || 0));
       } else if (c.last && c.last.id === e.msg.id) c.last = e.msg;
@@ -642,6 +644,7 @@
       if (pop && !atBottom && !S.search && !mine && !m.deleted && m.created >= JUMP.last) JUMP.n++;
       if (m.kind === "touch" && !m.deleted) { html += touchChip(m, pop); continue; }
       if (m.kind === "card" && !m.deleted) { html += cardChip(m, pop); continue; }
+      if (m.kind === "game" && !m.deleted) { html += gameChip(m, pop); continue; }
       if (m.kind === "capsule" && !m.deleted) { html += capsuleChip(m, pop); continue; }
       html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" || m.kind === "pinact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""} ${ps ? "petsay" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
         ${ps ? `<span class="psav" aria-hidden="true">${esc((petOf(c) || {}).emoji || "🐾")}</span>` : ""}${who ? `<div class="msg-who">${esc(dn(who).split(" ")[0])}</div>` : ""}<div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
@@ -653,7 +656,7 @@
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
-    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log); bindCardChips(log); bindCapsuleChips(log);
+    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log); bindCardChips(log); bindGameChips(log); bindCapsuleChips(log);
     $$("[data-rxs]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); navigator.vibrate && navigator.vibrate(5); rxSheet(+b.dataset.rxs); });
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
       e.stopPropagation(); const t = $(`.msg[data-id="${q.dataset.goto}"]`); if (!t) return;
@@ -3234,7 +3237,7 @@
   function usOpen(cid, act) {
     const c = conv(cid), them = c && other(c); if (!c || c.kind !== "direct" || !them || T.us) return;
     const page = document.createElement("div"); page.className = "page us";
-    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small><button class="us-come" id="usCome" hidden>Come to Us 🫶</button></div><button class="us-cardsb" id="usLetters">Letters 💌</button><button class="us-cardsb" id="usCards">Cards 🃏</button></div>
+    page.innerHTML = `<div class="us-top"><button class="icon" id="usBack" aria-label="Back">‹</button><div class="us-who"><b>${esc(dn(them))}</b><small id="usStat"></small><button class="us-come" id="usCome" hidden>Come to Us 🫶</button></div><div class="us-tools"><button class="us-cardsb" id="usLetters" aria-label="Letters"><span class="t">Letters </span>💌</button><button class="us-cardsb" id="usCards" aria-label="Cards"><span class="t">Cards </span>🃏</button><button class="us-cardsb" id="usPlay" aria-label="Play"><span class="t">Play </span>🎮<b class="pg-dot" hidden></b></button></div></div>
       <div class="us-stage" id="usStage">
         <div class="us-aura"></div>
         <div class="us-blob them" id="usThem" style="--bc:${blobCol(them)}" role="button" aria-label="Touch ${esc(dn(them))}">${blobFace(them)}<i class="us-eyes" aria-hidden="true"><b></b><b></b></i></div>
@@ -3258,7 +3261,7 @@
       clearTimeout(U.still); clearTimeout(U.hbT); U.beating = false; usPresence(cid, false);
       if (U.count) send(); T.us = null; setTimeout(() => page.remove(), 200);
     };
-    layer(page, close); $("#usBack", page).onclick = close; $("#usCards", page).onclick = () => cardsOpen(cid); $("#usLetters", page).onclick = () => lettersOpen(cid);
+    layer(page, close); $("#usBack", page).onclick = close; $("#usCards", page).onclick = () => cardsOpen(cid); $("#usLetters", page).onclick = () => lettersOpen(cid); $("#usPlay", page).onclick = () => playOpen(cid); playBadge();
     const blob = $("#usThem", page), mine = $("#usMe", page), cnt = $("#usCount", page), sbtn = $("#usSend", page), hint = $("#usHold", page);
     const sync = () => {
       const u = other(conv(cid)) || them; U.them = u;
@@ -3869,6 +3872,354 @@
   }
   function bindCapsuleChips(log) {
     $$(".cpchip", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const id = +b.dataset.cp; if (id && S.cur) capsuleRead(S.cur, id); });
+  }
+
+  // ---- v27: play (couple games that earn pet coins; the server is the referee and keeps every secret until it may be shown, the decks live in games.js)
+  const PG = { page: null, cid: 0, hub: null, g: null, busy: false, d: null, q: [], ro: null };
+  const PG_TYPES = [["ttt", "⭕", "Tic-tac-toe", "Three in a row wins"], ["thisthat", "🔀", "This or that", "10 picks each. How alike are you?"], ["who", "🙋", "Who's more likely to…", "10 questions: Me or You?"],
+    ["quiz", "💡", "Couple's quiz", "Write 5 questions about you"], ["twenty", "❓", "20 questions", "Think of something. They guess"], ["draw", "🎨", "Draw and guess", "Draw a word, they guess it"]];
+  const PG_ANS = { yes: "Yes ✅", no: "No ❌", sometimes: "Sometimes 🤷", unsure: "Not sure 🤔" };
+  const PG_COL = ["", "#2b2b33", "#ff4d6d", "#2f7bff"], PG_W = [0, 5, 10, 20];  // pen colours (0 = eraser) and widths in the drawing's 0..1000 space
+  const pgOther = (g) => +Object.keys(g.names).find((k) => +k !== g.me);
+  const pgN = (g, id) => id === g.me ? "You" : g.names[id] || "They";
+  const pgFirst = (id) => { const u = userById(id); return u ? dn(u).split(" ")[0] : "They"; };
+  function pgSumText(h, r) {
+    const w = r.winner ? (r.winner === h.me ? "You won" : (h.names[r.winner] || "They") + " won") : r.res === "draw" ? "A draw" : "";
+    return [w, r.note && r.note !== "A draw" ? r.note : ""].filter(Boolean).join(" · ") || "Done";
+  }
+  const pgSheet = (h) => { const s = sheet(h); s.classList.add("pgz"); return s; };  // above the Play page
+  async function playOpen(cid, gid) {
+    if (PG.page) return;
+    const page = document.createElement("div"); page.className = "page play";
+    page.innerHTML = `<div class="kc-top"><button class="icon" id="pgBack" aria-label="Back">‹</button><b id="pgTitle">Play 🎮</b><span class="kc-sp"></span><button class="icon" id="pgMenu" aria-label="More" hidden>⋯</button></div>
+      <div class="kc-body pg-body" id="pgBody"><div class="hint">Setting up the board…</div></div>`;
+    document.body.appendChild(page);
+    Object.assign(PG, { page, cid, hub: null, g: null, busy: false, d: null, q: [] });
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); pgDrawStop(); if (PG.page === page) PG.page = null; setTimeout(() => page.remove(), 200); playBadge(); };
+    layer(page, close);
+    $("#pgBack", page).onclick = () => { if (PG.g) { PG.g = null; pgDrawStop(); pgLoad(); } else close(); };
+    $("#pgMenu", page).onclick = pgEndSheet;
+    if (gid) await pgShow(gid); else await pgLoad();
+  }
+  async function pgLoad() {
+    const page = PG.page; if (!page) return;
+    try { const h = await api(`/api/games/${PG.cid}`); if (PG.page !== page) return; PG.hub = h; if (!PG.g) pgHub(); } catch (x) { if (PG.page === page && !PG.hub) $("#pgBody", page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; }
+  }
+  function pgHub() {
+    const h = PG.hub, page = PG.page, box = page && $("#pgBody", page); if (!h || !box) return;
+    $("#pgTitle", page).textContent = "Play 🎮"; $("#pgMenu", page).hidden = true;
+    const act = (t) => h.active.find((x) => x.type === t), pet = esc(h.pet_name || "Your pet");
+    box.innerHTML = (h.coins ? `<div class="pg-pig"><i>🐷</i><span>${h.today >= h.cap ? `${pet}'s piggy bank is full for today` : `Finished games earn coins for ${pet}`}</span><small>${h.today}/${h.cap}</small></div>` : "")
+      + `<div class="pg-grid">${PG_TYPES.map(([t, e, n, d]) => { const a = act(t); return `<button class="pg-card ${a && a.mine ? "mine" : ""}" data-t="${t}"><i>${e}</i><b>${esc(n)}</b><small>${esc(d)}</small><em class="${a ? (a.mine ? "turn" : "wait") : "go"}">${a ? (a.mine ? "Your turn" : "Waiting…") : "Start"}</em></button>`; }).join("")}</div>`
+      + (h.recent.length ? `<h4 class="pg-h">Recent</h4><div class="pg-recs">${h.recent.map((r) => { const t = PG_TYPES.find((x) => x[0] === r.type) || []; return `<button class="pg-rec" data-id="${r.id}"><i>${t[1] || "🎮"}</i><span><b>${esc(t[2] || "Game")}</b><small>${esc(pgSumText(h, r))}</small></span><em>${esc(kDay(r.finished))}</em></button>`; }).join("")}</div>` : "");
+    $$(".pg-card", box).forEach((b) => b.onclick = () => pgBegin(b.dataset.t));
+    $$(".pg-rec", box).forEach((b) => b.onclick = () => pgShow(+b.dataset.id));
+  }
+  async function pgShow(id) {
+    try { const r = await api(`/api/games/${PG.cid}/${id}`); pgDrawStop(); PG.g = r.game; PG.q = []; pgPaint(); } catch (x) { toast(x.message); if (!PG.hub) pgLoad(); }
+  }
+  async function pgBegin(type) {
+    const ex = PG.hub && PG.hub.active.find((x) => x.type === type);
+    if (ex) { pgShow(ex.id); return; }
+    if (type === "twenty") { pgTwentySheet(); return; }
+    if (type === "quiz") { pgQuizSheet(); return; }
+    pgStart(type);
+  }
+  async function pgStart(type, body = {}) {
+    if (PG.busy) return; PG.busy = true;
+    try {
+      const r = await api(`/api/games/${PG.cid}/start`, { body: { type, ...body } });
+      if (r.existing) toast("Opening the game you already have");
+      if (PG.page) { pgDrawStop(); PG.g = r.game; PG.q = []; pgPaint(); }
+    } catch (x) { toast(x.message); } finally { PG.busy = false; }
+  }
+  async function pgMove(body) {
+    const g = PG.g; if (!g || PG.busy) return false; PG.busy = true;
+    try { const r = await api(`/api/games/${PG.cid}/${g.id}/move`, { body }); pgSetG(r.game); haptic(8); return true; }
+    catch (x) { toast(x.message); pgShow(g.id); return false; } finally { PG.busy = false; }
+  }
+  function pgSetG(ng) {
+    const old = PG.g; if (!old || ng.id !== old.id || ng.rev < old.rev) return;
+    if (ng.type === "draw" && !ng.strokes) ng.strokes = old.strokes;
+    PG.g = ng; pgPaint();
+    if (old.status === "active" && ng.status === "done") {
+      if (!reduceMotion() && (ng.winner === ng.me || ng.res === "done")) burstAt($(".pg-res", PG.page), ng.winner === ng.me ? "🎉" : "💞", 9);
+      haptic([20, 40, 20]);
+    } else if (!old.mine && ng.mine) haptic(12);
+  }
+  function pgResult(g) {
+    if (g.status === "active") return "";
+    const me = g.me, o = pgOther(g), on = pgN(g, o), n = g.note;
+    let h, sub = "";
+    if (g.status === "cancelled") h = "This game was cancelled";
+    else if (g.status === "expired") h = "This one timed out ⏳";
+    else if (g.res === "resign") h = g.winner === me ? `${on} stepped away. You win this one 🎉` : "You stepped away";
+    else if (g.type === "ttt") h = g.res === "draw" ? "It's a draw 🤝" : g.winner === me ? "You won! 🎉" : `${on} won`;
+    else if (g.type === "thisthat") h = `${g.same}/${g.total} the same 💞`;
+    else if (g.type === "who") h = `You agreed on ${g.same}/${g.total} 💞`;
+    else if (g.type === "quiz") h = g.guesser === me ? `You got ${g.score}/5 ${g.score >= 4 ? "🎉" : ""}` : `${on} got ${g.score}/5 ${g.score >= 4 ? "🎉" : ""}`;
+    else { h = g.winner === me ? "You win! 🎉" : `${on} wins`; sub = g.secret ? `It was “${esc(g.secret)}”` : g.word ? `It was “${esc(g.word)}”` : ""; }
+    let coin = "";
+    if (g.coins && g.pay && g.status === "done" && g.res !== "resign") {
+      const pet = esc(g.pet_name || "Your pet");
+      coin = g.pay.got ? `<small class="pg-coin">+${g.pay.got} 🪙 for ${pet}${g.pay.full ? ` · ${pet}'s piggy bank is full for today` : ""}</small>` : `<small class="pg-coin">${pet}'s piggy bank is full for today 🐷</small>`;
+    }
+    return `<div class="pg-res"><b>${h}</b>${sub ? `<span>${sub}</span>` : ""}${n && g.type === "ttt" && g.res !== "draw" ? "" : ""}${coin}</div>`;
+  }
+  function pgAgain(g) {
+    const rem = g.type === "ttt" ? `<button class="pg-btn" id="pgAgain">Rematch</button>` : `<button class="pg-btn" id="pgAgain">Play again</button>`;
+    return g.status === "active" ? "" : `<div class="pg-act">${rem}<button class="pg-ghost" id="pgHome">All games</button></div>`;
+  }
+  function pgBindAgain(g, box) {
+    const a = $("#pgAgain", box), h = $("#pgHome", box);
+    if (h) h.onclick = () => { PG.g = null; pgDrawStop(); pgLoad(); };
+    if (a) a.onclick = () => { if (g.type === "ttt") pgStart("ttt", { rematch: true }); else { PG.g = null; pgDrawStop(); pgLoad().then(() => pgBegin(g.type)); } };
+  }
+  function pgPaint() {
+    const g = PG.g, page = PG.page; if (!g || !page) return;
+    $("#pgTitle", page).textContent = `${g.emoji} ${g.name}`; $("#pgMenu", page).hidden = g.status !== "active";
+    const box = $("#pgBody", page);
+    const keep = ["pgAsk", "pgGuess"].map((id) => { const el = $("#" + id, box); return el ? [id, el.value, document.activeElement === el] : null; }).filter(Boolean);
+    if (g.type === "draw") pgDraw(g, box); else {
+      box.innerHTML = { ttt: pgTtt, thisthat: pgRounds, who: pgRounds, quiz: pgQuiz, twenty: pgTwenty }[g.type](g) + pgAgain(g);
+      pgBindAgain(g, box); pgBind(g, box);
+    }
+    keep.forEach(([id, v, f]) => { const el = $("#" + id, box); if (el) { el.value = v; if (f) el.focus(); } });
+  }
+  function pgBind(g, box) {
+    $$("[data-cell]", box).forEach((b) => b.onclick = () => pgMove({ cell: +b.dataset.cell }));
+    $$("[data-pick]", box).forEach((b) => b.onclick = () => {
+      const v = g.type === "who" ? b.dataset.pick : +b.dataset.pick;
+      if (PG.busy) return; b.classList.add("on"); pgMove({ i: g.i, pick: v });
+    });
+    $$("[data-qa]", box).forEach((b) => b.onclick = () => {
+      PG.q.push(+b.dataset.qa); haptic(8);
+      if (PG.q.length >= 5) pgMove({ answers: PG.q.slice() }).then((ok) => { if (!ok) PG.q = []; }); else pgPaint();
+    });
+    $$("[data-ans]", box).forEach((b) => b.onclick = () => pgMove({ answer: b.dataset.ans }));
+    const ask = $("#pgAsk", box), askb = $("#pgAskGo", box), gs = $("#pgGuess", box), gsb = $("#pgGuessGo", box);
+    const go = (inp, key) => { const v = inp.value.trim(); if (!v) return; pgMove({ [key]: v }).then((ok) => { if (ok) inp.value = ""; }); };
+    if (askb) { askb.onclick = () => go(ask, "ask"); ask.onkeydown = (e) => { if (e.key === "Enter") go(ask, "ask"); }; }
+    if (gsb) { gsb.onclick = () => go(gs, "guess"); gs.onkeydown = (e) => { if (e.key === "Enter") go(gs, "guess"); }; }
+    const ok = $("#pgAccept", box); if (ok) ok.onclick = () => pgMove({ accept: true });
+  }
+  function pgEndSheet() {
+    const g = PG.g; if (!g || g.status !== "active") return;
+    const s = pgSheet(`<h3 style="margin:4px 0 6px">End this game?</h3><p class="hint" style="text-align:left">It ends for both of you and no coins are earned.</p>
+      <button class="pg-btn danger" id="pgEnd">End the game</button><button class="pg-ghost" id="pgKeep">Keep playing</button>`);
+    $("#pgKeep", s).onclick = () => s.remove();
+    $("#pgEnd", s).onclick = async () => {
+      s.remove();
+      try { const r = await api(`/api/games/${PG.cid}/${g.id}/resign`, { body: {} }); pgSetG(r.game); } catch (x) { toast(x.message); }
+    };
+  }
+  // tic-tac-toe
+  function pgTtt(g) {
+    const o = pgOther(g), sc = g.score, my = g.x === g.me ? "❌" : "⭕", mine = g.status === "active" && g.turn === g.me;
+    const st = g.status !== "active" ? "" : mine ? `Your move ${my}` : `${esc(pgN(g, o))}'s move…`;
+    return `<div class="pg-score"><span>You <b>${sc[g.me]}</b></span><span>Draws <b>${sc.d}</b></span><span>${esc(pgN(g, o))} <b>${sc[o]}</b></span></div>
+      <p class="pg-stat">${st}</p>
+      <div class="pg-board">${g.board.map((v, i) => `<button class="pg-cell ${g.line.includes(i) ? "win" : ""} ${g.last === i ? "last" : ""}" data-cell="${i}" ${mine && !v ? "" : "disabled"} aria-label="Square ${i + 1}">${v === "X" ? "❌" : v === "O" ? "⭕" : ""}</button>`).join("")}</div>
+      <p class="pg-hint">You are ${my}</p>${pgResult(g)}`;
+  }
+  // this or that, who's more likely to
+  function pgRows(g) {
+    const o = pgOther(g), on = esc(pgN(g, o)), tt = g.type === "thisthat";
+    const lab = (r, v) => tt ? esc(r.q[v]) : esc(pgN(g, v));
+    return g.rows.filter((r) => r.theirs !== null && r.mine !== null || g.status === "done").map((r) => `<div class="pg-r ${r.same ? "same" : ""}"><b>${tt ? `${esc(r.q[0])} or ${esc(r.q[1])}?` : esc(r.q)}</b>
+      <span>You: ${r.mine === null ? "…" : lab(r, r.mine)}</span><span>${on}: ${r.theirs === null ? "…" : lab(r, r.theirs)}</span>${r.same ? "<i>💞</i>" : ""}</div>`).join("");
+  }
+  function pgRounds(g) {
+    const o = pgOther(g), on = esc(pgN(g, o)), tt = g.type === "thisthat";
+    if (g.status === "done") return `${pgResult(g)}<div class="pg-rs">${pgRows(g)}</div>`;
+    if (g.i >= g.total) return `<div class="pg-wait"><i>⏳</i><b>You're done!</b><span>Waiting for ${on}… ${g.their_i}/${g.total}</span></div><div class="pg-rs">${pgRows(g)}</div>`;
+    const r = g.rows[g.i];
+    return `<div class="pg-prog"><i style="width:${g.i * 10}%"></i></div><p class="pg-stat">${g.i + 1} of ${g.total}${g.has_theirs ? "" : ""}</p>
+      <div class="pg-q">${tt ? "This or that?" : esc(r.q)}</div>
+      <div class="pg-opts">${tt ? r.q.map((t, k) => `<button class="pg-opt" data-pick="${k}">${esc(t)}</button>`).join("") : `<button class="pg-opt" data-pick="me">Me</button><button class="pg-opt" data-pick="you">${on}</button>`}</div>
+      <p class="pg-hint">${on} has answered ${g.their_i} of ${g.total}. Answers show once you've both picked.</p><div class="pg-rs">${pgRows(g)}</div>`;
+  }
+  // couple's quiz
+  function pgQuiz(g) {
+    const me = g.me, on = esc(pgN(g, pgOther(g)));
+    if (g.status === "done") return `${pgResult(g)}<div class="pg-rs">${g.items.map((it, k) => `<div class="pg-r ${g.ans[k] === it.ok ? "same" : ""}"><b>${esc(it.q)}</b><span>${g.guesser === me ? "You" : on}: ${esc(it.opts[g.ans[k]])} ${g.ans[k] === it.ok ? "✅" : "❌"}</span>${g.ans[k] === it.ok ? "" : `<span>Right answer: ${esc(it.opts[it.ok])}</span>`}</div>`).join("")}</div>`;
+    if (g.maker === me) return `<div class="pg-wait"><i>💡</i><b>Quiz sent</b><span>Waiting for ${on} to answer…</span></div><div class="pg-rs">${g.items.map((it) => `<div class="pg-r"><b>${esc(it.q)}</b><span>✅ ${esc(it.opts[it.ok])}</span></div>`).join("")}</div>`;
+    const k = PG.q.length, it = g.items[Math.min(k, 4)];
+    if (k >= 5) return `<div class="pg-wait"><i>✨</i><b>Sending your answers…</b></div>`;
+    return `<div class="pg-prog"><i style="width:${k * 20}%"></i></div><p class="pg-stat">${on}'s quiz about them · ${k + 1} of 5</p><div class="pg-q">${esc(it.q)}</div>
+      <div class="pg-opts col">${it.opts.map((t, j) => `<button class="pg-opt" data-qa="${j}">${esc(t)}</button>`).join("")}</div>`;
+  }
+  function pgQuizSheet() {
+    const bank = (typeof GAMES !== "undefined" && GAMES.quiz) || [], pool = bank.slice().sort(() => Math.random() - .5);
+    const slot = (k) => `<div class="pg-qb"><div class="pg-qh"><b>${k + 1}</b><button class="pg-mini" data-pickq="${k}">Pick an idea</button></div>
+      <input class="qq" maxlength="140" placeholder="A question about you" value="${esc(pool[k] || "")}"><input class="qr" maxlength="60" placeholder="Right answer ✅"><input class="qw" maxlength="60" placeholder="Wrong answer">
+      <input class="qw" maxlength="60" placeholder="Wrong answer"><input class="qw" maxlength="60" placeholder="Wrong answer"></div>`;
+    const s = pgSheet(`<h3 style="margin:4px 0 2px">Couple's quiz 💡</h3><p class="hint" style="text-align:left">Five questions about you, with one right answer and three wrong ones. Your partner won't see which is right until they've answered.</p>
+      ${[0, 1, 2, 3, 4].map(slot).join("")}<button class="pg-btn" id="pgQGo">Send the quiz</button>`);
+    $$("[data-pickq]", s).forEach((b) => b.onclick = () => {
+      const p = pgSheet(`<h3 style="margin:4px 0 6px">Pick a question</h3><div class="pg-pickl">${bank.map((q, i) => `<button data-i="${i}">${esc(q)}</button>`).join("")}</div>`);
+      $$("[data-i]", p).forEach((x) => x.onclick = () => { $$(".qq", s)[+b.dataset.pickq].value = bank[+x.dataset.i]; p.remove(); });
+    });
+    $("#pgQGo", s).onclick = async () => {
+      const items = $$(".pg-qb", s).map((q) => ({ q: $(".qq", q).value.trim(), right: $(".qr", q).value.trim(), wrong: $$(".qw", q).map((w) => w.value.trim()) }));
+      if (items.some((it) => it.q.length < 3 || !it.right || it.wrong.some((w) => !w))) { toast("Fill in every question, the right answer and the 3 wrong ones"); return; }
+      s.remove(); pgStart("quiz", { items });
+    };
+  }
+  // 20 questions
+  function pgTwentySheet() {
+    const s = pgSheet(`<h3 style="margin:4px 0 2px">20 questions ❓</h3><p class="hint" style="text-align:left">Think of something: an object, animal, place, food… Only you will see it until the game ends.</p>
+      <input id="pgSecret" class="pg-field" maxlength="40" placeholder="I'm thinking of…" autocomplete="off"><button class="pg-btn" id="pgSGo">Start</button><button class="pg-ghost" id="pgSSur">Surprise me 🎲</button>`);
+    const go = (body) => { s.remove(); pgStart("twenty", body); };
+    $("#pgSGo", s).onclick = () => { const v = $("#pgSecret", s).value.trim(); if (v.length < 2) { toast("Type a word or two"); return; } go({ secret: v }); };
+    $("#pgSSur", s).onclick = () => go({ surprise: true });
+  }
+  function pgTwenty(g) {
+    const me = g.me, th = g.thinker === me, on = esc(pgN(g, pgOther(g))), act = g.status === "active";
+    const qa = g.qs.map((q) => `<div class="pg-b q">${esc(q.q)}</div>${q.a ? `<div class="pg-b a">${PG_ANS[q.a]}</div>` : ""}`).join("");
+    let ctl = "";
+    if (act && th) {
+      const pend = g.pend ? g.qs[g.qs.length - 1] : null;
+      ctl = pend ? `<p class="pg-stat">${on} asks: <b>${esc(pend.q)}</b></p><div class="pg-opts">${Object.keys(PG_ANS).map((k) => `<button class="pg-opt" data-ans="${k}">${PG_ANS[k]}</button>`).join("")}</div>`
+        : g.last ? `<p class="pg-stat">${on} guessed <b>“${esc(g.last)}”</b></p><button class="pg-btn" id="pgAccept">That's it! ✅</button>` : `<p class="pg-stat">Waiting for ${on}'s next question…</p>`;
+    } else if (act) {
+      const left = g.max - g.used;
+      ctl = `<div class="pg-in"><input id="pgAsk" maxlength="140" placeholder="${g.pend ? "Waiting for the answer…" : left > 0 ? "Ask a yes or no question" : "No questions left. Time to guess!"}" ${g.pend || left <= 0 ? "disabled" : ""} autocomplete="off" enterkeyhint="send"><button class="pg-btn" id="pgAskGo" ${g.pend || left <= 0 ? "disabled" : ""}>Ask</button></div>
+        <div class="pg-in"><input id="pgGuess" maxlength="80" placeholder="I think it's…" autocomplete="off" enterkeyhint="send"><button class="pg-btn alt" id="pgGuessGo">Guess it 🎯</button></div>
+        <p class="pg-hint">A wrong guess uses up one of your ${g.max}.</p>`;
+    }
+    return `<div class="pg-secret">${th ? `Your secret: <b>${esc(g.secret)}</b>` : `${on} is thinking of something`}<small>${g.used}/${g.max} used</small></div>
+      <div class="pg-log">${qa || `<p class="pg-hint">${th ? "Questions will show up here." : "Start with a yes or no question."}</p>`}</div>
+      ${g.wrong.length ? `<div class="pg-wr">Guessed: ${g.wrong.map((w) => `<span>${esc(w)}</span>`).join("")}</div>` : ""}${ctl}${pgResult(g)}`;
+  }
+  // draw and guess
+  function pgDrawStop() { if (PG.ro) { PG.ro.disconnect(); PG.ro = null; } PG.d = null; }
+  function pgSeg(ctx, size, s, from) {  // a stroke (or just its new tail) drawn into a canvas, points are flat 0..1000 numbers
+    const k = size / 1000, p = s.p, er = s.c === 0;
+    ctx.save(); ctx.lineCap = ctx.lineJoin = "round"; ctx.lineWidth = PG_W[s.w] * (er ? 3 : 1) * k; ctx.strokeStyle = ctx.fillStyle = er ? "#000" : PG_COL[s.c];
+    if (er) ctx.globalCompositeOperation = "destination-out";
+    if (p.length < 4) { ctx.beginPath(); ctx.arc(p[0] * k, p[1] * k, ctx.lineWidth / 2, 0, 7); ctx.fill(); } else {
+      ctx.beginPath(); const a = Math.max(0, from - 1) * 2; ctx.moveTo(p[a] * k, p[a + 1] * k);
+      for (let i = a + 2; i < p.length; i += 2) ctx.lineTo(p[i] * k, p[i + 1] * k);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function pgRedraw() {
+    const d = PG.d; if (!d || !d.cv) return;
+    d.ctx.clearRect(0, 0, d.cv.width, d.cv.height);
+    d.ctx.save(); d.ctx.scale(d.dpr, d.dpr);
+    d.strokes.forEach((s) => pgSeg(d.ctx, d.size, s, 0)); if (d.live && d.live.p.length) pgSeg(d.ctx, d.size, d.live, 0);
+    d.ctx.restore();
+  }
+  function pgFit() {
+    const d = PG.d; if (!d) return; const w = Math.max(120, Math.round(d.cv.parentNode.clientWidth)); d.dpr = Math.min(2, window.devicePixelRatio || 1);
+    if (d.size === w) return; d.size = w; d.cv.width = d.cv.height = Math.round(w * d.dpr); pgRedraw();
+  }
+  function pgSendLive(final) {
+    const d = PG.d, c = d && d.cur; if (!c) return;
+    const n = c.p.length; if (d.sent >= n && !d.first) return;
+    const start = d.first ? 0 : Math.max(0, d.sent - 2), end = Math.min(n, start + 38);
+    if (WS && WS.readyState === 1 && end > start) WS.send(JSON.stringify({ t: "game_draw", game: PG.g.id, k: "p", pts: c.p.slice(start, end), c: c.c, w: c.w, s: d.first ? 1 : 0 }));
+    d.first = false; d.sent = end;
+    if (end < n) setTimeout(() => pgSendLive(final), 30);
+  }
+  function pgPush(body) {  // the drawer's strokes are saved in order, one at a time
+    const d = PG.d; if (!d) return; const id = PG.g.id;
+    d.q = d.q.then(() => api(`/api/games/${PG.cid}/${id}/move`, { body })).then((r) => { if (PG.g && PG.g.id === id) pgSetG(r.game); }).catch(async (x) => {
+      toast(x.message); try { const r = await api(`/api/games/${PG.cid}/${id}`); if (PG.d && PG.g && PG.g.id === id) { PG.d.strokes = r.game.strokes || []; pgRedraw(); pgSetG(r.game); } } catch { }
+    });
+  }
+  function pgDrawInit(g, box) {
+    pgDrawStop();
+    const d = PG.d = { id: g.id, strokes: (g.strokes || []).slice(), live: null, cur: null, col: 1, w: 2, cv: null, ctx: null, size: 0, dpr: 1, q: Promise.resolve(), sent: 0, first: false, tk: 0 };
+    box.innerHTML = `<div id="pgDTop"></div><div class="pg-cvw"><canvas id="pgCv" aria-label="Drawing"></canvas></div><div id="pgDBot"></div>`;
+    d.cv = $("#pgCv", box); d.ctx = d.cv.getContext("2d"); g.strokes = d.strokes;
+    pgFit(); if (window.ResizeObserver) { PG.ro = new ResizeObserver(() => pgFit()); PG.ro.observe(d.cv.parentNode); }
+    const can = () => PG.g && PG.g.status === "active" && PG.g.phase === "draw" && PG.g.drawer === PG.g.me;
+    const pt = (e) => { const r = d.cv.getBoundingClientRect(); return [Math.max(0, Math.min(1000, Math.round((e.clientX - r.left) / r.width * 1000))), Math.max(0, Math.min(1000, Math.round((e.clientY - r.top) / r.height * 1000)))]; };
+    const add = (e) => {
+      const c = d.cur, p = pt(e), n = c.p.length;
+      if (n >= 2 && Math.abs(p[0] - c.p[n - 2]) + Math.abs(p[1] - c.p[n - 1]) < 4) return;
+      if (n >= 5900) { end(); begin(e); return; }
+      c.p.push(p[0], p[1]); d.ctx.save(); d.ctx.scale(d.dpr, d.dpr); pgSeg(d.ctx, d.size, c, c.p.length / 2 - 1 > 1 ? c.p.length / 2 - 2 : 0); d.ctx.restore();
+    };
+    const begin = (e) => { d.cur = { c: d.col, w: d.w, p: [] }; d.sent = 0; d.first = true; add(e); pgSendLive(); };
+    const end = () => {
+      const c = d.cur; if (!c) return; d.cur = null; clearInterval(d.tk);
+      if (c.p.length < 2) return; if (c.p.length === 2) c.p.push(c.p[0], c.p[1]);
+      d.cur = c; pgSendLive(true); d.cur = null;
+      d.strokes.push({ c: c.c, w: c.w, p: c.p }); pgPush({ add: { c: c.c, w: c.w, p: c.p } });
+    };
+    d.cv.addEventListener("pointerdown", (e) => { if (!can() || d.cur) return; e.preventDefault(); try { d.cv.setPointerCapture(e.pointerId); } catch { } begin(e); d.tk = setInterval(() => pgSendLive(), 70); });
+    d.cv.addEventListener("pointermove", (e) => { if (!d.cur) return; e.preventDefault(); const ce = e.getCoalescedEvents ? e.getCoalescedEvents() : []; (ce.length ? ce : [e]).forEach((x) => d.cur && add(x)); });
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach((t) => d.cv.addEventListener(t, end));
+    d.cv.addEventListener("touchmove", (e) => { if (d.cur && e.cancelable) e.preventDefault(); }, { passive: false });
+  }
+  function pgDraw(g, box) {
+    if (!PG.d || PG.d.id !== g.id || !$("#pgCv", box)) pgDrawInit(g, box);
+    const d = PG.d, me = g.me, dr = g.drawer === me, on = esc(pgN(g, pgOther(g))), act = g.status === "active";
+    const guesses = g.guesses.length ? `<div class="pg-wr">${g.guesses.map((w) => `<span>${esc(w)}</span>`).join("")}</div>` : "";
+    let top = "", bot = "";
+    if (act && g.phase === "pick") {
+      top = dr ? `<p class="pg-stat">Pick a word to draw</p>` : `<p class="pg-stat">${on} is picking a word…</p>`;
+      bot = dr ? `<div class="pg-opts col">${g.choices.map((w, i) => `<button class="pg-opt" data-wp="${i}">${esc(w)}</button>`).join("")}</div>` : "";
+    } else if (act) {
+      top = dr ? `<p class="pg-stat">Draw: <b>${esc(g.word)}</b></p>` : `<p class="pg-stat">${on} is drawing. Can you guess it?</p>`;
+      if (dr) bot = `<div class="pg-tools"><div class="pg-sw">${[1, 2, 3].map((c) => `<button class="${d.col === c ? "on" : ""}" data-col="${c}" style="--c:${PG_COL[c]}" aria-label="Colour ${c}"></button>`).join("")}<button class="er ${d.col === 0 ? "on" : ""}" data-col="0" aria-label="Eraser">🧽</button></div>
+        <div class="pg-sz">${[1, 2, 3].map((w) => `<button class="${d.w === w ? "on" : ""}" data-w="${w}" aria-label="Size ${w}"><i style="--s:${4 + w * 4}px"></i></button>`).join("")}</div>
+        <div class="pg-sz"><button data-undo aria-label="Undo">↩️</button><button data-clear aria-label="Clear">🗑️</button></div></div>${guesses}
+        ${g.guesses.length ? `<button class="pg-btn" id="pgAccept">That's it! ✅</button>` : `<p class="pg-hint">${on} will type guesses here as they come.</p>`}`;
+      else bot = `<div class="pg-in"><input id="pgGuess" maxlength="60" placeholder="Your guess (${g.guesses.length}/${g.max})" autocomplete="off" enterkeyhint="send"><button class="pg-btn" id="pgGuessGo">Guess</button></div>${guesses}`;
+    } else bot = `${guesses}${pgResult(g)}${pgAgain(g)}`;
+    $("#pgDTop", box).innerHTML = top; $("#pgDBot", box).innerHTML = bot;
+    d.cv.classList.toggle("can", act && g.phase === "draw" && dr);
+    $$("[data-wp]", box).forEach((b) => b.onclick = () => pgMove({ pick: +b.dataset.wp }));
+    $$("[data-col]", box).forEach((b) => b.onclick = () => { d.col = +b.dataset.col; pgDraw(PG.g, box); });
+    $$("[data-w]", box).forEach((b) => b.onclick = () => { d.w = +b.dataset.w; pgDraw(PG.g, box); });
+    const u = $("[data-undo]", box), c = $("[data-clear]", box);
+    if (u) u.onclick = () => { if (!d.strokes.length) return; d.strokes.pop(); pgRedraw(); pgPush({ undo: true }); };
+    if (c) c.onclick = () => { if (!d.strokes.length) return; d.strokes = []; g.strokes = d.strokes; pgRedraw(); pgPush({ clear: true }); };
+    pgBindAgain(g, box); pgBind(g, box);
+  }
+  function onGameDraw(e) {  // the drawer's live strokes (guesser only); the saved stroke replaces them when the move lands
+    const d = PG.d, g = PG.g; if (!d || !g || g.id !== e.game || g.drawer === g.me || e.k !== "p" || !Array.isArray(e.pts)) return;
+    if (e.s || !d.live) d.live = { c: e.c, w: e.w, p: [] };
+    const from = d.live.p.length / 2, pts = e.s ? e.pts : e.pts.slice(2);
+    d.live.p.push(...pts); d.ctx.save(); d.ctx.scale(d.dpr, d.dpr); pgSeg(d.ctx, d.size, d.live, e.s ? 0 : from); d.ctx.restore();
+  }
+  function pgDrawEvent(g) {  // a saved stroke, undo or clear from the drawer: keep my copy of the drawing in step, or fetch it all
+    const d = PG.d, old = PG.g; if (!d || !old || old.drawer === old.me) return;
+    const n = d.strokes.length;
+    if (g.strokes) { d.strokes = g.strokes.slice(); d.live = null; }
+    else if (g.ns === n + 1 && d.live && d.live.p.length >= 2) { d.strokes.push(d.live); d.live = null; } else if (g.ns === n) d.live = null;
+    else if (g.ns === 0) { d.strokes.length = 0; d.live = null; } else if (g.ns === n - 1) { d.strokes.pop(); d.live = null; }
+    else { api(`/api/games/${PG.cid}/${g.id}`).then((r) => { if (PG.d === d) { d.strokes = r.game.strokes || []; d.live = null; pgRedraw(); } }).catch(() => { }); return; }
+    pgRedraw();
+  }
+  function onGameEvent(e) {
+    const open = PG.page && PG.cid === e.conv, here = open && PG.g && PG.g.id === e.id;
+    if (here) { if (e.type === "draw") pgDrawEvent(e.game); pgSetG(e.game); }
+    else if (open && !PG.g) pgLoad();
+    else if (e.by && e.by !== S.me.id && e.what !== "stroke" && isVisible()) {
+      if (e.what === "start") toast(`${pgFirst(e.by)} started ${e.game.name} ${e.game.emoji}`);
+      else if (e.game.mine && e.what !== "end") toast(`Your move in ${e.game.name} ${e.game.emoji}`);
+    }
+    if (T.us && T.us.cid === e.conv) playBadge();
+  }
+  async function playBadge() {
+    const U = T.us; if (!U) return;
+    try { const h = await api(`/api/games/${U.cid}`), n = h.active.filter((x) => x.mine).length, d = $(".pg-dot", U.page); if (d && T.us === U) { d.hidden = !n; d.textContent = n; } } catch { }
+  }
+  function gameChip(m, pop_) {  // in the chat: a game started, or how it ended. Tap to open it
+    const a = m.attachment || {}, mine = m.sender === S.me.id, who = mine ? "You" : pgFirst(m.sender);
+    const w = a.winner ? (a.winner === S.me.id ? "You won" : pgFirst(a.winner) + " won") : "";
+    const t = a.ev === "start" ? `${who} started ${a.name}` : a.res === "cancelled" ? `${a.name} was cancelled` : a.res === "expired" ? `${a.name} timed out` : a.res === "resign" ? `${a.name}: ${who} stepped away` : `${a.name}: ${w || a.note || "finished"}`;
+    return `<div class="tchip-row kchip-row ${pop_}" data-id="${m.id || ""}"><button class="tchip gchip" data-g="${a.game || 0}"><i>${esc(a.emoji || "🎮")}</i><span>${esc(t)}</span></button>
+      <small>${a.ev === "start" ? "Tap to play" : esc(a.note || "") + (a.note ? " · " : "") + "tap to look"} · ${fmtTime(m.created)}</small></div>`;
+  }
+  function bindGameChips(log) {
+    $$(".gchip", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const id = +b.dataset.g; if (id && S.cur) playOpen(S.cur, id); });
   }
 
   // ---- Settings: how touches reach me

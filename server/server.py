@@ -28,6 +28,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import unicodedata
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -125,6 +126,12 @@ CREATE TABLE IF NOT EXISTS capsules (id INTEGER PRIMARY KEY, conv_id INTEGER, au
   created_at REAL, unlock_at REAL DEFAULT 0, opened_at REAL DEFAULT 0, notified INTEGER DEFAULT 0, draft INTEGER DEFAULT 0, updated REAL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS capsules_conv ON capsules(conv_id, unlock_at);
 CREATE INDEX IF NOT EXISTS capsules_due ON capsules(notified, unlock_at);
+-- v27: couple games (state is the game's own JSON; the other player's secrets are only ever sent by _g_view); game_coins caps the coins a person can earn a day
+CREATE TABLE IF NOT EXISTS games (id INTEGER PRIMARY KEY, conv_id INTEGER, type TEXT, state TEXT DEFAULT '{}', players TEXT DEFAULT '[]', turn INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'active', winner INTEGER DEFAULT 0, res TEXT DEFAULT '', coins_given INTEGER DEFAULT 0, pushed REAL DEFAULT 0, created REAL, updated REAL, finished REAL DEFAULT 0);
+CREATE UNIQUE INDEX IF NOT EXISTS games_one ON games(conv_id, type) WHERE status='active';
+CREATE INDEX IF NOT EXISTS games_conv ON games(conv_id, status, updated);
+CREATE TABLE IF NOT EXISTS game_coins (user_id INTEGER, day TEXT, coins INTEGER DEFAULT 0, PRIMARY KEY (user_id, day));
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
@@ -553,7 +560,7 @@ def conv_view(c, cid: int, uid: int) -> dict:
     others = [public(r) for r in c.execute("SELECT u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.conv_id=? AND u.id<>? AND (u.bot<>2 OR ?<>'pet')", (cid, uid, cv["kind"]))]
     mine = c.execute("SELECT last_read, style, muted, nudge_on FROM members WHERE conv_id=? AND user_id=?", (cid, uid)).fetchone()
     last = c.execute("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
-    unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('pinact','card') AND created>?",
+    unread = c.execute("SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('pinact','card','game') AND created>?",
                        (cid, uid, mine["last_read"] if mine else 0)).fetchone()[0]
     other_read = max([r["last_read"] for r in c.execute("SELECT last_read FROM members WHERE conv_id=? AND user_id<>?", (cid, uid))] or [0])
     return {"id": cid, "kind": cv["kind"], "members": others, "last": msg_view(last) if last else None, "unread": unread,
@@ -751,7 +758,7 @@ async def edit_message(mid: int, body: dict, authorization: str = Header(None)):
     def fn(c, m):
         if m["sender"] != u["id"] or m["deleted"]:
             raise HTTPException(403, "You can only edit your own messages.")
-        if m["kind"] in ("touch", "card", "capsule"):
+        if m["kind"] in ("touch", "card", "capsule", "game"):
             raise HTTPException(400, "That can't be edited.")
         c.execute("UPDATE messages SET text=?, edited=? WHERE id=?", ((body.get("text") or "").strip()[:8000], time.time(), mid))
     return await _changed(mid, u["id"], fn)
@@ -791,7 +798,7 @@ async def pin_msg(mid: int, authorization: str = Header(None)):
             raise HTTPException(404, "Message not found")
         cid = m["conv_id"]
         _member(c, cid, u["id"])
-        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite", "card", "capsule"):
+        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite", "card", "capsule", "game"):
             raise HTTPException(400, "That one can't be pinned.")
         line = None
         if not c.execute("SELECT 1 FROM pinned_msgs WHERE conv_id=? AND msg_id=?", (cid, mid)).fetchone():
@@ -1329,10 +1336,10 @@ async def _nudge_unread():
     t = time.time()
     with closing(db()) as c:
         c.execute("""UPDATE members SET nudged=0 WHERE nudged>0 AND NOT EXISTS (SELECT 1 FROM messages ms WHERE ms.conv_id=members.conv_id
-                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card') AND ms.created>members.last_read)""")
+                     AND ms.sender<>members.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card','game') AND ms.created>members.last_read)""")
         rows = c.execute("""SELECT m.conv_id, m.user_id, m.nudged, MIN(ms.created) AS oldest FROM members m
                             JOIN convs cv ON cv.id=m.conv_id AND cv.kind='direct'
-                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card') AND ms.created>m.last_read
+                            JOIN messages ms ON ms.conv_id=m.conv_id AND ms.sender<>m.user_id AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card','game') AND ms.created>m.last_read
                             WHERE m.nudge_on=1 AND m.nudged<2 AND m.muted<=?
                             GROUP BY m.conv_id, m.user_id HAVING MIN(ms.created)<=?""", (t, t - 900)).fetchall()
         todo = []
@@ -1340,7 +1347,7 @@ async def _nudge_unread():
             stage = 2 if t - r["oldest"] >= 2700 and r["nudged"] == 1 else 1 if r["nudged"] == 0 else 0
             if not stage:
                 continue
-            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('touch','pinact','card') AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
+            m = c.execute("""SELECT * FROM messages WHERE conv_id=? AND sender<>? AND deleted=0 AND kind NOT IN ('touch','pinact','card','game') AND created>(SELECT last_read FROM members WHERE conv_id=? AND user_id=?)
                              ORDER BY id LIMIT 1""", (r["conv_id"], r["user_id"], r["conv_id"], r["user_id"])).fetchone()
             sender = c.execute("SELECT * FROM users WHERE id=?", (m["sender"],)).fetchone() if m else None
             c.execute("UPDATE members SET nudged=? WHERE conv_id=? AND user_id=?", (stage, r["conv_id"], r["user_id"]))
@@ -1369,6 +1376,7 @@ async def _reminders():
             await _nudge_unread()
             await _couple_jobs()  # v22: the morning question, birthday/anniversary reminders, 'on this day'
             await _capsule_jobs()  # v26: letters whose time has come
+            await _game_jobs()  # v27: games nobody touched for 7 days end
         except Exception as e:
             print("reminders failed:", repr(e)[:300], flush=True)
         await asyncio.sleep(15)
@@ -3505,6 +3513,619 @@ async def _capsule_jobs():
             print("capsule job failed:", repr(e)[:300], flush=True)
 
 
+# ---------------------------------------------------------------- v27: play (couple games that earn pet coins)
+# The server is the referee: it checks every move and turn and decides the result. A secret (the 20-questions answer, the word being drawn, the right
+# answers of a quiz) is not hidden by the app: it is not in the other player's view at all until the game says it may be (only _g_view sends state).
+GAMES_FILE = WEB / "games.js"
+_GAMES = {"mtime": -1.0, "bank": {}}
+GAME_TYPES = {"ttt": ("Tic-tac-toe", "⭕"), "thisthat": ("This or that", "🔀"), "who": ("Who's more likely to…", "🙋"),
+              "quiz": ("Couple's quiz", "💡"), "twenty": ("20 questions", "❓"), "draw": ("Draw and guess", "🎨")}
+GAME_COINS, GAME_WIN, GAME_CAP = 2, 1, 20  # per person for a finished game, +1 for the winner, at most this many a day per person
+GAME_IDLE, GAME_PUSH_GAP = 7 * 86400, 600
+GAME_ROUND, GAME_QUIZ, GAME_ASKS, GAME_GUESSES = 10, 5, 20, 10
+GAME_STROKES, GAME_STROKE_PTS, GAME_DRAW_BYTES = 400, 3000, 200_000
+GAME_LINES = ((0, 1, 2), (3, 4, 5), (6, 7, 8), (0, 3, 6), (1, 4, 7), (2, 5, 8), (0, 4, 8), (2, 4, 6))
+GDRAW: dict[int, tuple] = {}  # game id -> (drawer, guesser, valid until): who may relay strokes
+GDRAW_RATE: dict[int, float] = {}
+
+
+def games_bank() -> dict:
+    """The decks from web/games.js (strict JSON after `const GAMES =`), read again whenever the file changes."""
+    try:
+        mt = GAMES_FILE.stat().st_mtime
+    except OSError:
+        return _GAMES["bank"]
+    if mt != _GAMES["mtime"]:
+        try:
+            src = GAMES_FILE.read_text(encoding="utf-8")
+            a = src.index("{", src.index("=", src.index("const GAMES")))
+            d = json.loads(src[a:src.rindex("}") + 1])
+            lst = lambda k: [str(x).strip() for x in d.get(k, []) if str(x).strip()]
+            _GAMES.update(mtime=mt, bank={"thisthat": [[str(x[0]).strip(), str(x[1]).strip()] for x in d.get("thisthat", []) if len(x) == 2],
+                                          "who": lst("who"), "quiz": lst("quiz"), "twenty": lst("twenty"), "draw": lst("draw")})
+        except Exception as e:
+            print("games.js not readable:", repr(e)[:200], flush=True)
+            _GAMES["mtime"] = mt
+    return _GAMES["bank"]
+
+
+def _gstem(w: str) -> str:
+    if len(w) > 3 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 4 and w.endswith(("ches", "shes", "sses", "xes", "zes")):
+        return w[:-2]
+    if len(w) > 2 and w.endswith("s") and not w.endswith(("ss", "us", "is")):
+        return w[:-1]
+    return w
+
+
+def _gnorm(s) -> str:
+    """For comparing a guess with the secret: lowercase, no accents or punctuation, a/an/the left out, simple plurals folded."""
+    s = unicodedata.normalize("NFKD", str(s or "").lower())
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    ws = re.sub(r"[^\w\s]|_", " ", s).split()
+    while len(ws) > 1 and ws[0] in ("a", "an", "the"):
+        ws.pop(0)
+    return " ".join(_gstem(w) for w in ws)
+
+
+def _gmatch(a, b) -> bool:
+    x, y = _gnorm(a), _gnorm(b)
+    return bool(x) and (x == y or x.replace(" ", "") == y.replace(" ", ""))
+
+
+def _g_text(v, lo: int, hi: int, what: str) -> str:
+    t = " ".join(v.split()) if isinstance(v, str) else ""
+    if not lo <= len(t) <= hi:
+        raise ValueError(f"{what} needs {lo}-{hi} characters." if lo > 1 else f"{what} can be up to {hi} characters.")
+    return t
+
+
+def _g_other(pr: dict, uid: int) -> int:
+    return pr["b"] if uid == pr["a"] else pr["a"]
+
+
+def _g_row(c, pr: dict, gid: int):
+    g = c.execute("SELECT * FROM games WHERE id=? AND conv_id=?", (gid, pr["direct"])).fetchone()
+    if not g:
+        raise HTTPException(404, "Game not found")
+    return g
+
+
+# ---- tic-tac-toe
+def _ttt_start(c, pr: dict, uid: int, body: dict):
+    score, first, rematch = {str(pr["a"]): 0, str(pr["b"]): 0, "d": 0}, uid, False
+    if body.get("rematch"):  # same two, a running score, the other one starts
+        p = c.execute("SELECT * FROM games WHERE conv_id=? AND type='ttt' AND status='done' ORDER BY id DESC LIMIT 1", (pr["direct"],)).fetchone()
+        if p and time.time() - p["updated"] < 6 * 3600:
+            ps = json.loads(p["state"])
+            score, first, rematch = ps["score"], ps["o"], True
+    return {"b": [""] * 9, "x": first, "o": _g_other(pr, first), "score": score, "line": [], "last": -1}, first, rematch
+
+
+def _ttt_move(c, pr: dict, g, st: dict, uid: int, body: dict) -> dict:
+    if g["turn"] != uid:
+        raise ValueError("It's not your turn yet.")
+    i = body.get("cell")
+    if type(i) is not int or not 0 <= i < 9:
+        raise ValueError("Pick one of the nine squares.")
+    if st["b"][i]:
+        raise ValueError("That square is taken.")
+    mark = "X" if st["x"] == uid else "O"
+    st["b"][i], st["last"] = mark, i
+    for ln in GAME_LINES:
+        if all(st["b"][k] == mark for k in ln):
+            st["line"] = list(ln)
+            st["score"][str(uid)] += 1
+            return {"what": "move", "end": {"winner": uid, "res": "win"}}
+    if all(st["b"]):
+        st["score"]["d"] += 1
+        return {"what": "move", "end": {"winner": 0, "res": "draw"}}
+    return {"what": "move", "turn": _g_other(pr, uid), "push": "{n} played. Your move ⭕"}
+
+
+def _ttt_view(pr: dict, g, st: dict, uid: int, lite: bool) -> dict:
+    return {"board": st["b"], "x": st["x"], "o": st["o"], "line": st["line"], "last": st["last"], "score": st["score"]}
+
+
+# ---- this or that, who's more likely to (both answer 10 at their own pace; an answer shows only once both have answered that one)
+def _rounds_start(kind: str):
+    def f(c, pr: dict, uid: int, body: dict):
+        bank = games_bank().get(kind) or []
+        if len(bank) < GAME_ROUND:
+            raise ValueError("The question deck isn't available right now.")
+        used = set()
+        for r in c.execute("SELECT state FROM games WHERE conv_id=? AND type=? ORDER BY id DESC LIMIT 12", (pr["direct"], kind)):
+            used.update(json.loads(r["state"]).get("ix", []))
+        fresh = [i for i in range(len(bank)) if i not in used]
+        ix = random.sample(fresh if len(fresh) >= GAME_ROUND else list(range(len(bank))), GAME_ROUND)
+        return {"ix": ix, "qs": [bank[i] for i in ix], "ans": {str(pr["a"]): [], str(pr["b"]): []}}, 0, False
+    return f
+
+
+def _rounds_move(kind: str):
+    def f(c, pr: dict, g, st: dict, uid: int, body: dict) -> dict:
+        mine = st["ans"][str(uid)]
+        if len(mine) >= GAME_ROUND:
+            raise ValueError("You've answered them all. Waiting for your partner.")
+        if body.get("i") != len(mine) or type(body.get("i")) is not int:
+            raise ValueError("That one is already answered.")
+        v = body.get("pick")
+        if kind == "thisthat":
+            if type(v) is not int or v not in (0, 1):
+                raise ValueError("Pick one of the two.")
+        else:
+            if v not in ("me", "you"):
+                raise ValueError("Pick Me or You.")
+            v = uid if v == "me" else _g_other(pr, uid)
+        mine.append(v)
+        if len(mine) >= GAME_ROUND:
+            if len(st["ans"][str(_g_other(pr, uid))]) >= GAME_ROUND:
+                return {"what": "move", "end": {"winner": 0, "res": "done"}}
+            return {"what": "move", "push": "{n} finished the round. Your turn " + GAME_TYPES[kind][1]}
+        return {"what": "move"}
+    return f
+
+
+def _rounds_same(st: dict, pr: dict) -> int:
+    a, b = st["ans"][str(pr["a"])], st["ans"][str(pr["b"])]
+    return sum(1 for k in range(min(len(a), len(b))) if a[k] == b[k])
+
+
+def _rounds_view(pr: dict, g, st: dict, uid: int, lite: bool) -> dict:
+    mine, theirs = st["ans"][str(uid)], st["ans"][str(_g_other(pr, uid))]
+    rows = []
+    for k, q in enumerate(st["qs"]):
+        both = k < len(mine) and k < len(theirs)
+        rows.append({"q": q, "mine": mine[k] if k < len(mine) else None, "theirs": theirs[k] if both else None, "has": k < len(theirs),
+                     "same": (mine[k] == theirs[k]) if both else None})
+    return {"rows": rows, "i": len(mine), "their_i": len(theirs), "same": sum(1 for r in rows if r["same"]), "total": GAME_ROUND}
+
+
+# ---- couple's quiz (the maker's right answers stay on the server until the partner has submitted)
+def _quiz_start(c, pr: dict, uid: int, body: dict):
+    items = body.get("items")
+    if not isinstance(items, list) or len(items) != GAME_QUIZ:
+        raise ValueError(f"A quiz has {GAME_QUIZ} questions.")
+    out = []
+    for it in items:
+        if not isinstance(it, dict) or not isinstance(it.get("wrong"), list) or len(it["wrong"]) != 3:
+            raise ValueError("Each question needs the right answer and 3 wrong ones.")
+        q, right = _g_text(it.get("q"), 3, 140, "A question"), _g_text(it.get("right"), 1, 60, "An answer")
+        opts = [right] + [_g_text(w, 1, 60, "An answer") for w in it["wrong"]]
+        if len({_gnorm(x) or x.lower() for x in opts}) < 4:
+            raise ValueError("The four options of a question have to be different.")
+        random.shuffle(opts)
+        out.append({"q": q, "opts": opts, "ok": opts.index(right)})
+    other = _g_other(pr, uid)
+    return {"maker": uid, "guesser": other, "items": out, "ans": None, "score": 0}, other, False
+
+
+def _quiz_move(c, pr: dict, g, st: dict, uid: int, body: dict) -> dict:
+    if uid != st["guesser"] or g["turn"] != uid:
+        raise ValueError("Your partner is the one answering this quiz.")
+    a = body.get("answers")
+    if not isinstance(a, list) or len(a) != GAME_QUIZ or any(type(x) is not int or not 0 <= x < 4 for x in a):
+        raise ValueError("Answer all the questions first.")
+    st["ans"], st["score"] = a, sum(1 for k, x in enumerate(a) if x == st["items"][k]["ok"])
+    return {"what": "move", "end": {"winner": 0, "res": "done"}}
+
+
+def _quiz_view(pr: dict, g, st: dict, uid: int, lite: bool) -> dict:
+    done = g["status"] != "active"
+    show = done or uid == st["maker"]
+    out = {"maker": st["maker"], "guesser": st["guesser"], "items": [{"q": it["q"], "opts": it["opts"], **({"ok": it["ok"]} if show else {})} for it in st["items"]]}
+    if st["ans"] is not None:
+        out.update(ans=st["ans"], score=st["score"])
+    return out
+
+
+# ---- 20 questions (the secret is in the thinker's view only; the guesser gets it when the game is over)
+def _twenty_start(c, pr: dict, uid: int, body: dict):
+    if body.get("surprise"):
+        bank = games_bank().get("twenty") or []
+        if not bank:
+            raise ValueError("No surprise words right now. Type your own.")
+        secret = random.choice(bank)
+    else:
+        secret = _g_text(body.get("secret"), 2, 40, "The secret")
+        if not _gnorm(secret):
+            raise ValueError("Pick a real word or two.")
+    other = _g_other(pr, uid)
+    return {"thinker": uid, "guesser": other, "secret": secret, "qs": [], "wrong": [], "pend": False, "last": "", "final": False}, other, False
+
+
+def _twenty_move(c, pr: dict, g, st: dict, uid: int, body: dict) -> dict:
+    used = len(st["qs"]) + len(st["wrong"])
+    if "ask" in body:
+        if uid != st["guesser"]:
+            raise ValueError("The guesser asks the questions.")
+        if g["turn"] != uid or st["pend"]:
+            raise ValueError("Wait for the answer first.")
+        if used >= GAME_ASKS:
+            raise ValueError("That's all 20. Time to guess!")
+        st["qs"].append({"q": _g_text(body["ask"], 2, 140, "Your question"), "a": ""})
+        st["pend"], st["last"] = True, ""
+        return {"what": "move", "turn": st["thinker"], "push": "{n} asked a question ❓"}
+    if "answer" in body:
+        if uid != st["thinker"]:
+            raise ValueError("The one with the secret answers.")
+        if not st["pend"]:
+            raise ValueError("There's no question to answer.")
+        if body["answer"] not in ("yes", "no", "sometimes", "unsure"):
+            raise ValueError("Pick Yes, No, Sometimes or Not sure.")
+        st["qs"][-1]["a"], st["pend"] = body["answer"], False
+        st["final"] = len(st["qs"]) + len(st["wrong"]) >= GAME_ASKS
+        return {"what": "move", "turn": st["guesser"], "push": "{n} answered. Your turn ❓"}
+    if "guess" in body:
+        if uid != st["guesser"]:
+            raise ValueError("Only the guesser can guess.")
+        t = _g_text(body["guess"], 1, 80, "Your guess")
+        if _gmatch(t, st["secret"]):
+            return {"what": "move", "end": {"winner": uid, "res": "win"}}
+        st["wrong"].append(t)
+        st["last"] = t
+        if len(st["qs"]) + len(st["wrong"]) >= GAME_ASKS and not st["pend"]:
+            return {"what": "move", "end": {"winner": st["thinker"], "res": "win"}}
+        return {"what": "move", "push": "{n} guessed “" + t[:40].replace("{", "") + "”. Close?"}
+    if body.get("accept"):
+        if uid != st["thinker"]:
+            raise ValueError("Only the one with the secret can say that.")
+        if not st["last"]:
+            raise ValueError("There's no guess to accept.")
+        return {"what": "move", "end": {"winner": st["guesser"], "res": "win"}}
+    raise ValueError("Ask, answer or guess.")
+
+
+def _twenty_view(pr: dict, g, st: dict, uid: int, lite: bool) -> dict:
+    out = {"thinker": st["thinker"], "guesser": st["guesser"], "qs": st["qs"], "wrong": st["wrong"], "pend": st["pend"], "last": st["last"], "final": st["final"],
+           "used": len(st["qs"]) + len(st["wrong"]), "max": GAME_ASKS}
+    if uid == st["thinker"] or g["status"] != "active":
+        out["secret"] = st["secret"]
+    return out
+
+
+# ---- draw and guess (the word is the drawer's only; strokes are small integer points 0..1000 so they can be replayed later)
+def _draw_start(c, pr: dict, uid: int, body: dict):
+    bank = games_bank().get("draw") or []
+    if len(bank) < 3:
+        raise ValueError("The word list isn't available right now.")
+    return {"drawer": uid, "guesser": _g_other(pr, uid), "choices": random.sample(bank, 3), "word": "", "phase": "pick", "strokes": [], "guesses": []}, uid, False
+
+
+def _draw_stroke(s) -> dict:
+    p = s.get("p") if isinstance(s, dict) else None
+    if not isinstance(p, list) or not 2 <= len(p) <= GAME_STROKE_PTS * 2 or len(p) % 2:
+        raise ValueError("That stroke doesn't look right.")
+    c_, w = s.get("c"), s.get("w", 1)
+    if type(c_) is not int or not 0 <= c_ <= 3 or type(w) is not int or not 1 <= w <= 3 or any(type(x) is not int or not 0 <= x <= 1000 for x in p):
+        raise ValueError("That stroke doesn't look right.")
+    return {"c": c_, "w": w, "p": p}
+
+
+def _draw_move(c, pr: dict, g, st: dict, uid: int, body: dict) -> dict:
+    drawer = uid == st["drawer"]
+    if "pick" in body:
+        if not drawer or st["phase"] != "pick":
+            raise ValueError("The drawer picks a word first.")
+        i = body["pick"]
+        if type(i) is not int or not 0 <= i < len(st["choices"]):
+            raise ValueError("Pick one of the three words.")
+        st["word"], st["phase"] = st["choices"][i], "draw"
+        return {"what": "pick", "turn": st["guesser"], "push": "{n} is drawing something 🎨"}
+    if any(k in body for k in ("add", "undo", "clear")):
+        if not drawer or st["phase"] != "draw":
+            raise ValueError("Only the drawer can draw, once a word is picked.")
+        if "add" in body:
+            if len(st["strokes"]) >= GAME_STROKES:
+                raise ValueError("That's a lot of strokes! Undo or clear a bit.")
+            st["strokes"].append(_draw_stroke(body["add"]))
+        elif "undo" in body:
+            if st["strokes"]:
+                st["strokes"].pop()
+        else:
+            st["strokes"] = []
+        if len(json.dumps(st["strokes"], separators=(",", ":"))) > GAME_DRAW_BYTES:
+            raise ValueError("The drawing is too big. Undo or clear a bit.")
+        return {"what": "stroke", "lite": True, "push": "{n} drew something. Can you guess? 🎨" if "add" in body else None}
+    if "guess" in body:
+        if uid != st["guesser"]:
+            raise ValueError("Only the guesser can guess.")
+        if st["phase"] != "draw":
+            raise ValueError("Wait for the drawing to start.")
+        t = _g_text(body["guess"], 1, 60, "Your guess")
+        st["guesses"].append(t)
+        if _gmatch(t, st["word"]):
+            return {"what": "move", "end": {"winner": uid, "res": "win"}}
+        if len(st["guesses"]) >= GAME_GUESSES:
+            return {"what": "move", "end": {"winner": st["drawer"], "res": "win"}}
+        return {"what": "move", "push": "{n} guessed “" + t[:40].replace("{", "") + "”"}
+    if body.get("accept"):
+        if not drawer or not st["guesses"]:
+            raise ValueError("There's no guess to accept.")
+        return {"what": "move", "end": {"winner": st["guesser"], "res": "win"}}
+    raise ValueError("Pick a word, draw, or guess.")
+
+
+def _draw_view(pr: dict, g, st: dict, uid: int, lite: bool) -> dict:
+    out = {"drawer": st["drawer"], "guesser": st["guesser"], "phase": st["phase"], "guesses": st["guesses"], "max": GAME_GUESSES, "ns": len(st["strokes"])}
+    if not lite:
+        out["strokes"] = st["strokes"]
+    if uid == st["drawer"]:
+        out["word"] = st["word"]
+        if st["phase"] == "pick":
+            out["choices"] = st["choices"]
+    elif g["status"] != "active":
+        out["word"] = st["word"]
+    return out
+
+
+GSTART = {"ttt": _ttt_start, "thisthat": _rounds_start("thisthat"), "who": _rounds_start("who"), "quiz": _quiz_start, "twenty": _twenty_start, "draw": _draw_start}
+GMOVE = {"ttt": _ttt_move, "thisthat": _rounds_move("thisthat"), "who": _rounds_move("who"), "quiz": _quiz_move, "twenty": _twenty_move, "draw": _draw_move}
+GVIEW = {"ttt": _ttt_view, "thisthat": _rounds_view, "who": _rounds_view, "quiz": _quiz_view, "twenty": _twenty_view, "draw": _draw_view}
+GSTART_PUSH = {"ttt": "{n} started tic-tac-toe. Your move ⭕", "thisthat": "{n} started This or that. Your turn 🔀", "who": "{n} started Who's more likely to… Your turn 🙋",
+               "quiz": "{n} made you a quiz 💡", "twenty": "{n} is thinking of something ❓", "draw": "{n} is picking a word to draw 🎨"}
+
+
+# ---- the shared engine
+def _g_mine(g, st: dict, uid: int) -> bool:
+    """Is it my move (the 'Your turn' badge)?"""
+    if g["status"] != "active":
+        return False
+    if g["type"] in ("thisthat", "who"):
+        return len(st["ans"].get(str(uid), [])) < GAME_ROUND
+    return g["turn"] == uid
+
+
+def _g_note(g, st: dict, pr: dict | None = None) -> str:
+    if g["status"] != "done":
+        return ""
+    t = g["type"]
+    if t in ("thisthat", "who") and pr:
+        return f"{_rounds_same(st, pr)}/{GAME_ROUND} the same"
+    if t == "quiz":
+        return f"{st['score']}/{GAME_QUIZ} right"
+    if t == "twenty":
+        return f"{len(st['qs'])} question{'' if len(st['qs']) == 1 else 's'}"
+    if t == "draw":
+        return f"{len(st['guesses'])} guess{'' if len(st['guesses']) == 1 else 'es'}"
+    return "A draw" if g["res"] == "draw" else ""
+
+
+def _g_view(c, pr: dict, g, uid: int, lite: bool = False) -> dict:
+    st = json.loads(g["state"])
+    name, emoji = GAME_TYPES[g["type"]]
+    out = {"id": g["id"], "type": g["type"], "name": name, "emoji": emoji, "status": g["status"], "turn": g["turn"], "winner": g["winner"], "res": g["res"], "rev": g["updated"],
+           "created": g["created"], "finished": g["finished"], "players": json.loads(g["players"]), "me": uid, "mine": _g_mine(g, st, uid), "note": _g_note(g, st, pr),
+           "coins": bool(pr["pet_id"]), "pet_name": pr["pet_name"], "names": _cards_names(c, pr, uid)}
+    p = (st.get("pay") or {}).get(str(uid))
+    if p:
+        out["pay"] = {"got": p[0], "want": p[1], "full": p[0] < p[1]}
+    out.update(GVIEW[g["type"]](pr, g, st, uid, lite))
+    return out
+
+
+def _g_sum(pr: dict, g, uid: int) -> dict:
+    st = json.loads(g["state"])
+    return {"id": g["id"], "type": g["type"], "status": g["status"], "mine": _g_mine(g, st, uid), "turn": g["turn"], "winner": g["winner"], "res": g["res"],
+            "note": _g_note(g, st, pr), "updated": g["updated"], "finished": g["finished"], "started_by": (json.loads(g["players"]) or [0])[0]}
+
+
+def _g_pay(c, pr: dict, st: dict, winner: int) -> int:
+    """+2 coins to the pet's wallet for each of you, +1 more for the winner, but never past 20 a day per person (the cap is per person, so it can't be farmed)."""
+    if not pr["pet_id"]:
+        return 0
+    day, pay, total = _day(pr["tz"]), {}, 0
+    for uid in (pr["a"], pr["b"]):
+        want = GAME_COINS + (GAME_WIN if uid == winner else 0)
+        r = c.execute("SELECT coins FROM game_coins WHERE user_id=? AND day=?", (uid, day)).fetchone()
+        give = max(0, min(want, GAME_CAP - (r["coins"] if r else 0)))
+        if give:
+            c.execute("INSERT INTO game_coins (user_id, day, coins) VALUES (?,?,?) ON CONFLICT(user_id, day) DO UPDATE SET coins=coins+?", (uid, day, give, give))
+        pay[str(uid)], total = [give, want], total + give
+    if total:
+        _coins(c, pr["pet_id"], total)
+    st["pay"] = pay
+    return total
+
+
+def _g_chip(c, pr: dict, g, uid: int, ev: str) -> dict:
+    """A small chip in the couple's chat when a game starts and when it ends. Written by hand (like the cards chip) so nobody's last_read moves."""
+    name, emoji = GAME_TYPES[g["type"]]
+    now = time.time()
+    att = {"game": g["id"], "type": g["type"], "emoji": emoji, "name": name, "ev": ev, "winner": g["winner"], "res": g["res"], "note": _g_note(g, json.loads(g["state"]), pr)}
+    mid = c.execute("INSERT INTO messages (conv_id, sender, kind, text, attachment, created, updated) VALUES (?,?,?,?,?,?,?)",
+                    (pr["direct"], uid, "game", f"{emoji} {name}", json.dumps(att), now, now)).lastrowid
+    c.execute("UPDATE convs SET last_at=? WHERE id=?", (now, pr["direct"]))
+    return msg_view(c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
+
+
+def _g_end(c, pr: dict, g, st: dict, winner: int, res: str, by: int, pay: bool = True, status: str = "done") -> dict:
+    """Close the game once (the status check makes a second call a no-op error), pay the coins, and return the end chip."""
+    now = time.time()
+    if not c.execute("UPDATE games SET status=?, winner=?, res=?, finished=?, updated=?, turn=0 WHERE id=? AND status='active'", (status, winner, res, now, now, g["id"])).rowcount:
+        raise ValueError("This game is over already.")
+    given = _g_pay(c, pr, st, winner) if pay and status == "done" else 0
+    c.execute("UPDATE games SET state=?, coins_given=? WHERE id=?", (json.dumps(st, ensure_ascii=False, separators=(",", ":")), given, g["id"]))
+    return _g_chip(c, pr, c.execute("SELECT * FROM games WHERE id=?", (g["id"],)).fetchone(), by, "end")
+
+
+async def _g_ping(pr: dict, gid: int, what: str, by: int, lite: bool = False):
+    """Tell both phones. Each one gets its own view (secrets stripped); a drawing stroke carries no strokes, the guesser already saw them live."""
+    for uid in (pr["a"], pr["b"]):
+        with closing(db()) as c:
+            g = c.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone()
+            view = _g_view(c, pr, g, uid, lite)
+        await send_to(uid, {"t": "game", "conv": pr["direct"], "pet": pr["pet"], "what": what, "by": by, "id": gid, "type": view["type"], "game": view})
+
+
+async def _g_push(pr: dict, gid: int, by: int, text: str):
+    """'Raina played. Your move ⭕', at most one per game per 10 minutes (claimed in the table first, so two moves at once still send one)."""
+    now = time.time()
+    with closing(db()) as c:
+        if not c.execute("UPDATE games SET pushed=? WHERE id=? AND pushed<? AND status='active'", (now, gid, now - GAME_PUSH_GAP)).rowcount:
+            return
+        c.commit()
+        to = _g_other(pr, by)
+        name, title = _first_name(c, to, by), GAME_TYPES[c.execute("SELECT type FROM games WHERE id=?", (gid,)).fetchone()["type"]]
+    await push_to([to], {"title": f"{title[1]} {title[0]}", "body": text.replace("{n}", name), "conv": pr["direct"], "icon": "/icon-512.png", "tag": f"game-{gid}"})
+
+
+@app.get("/api/games/{cid}")
+def games_list(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        act = c.execute("SELECT * FROM games WHERE conv_id=? AND status='active' ORDER BY updated DESC", (pr["direct"],)).fetchall()
+        rec = c.execute("SELECT * FROM games WHERE conv_id=? AND status='done' ORDER BY finished DESC LIMIT 12", (pr["direct"],)).fetchall()
+        used = c.execute("SELECT coins FROM game_coins WHERE user_id=? AND day=?", (u["id"], _day(pr["tz"]))).fetchone()
+        return {"conv": pr["direct"], "pet": pr["pet"], "pet_name": pr["pet_name"], "me": u["id"], "names": _cards_names(c, pr, u["id"]), "coins": bool(pr["pet_id"]),
+                "today": used["coins"] if used else 0, "cap": GAME_CAP, "active": [_g_sum(pr, g, u["id"]) for g in act], "recent": [_g_sum(pr, g, u["id"]) for g in rec]}
+
+
+@app.post("/api/games/{cid}/start")
+async def games_start(cid: int, body: dict, authorization: str = Header(None)):
+    """Start a game. Only one active game of each type per couple: starting another opens the one that's there (existing: true)."""
+    u = auth(authorization)
+    typ = str(body.get("type") or "")
+    if typ not in GAME_TYPES:
+        raise ValueError("That game doesn't exist.")
+    now = time.time()
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        ex = c.execute("SELECT * FROM games WHERE conv_id=? AND type=? AND status='active'", (pr["direct"], typ)).fetchone()
+        if ex:
+            return {"game": _g_view(c, pr, ex, u["id"]), "existing": True}
+        st, turn, rematch = GSTART[typ](c, pr, u["id"], body)
+        try:
+            gid = c.execute("INSERT INTO games (conv_id, type, state, players, turn, status, created, updated) VALUES (?,?,?,?,?,'active',?,?)",
+                            (pr["direct"], typ, json.dumps(st, ensure_ascii=False, separators=(",", ":")), json.dumps([u["id"], _g_other(pr, u["id"])]), turn, now, now)).lastrowid
+        except sqlite3.IntegrityError:  # the other phone started it at the same moment
+            return {"game": _g_view(c, pr, c.execute("SELECT * FROM games WHERE conv_id=? AND type=? AND status='active'", (pr["direct"], typ)).fetchone(), u["id"]), "existing": True}
+        g = c.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone()
+        msg = None if rematch else _g_chip(c, pr, g, u["id"], "start")
+        out = {"game": _g_view(c, pr, g, u["id"]), "existing": False}
+        c.commit()
+    await _g_ping(pr, gid, "start", u["id"])
+    if msg:
+        await _bcast_msg(pr["direct"], msg)
+    await _g_push(pr, gid, u["id"], GSTART_PUSH[typ])
+    return out
+
+
+@app.get("/api/games/{cid}/{gid}")
+def games_get(cid: int, gid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        return {"game": _g_view(c, pr, _g_row(c, pr, gid), u["id"])}
+
+
+@app.post("/api/games/{cid}/{gid}/move")
+async def games_move(cid: int, gid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    uid, now, msg = u["id"], time.time(), None
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, uid)
+        g = _g_row(c, pr, gid)
+        if g["status"] != "active":
+            raise ValueError("This game is over.")
+        st = json.loads(g["state"])
+        r = GMOVE[g["type"]](c, pr, g, st, uid, body)  # raises before anything is written when the move is not allowed
+        if r.get("end"):
+            msg = _g_end(c, pr, g, st, r["end"]["winner"], r["end"]["res"], uid)
+        else:
+            c.execute("UPDATE games SET state=?, turn=?, updated=? WHERE id=?", (json.dumps(st, ensure_ascii=False, separators=(",", ":")), r.get("turn", g["turn"]), now, gid))
+        out = {"game": _g_view(c, pr, c.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone(), uid, bool(r.get("lite")))}
+        c.commit()
+    GDRAW.pop(gid, None)
+    await _g_ping(pr, gid, "end" if msg else r["what"], uid, bool(r.get("lite")))
+    if msg:
+        await _bcast_msg(pr["direct"], msg)
+    elif r.get("push"):
+        await _g_push(pr, gid, uid, r["push"])
+    return out
+
+
+@app.post("/api/games/{cid}/{gid}/resign")
+async def games_resign(cid: int, gid: int, authorization: str = Header(None)):
+    """Either player, any time. Once it has really begun (ttt, 20 questions, draw) it counts for the other one; otherwise it is just cancelled. No coins either way."""
+    u = auth(authorization)
+    uid = u["id"]
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, uid)
+        g = _g_row(c, pr, gid)
+        if g["status"] != "active":
+            raise ValueError("This game is over.")
+        st, o = json.loads(g["state"]), _g_other(pr, uid)
+        began = {"ttt": lambda: any(st["b"]), "twenty": lambda: bool(st["qs"] or st["wrong"]), "draw": lambda: st["phase"] == "draw"}.get(g["type"], lambda: False)()
+        if began:
+            if g["type"] == "ttt":
+                st["score"][str(o)] += 1
+            msg = _g_end(c, pr, g, st, o, "resign", uid, pay=False)
+        else:
+            msg = _g_end(c, pr, g, st, 0, "cancelled", uid, pay=False, status="cancelled")
+        out = {"game": _g_view(c, pr, c.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone(), uid)}
+        c.commit()
+    GDRAW.pop(gid, None)
+    await _g_ping(pr, gid, "end", uid)
+    await _bcast_msg(pr["direct"], msg)
+    return out
+
+
+async def _game_jobs():
+    """Games nobody has touched for 7 days end quietly (every loop; one indexed query). Each is claimed by the status check, so it expires once."""
+    now = time.time()
+    with closing(db()) as c:
+        due = [r["id"] for r in c.execute("SELECT id FROM games WHERE status='active' AND updated<? ORDER BY updated LIMIT 50", (now - GAME_IDLE,))]
+    for gid in due:
+        try:
+            with closing(db()) as c:
+                if not c.execute("UPDATE games SET status='expired', res='expired', finished=?, turn=0 WHERE id=? AND status='active' AND updated<?", (now, gid, now - GAME_IDLE)).rowcount:
+                    continue
+                g = c.execute("SELECT * FROM games WHERE id=?", (gid,)).fetchone()
+                ids = sorted(x["user_id"] for x in c.execute("SELECT user_id FROM members WHERE conv_id=?", (g["conv_id"],)))
+                if len(ids) != 2:
+                    c.commit()
+                    continue
+                pr = _pair_build(c, ids[0], ids[1], _pet_for(c, ids[0], ids[1]))
+                msg = _g_chip(c, pr, g, (json.loads(g["players"]) or [ids[0]])[0], "end")
+                c.commit()
+            await _g_ping(pr, gid, "expire", 0)
+            await _bcast_msg(pr["direct"], msg)
+        except Exception as e:
+            print("game job failed:", repr(e)[:300], flush=True)
+
+
+async def game_draw_relay(uid: int, m: dict):
+    """A live stroke of the drawer, passed on to the guesser only (nothing stored here: the finished stroke is saved with a move). About 40 events a second at most."""
+    gid, now_ = int(m.get("game") or 0), time.time()
+    if now_ - GDRAW_RATE.get(uid, 0) < 0.025:
+        return
+    GDRAW_RATE[uid] = now_
+    info = GDRAW.get(gid)
+    if not info or info[2] < now_:
+        if len(GDRAW) > 200:
+            GDRAW.clear()
+        with closing(db()) as c:
+            g = c.execute("SELECT state FROM games WHERE id=? AND type='draw' AND status='active'", (gid,)).fetchone()
+        st = json.loads(g["state"]) if g else None
+        info = GDRAW[gid] = (st["drawer"], st["guesser"], now_ + 15) if st and st["phase"] == "draw" else (0, 0, now_ + 1)
+    if uid != info[0]:
+        return
+    k = m.get("k")
+    out = {"t": "game_draw", "game": gid, "k": k}
+    if k == "p":
+        pts, c_, w = m.get("pts"), m.get("c"), m.get("w", 1)
+        if not isinstance(pts, list) or not 2 <= len(pts) <= 40 or len(pts) % 2 or type(c_) is not int or not 0 <= c_ <= 3 or type(w) is not int or not 1 <= w <= 3 \
+                or any(type(x) is not int or not 0 <= x <= 1000 for x in pts):
+            return
+        out.update(pts=pts, c=c_, w=w, s=1 if m.get("s") else 0)
+    elif k not in ("e", "u", "c"):
+        return
+    await send_to(info[1], out)
+
+
 # ---------------------------------------------------------------- live updates (one WebSocket per device)
 async def send_to(uid: int, msg: dict):
     for dev, s in list(SOCKETS.get(uid, {}).items()):
@@ -3583,6 +4204,11 @@ async def ws(sock: WebSocket, token: str = "", device: str = "device"):
                     await us_leave(uid, dev)
             elif m.get("t") == "ping":
                 await sock.send_text('{"t":"pong"}')
+            elif m.get("t") == "game_draw":
+                try:
+                    await game_draw_relay(uid, m)
+                except (TypeError, ValueError, KeyError, sqlite3.Error):
+                    pass
             elif m.get("t") in ("us", "us_tap"):
                 try:  # a bad live-touch event must never drop the chat connection
                     if m["t"] == "us":
@@ -3766,7 +4392,7 @@ async def push_to(uids: list[int], payload: dict, skip_visible=True):
                 sub = json.loads(r["sub"])
                 with closing(db()) as c:
                     badge = c.execute("""SELECT COUNT(*) FROM messages ms JOIN members mb ON mb.conv_id=ms.conv_id AND mb.user_id=?
-                                         WHERE ms.sender<>? AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card') AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
+                                         WHERE ms.sender<>? AND ms.deleted=0 AND ms.kind NOT IN ('touch','pinact','card','game') AND ms.created>mb.last_read""", (r["user_id"], r["user_id"])).fetchone()[0]
                 body = encrypt_push(sub, json.dumps({**payload, "badge": badge}).encode()[:3800])
                 resp = await h.post(sub["endpoint"], content=body, headers={
                     "Authorization": _vapid_header(sub["endpoint"]), "Content-Encoding": "aes128gcm",
