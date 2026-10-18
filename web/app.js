@@ -1403,6 +1403,35 @@
   }
   function addConv(c) { const i = S.convs.findIndex((x) => x.id === c.id); if (i >= 0) S.convs[i] = c; else S.convs.unshift(c); }
 
+  const inviteLink = (code) => `${location.origin}/#invite=${code}`;
+  function inviteSheet() {
+    const s = sheet(`<h3 style="font:600 20px var(--serif);margin:4px 0 6px">👋 Invite a friend</h3>
+      <div class="note">Make a link just for them. They pick their own username and password, and your chat starts right away.</div>
+      <div class="field"><label>For (their name)</label><input class="inp" id="ifor" maxlength="40" placeholder="Optional, e.g. Raina"></div>
+      <button class="big-btn" id="igo2">Create invite</button><div class="err" id="ierr"></div><div id="inew2"></div>
+      <h4>My invites</h4><div id="ilist"></div>`);
+    const list = async () => {
+      let rows = []; try { rows = await api("/api/invites"); } catch (e) { }
+      $("#ilist", s).innerHTML = rows.map((i) => `<div class="row" style="justify-content:space-between;gap:8px;padding:6px 0"><div><b>${esc(i.for_name || "Anyone")}</b>
+          <div style="font-size:12px;color:var(--muted)">${i.used_by ? `✓ Joined${i.used_name ? " as " + esc(i.used_name) : ""}` : "Not used yet"}</div></div>
+          ${i.used_by ? "" : `<span><button class="sbtn" data-ic="${esc(i.code)}">Copy</button> <button class="sbtn" data-idel="${esc(i.code)}" title="Revoke">✕</button></span>`}</div>`).join("") || `<div class="hint">No invites yet.</div>`;
+      $$("[data-ic]", s).forEach((b) => b.onclick = () => copy(inviteLink(b.dataset.ic), "Invite link copied"));
+      $$("[data-idel]", s).forEach((b) => b.onclick = async () => { try { await api(`/api/invites/${b.dataset.idel}`, { method: "DELETE" }); } catch (e) { toast(e.message); } list(); });
+    };
+    $("#igo2", s).onclick = async () => {
+      const btn = $("#igo2", s), err = $("#ierr", s); btn.disabled = true; err.textContent = "";
+      try {
+        const nm = $("#ifor", s).value.trim(), r = await api("/api/invites", { body: { for_name: nm } }), link = inviteLink(r.code);
+        $("#inew2", s).innerHTML = `<div class="code pop" style="margin-top:10px;word-break:break-all;font-size:14px">${esc(link)}</div>
+          <div class="row" style="gap:8px;margin-top:8px"><button class="big-btn gold" id="icp" style="flex:1">Copy</button><button class="big-btn" id="ish" style="flex:1">Share</button></div>`;
+        $("#icp", s).onclick = () => navigator.clipboard.writeText(link).then(() => toast("Invite link copied")).catch(() => prompt("Copy this:", link));
+        $("#ish", s).onclick = () => { const t = `${nm ? "Hi " + nm + ", join" : "Join"} me on AFRA: ${link}`; (navigator.share ? navigator.share({ text: t }) : navigator.clipboard.writeText(t).then(() => toast("Message copied"))).catch(() => { }); };
+        $("#ifor", s).value = ""; list();
+      } catch (e) { err.textContent = e.message; }
+      btn.disabled = false;
+    };
+    list();
+  }
   function profileSheet() {
     const pushOn = "Notification" in window && Notification.permission === "granted";
     const s = sheet(`<div style="text-align:center"><label style="cursor:pointer;display:inline-block">${avatar(S.me, "lg")}<input type="file" id="pav" accept="image/*" hidden></label>
@@ -1413,6 +1442,8 @@
       <div class="field"><label>Username</label><input class="inp" id="puser" value="${esc(S.me.username)}" autocapitalize="none" autocorrect="off"></div>
       <div class="field"><label>About</label><input class="inp" id="pbio" value="${esc(S.me.bio || "")}" maxlength="140" placeholder="A line about you (people see it on your profile)"></div>
       <button class="big-btn" id="psave">Save</button><div class="err" id="perr"></div>
+      <h4>Friends</h4>
+      <button class="item" id="pinv">👋 Invite a friend</button>
       <h4>Notifications</h4>
       ${isIOS && !standalone ? `<div class="note warn">📲 On iPhone, notifications work in the Home Screen app: tap <b>Share</b> ⬆ → <b>Add to Home Screen</b>, then open A.F.R.A ♥ from its icon.</div>`
         : `<div class="row"><button class="sbtn" id="ppush">${pushOn ? "✓ On" : "Turn on"}</button>${pushOn ? `<button class="sbtn" id="ptest">Send me a test</button>` : ""}</div>`}
@@ -1427,6 +1458,7 @@
       <h4>This device</h4>
       <button class="item danger" id="pout">Log out</button>`);
     $("#plook", s).onclick = () => { s.remove(); lookSheet(); };
+    $("#pinv", s).onclick = () => { s.remove(); inviteSheet(); };
     $("#pav", s).onchange = async (e) => {
       const f = e.target.files[0]; if (!f) return;
       try { e.target.value = ""; const sq = await cropImage(f, 512); if (!sq) return; const fd = new FormData(); fd.append("file", sq, "avatar.jpg"); S.me = await api("/api/me/avatar", { body: fd }); s.remove(); drawAll(); profileSheet(); toast("Photo updated"); }
@@ -1615,8 +1647,21 @@
   }
 
   // ------------------------------------------------------------------ sign in / sign up / reset
-  function authScreen(mode) {
+  function authScreen(mode, welcomed) {
     const h = new URLSearchParams(location.hash.slice(1));
+    if (!h.get("invite") && new URLSearchParams(location.search).get("invite")) h.set("invite", new URLSearchParams(location.search).get("invite"));
+    if (!mode && !welcomed && h.get("invite") && !h.get("reset")) {  // greet the invited person first
+      app.dataset.view = "auth";
+      app.innerHTML = `<div class="setup"><img class="logo" src="icon-512.png" alt=""><div style="text-align:center;color:var(--muted)">♥</div></div>`;
+      fetch("/api/invite/" + encodeURIComponent(h.get("invite"))).then((r) => r.json()).catch(() => ({})).then((inf) => {
+        if (!inf.valid) return authScreen("signup", true);
+        app.innerHTML = `<div class="setup" style="justify-content:center;text-align:center"><img class="logo pop" src="icon-512.png" alt=""><h1 style="animation:fadeUp .5s var(--spring) both">${inf.for_name ? `Hi ${esc(inf.for_name)}, you have been invited to join AFRA!` : "You have been invited to join AFRA!"}</h1>
+          ${inf.from ? `<p style="animation:fadeUp .6s var(--spring) .1s both">from ${esc(inf.from)}</p>` : ""}
+          <button class="big-btn gold" id="awel" style="animation:fadeUp .6s var(--spring) .2s both">Join ♥</button></div>`;
+        $("#awel").onclick = () => authScreen("signup", true);
+      });
+      return;
+    }
     mode = mode || (h.get("invite") ? "signup" : h.get("reset") ? "reset" : "login");
     app.dataset.view = "auth";
     const f = (id, label, attrs = "", cls = "inp") => `<label>${label}</label><input class="${cls}" id="${id}" ${attrs}>`;

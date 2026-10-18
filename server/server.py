@@ -94,7 +94,8 @@ with closing(db()) as _c:
         if "style" not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN style TEXT DEFAULT '{{}}'")
     for _t, _col, _def in (("users", "bio", "TEXT DEFAULT ''"), ("members", "muted", "REAL DEFAULT 0"),  # about line; mute until (time)
-                          ("users", "bot", "INTEGER DEFAULT 0")):  # the Assistant's account
+                          ("users", "bot", "INTEGER DEFAULT 0"),
+                          ("invites", "for_name", "TEXT DEFAULT ''")):  # who an invite is for (shown on the welcome screen)  # the Assistant's account
         if _col not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN {_col} {_def}")
     _c.commit()
@@ -203,10 +204,10 @@ def public(u) -> dict:
             "online": online, "last_seen": time.time() if online else u["last_seen"], "bio": u["bio"] or "", "bot": bool(u["bot"])}
 
 
-def make_code(c, kind="invite", admin_=0, by=None, note="") -> str:
+def make_code(c, kind="invite", admin_=0, by=None, note="", for_name="") -> str:
     code = "-".join(secrets.token_hex(2).upper() for _ in range(3))
-    c.execute("INSERT INTO invites (code, created_by, note, admin, created, kind) VALUES (?,?,?,?,?,?)",
-              (code, by, note[:80], admin_, time.time(), kind))
+    c.execute("INSERT INTO invites (code, created_by, note, admin, created, kind, for_name) VALUES (?,?,?,?,?,?,?)",
+              (code, by, note[:80], admin_, time.time(), kind, (for_name or "").strip()[:40]))
     return code
 
 
@@ -1471,6 +1472,49 @@ async def admin_delete(uid: int, authorization: str = Header(None)):
     return {"ok": True, "chats": len(convs), "files": len(fids)}
 
 
+@app.get("/api/invite/{code}")  # public: lets the welcome screen greet the invited person; reveals nothing about used/unknown codes
+def invite_info(code: str, request: Request):
+    throttle("inviteinfo:" + (request.client.host if request.client else ""))
+    with closing(db()) as c:
+        inv = c.execute("SELECT i.for_name, u.name AS frm FROM invites i LEFT JOIN users u ON u.id=i.created_by "
+                        "WHERE i.code=? AND i.kind='invite' AND i.used_by IS NULL", (code.strip().upper()[:40],)).fetchone()
+    if not inv:
+        return {"valid": False}
+    return {"valid": True, "for_name": inv["for_name"] or "", "from": inv["frm"] or ""}
+
+
+@app.get("/api/invites")
+def my_invites(authorization: str = Header(None)):
+    me_ = auth(authorization)
+    with closing(db()) as c:
+        rows = c.execute("""SELECT i.code, i.for_name, i.created, i.used_by, u.name AS used_name FROM invites i LEFT JOIN users u ON u.id=i.used_by
+                            WHERE i.kind='invite' AND i.created_by=? ORDER BY i.created DESC LIMIT 50""", (me_["id"],)).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/invites")
+def my_new_invite(body: dict, authorization: str = Header(None)):
+    me_ = auth(authorization)
+    for_name = str(body.get("for_name") or "").strip()
+    if len(for_name) > 40:
+        raise ValueError("Their name can be at most 40 characters.")
+    with closing(db()) as c:
+        if not me_["is_admin"] and c.execute("SELECT COUNT(*) FROM invites WHERE kind='invite' AND created_by=? AND used_by IS NULL", (me_["id"],)).fetchone()[0] >= 10:
+            raise ValueError("You have 10 unused invites already. Remove one or wait for a friend to join.")
+        code = make_code(c, "invite", 0, me_["id"], "", for_name)
+        c.commit()
+    return {"code": code}
+
+
+@app.delete("/api/invites/{code}")
+def my_del_invite(code: str, authorization: str = Header(None)):
+    me_ = auth(authorization)
+    with closing(db()) as c:
+        c.execute("DELETE FROM invites WHERE code=? AND kind='invite' AND created_by=? AND used_by IS NULL", (code.upper(), me_["id"]))
+        c.commit()
+    return {"ok": True}
+
+
 @app.get("/api/admin/invites")
 def admin_invites(authorization: str = Header(None)):
     admin(authorization)
@@ -1484,7 +1528,7 @@ def admin_invites(authorization: str = Header(None)):
 def admin_new_invite(body: dict, authorization: str = Header(None)):
     me_ = admin(authorization)
     with closing(db()) as c:
-        code = make_code(c, "invite", int(bool(body.get("admin"))), me_["id"], body.get("note") or "")
+        code = make_code(c, "invite", int(bool(body.get("admin"))), me_["id"], body.get("note") or "", str(body.get("for_name") or ""))
         c.commit()
     return {"code": code}
 
