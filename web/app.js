@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 27;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 28;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -266,6 +266,8 @@
     if (e.t === "game_draw") { onGameDraw(e); return; }
     if (e.t === "game") { onGameEvent(e); return; }
     if (e.t === "capsule") { onCapsuleEvent(e); return; }
+    if (e.t === "bucket") { onBucketEvent(e); return; }
+    if (e.t === "memories") { onMemoriesEvent(e); return; }
     if (e.t === "us_here" || e.t === "us_tap" || e.t === "us_sync" || e.t === "us_invite") { onUsEvent(e); return; }
     if (e.t === "pins") {
       const c = conv(e.conv); if (!c) return; c.pins = e.pins || []; P.k[c.id] = 0; cacheSave();
@@ -646,6 +648,7 @@
       if (m.kind === "card" && !m.deleted) { html += cardChip(m, pop); continue; }
       if (m.kind === "game" && !m.deleted) { html += gameChip(m, pop); continue; }
       if (m.kind === "capsule" && !m.deleted) { html += capsuleChip(m, pop); continue; }
+      if (m.kind === "bucket" && !m.deleted) { html += bucketChip(m, pop); continue; }
       html += `<div class="msg ${mine ? "mine" : ""} ${m.pending ? "pending" : ""} ${pop} ${m.kind === "petact" || m.kind === "pinact" ? "petact" : m.kind === "petinvite" ? "petcard" : ""} ${ps ? "petsay" : ""}" data-id="${m.id || ""}" data-cid="${esc(m.client_id || "")}">
         ${ps ? `<span class="psav" aria-hidden="true">${esc((petOf(c) || {}).emoji || "🐾")}</span>` : ""}${who ? `<div class="msg-who">${esc(dn(who).split(" ")[0])}</div>` : ""}<div class="bub ${m.deleted ? "deleted" : ""} ${!m.deleted && (m.kind === "videonote" || m.kind === "sticker") ? "bare" : ""}">${bubbleBody(m, list)}</div>
         ${rxPill(m)}
@@ -656,7 +659,7 @@
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
-    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log); bindCardChips(log); bindGameChips(log); bindCapsuleChips(log);
+    bindVideoNotes(log); bindPetCards(log); bindTouchChips(log); bindCardChips(log); bindGameChips(log); bindCapsuleChips(log); bindBucketChips(log);
     $$("[data-rxs]", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); navigator.vibrate && navigator.vibrate(5); rxSheet(+b.dataset.rxs); });
     $$("[data-goto]", log).forEach((q) => q.onclick = (e) => {
       e.stopPropagation(); const t = $(`.msg[data-id="${q.dataset.goto}"]`); if (!t) return;
@@ -1251,11 +1254,11 @@
       };
     });
   }
-  function viewMedia(m, list) {  // full screen photos and videos, like WhatsApp: swipe through, scrub, swipe down to close
+  function viewMedia(m, list, ext) {  // full screen photos and videos, like WhatsApp: swipe through, scrub, swipe down to close
     const media = (list || S.msgs[m.conv_id] || [m]).filter((x) => !x.deleted && x.attachment && (x.kind === "image" || x.kind === "video"));
     let i = Math.max(0, media.findIndex((x) => x.id === m.id)); if (!media.length) media.push(m);
     const v = document.createElement("div"); v.className = "viewer mv"; document.body.appendChild(v);
-    let hideT = 0, vid = null;
+    let hideT = 0, vid = null, more = false;  // ext (the memories album): a star, other places to go to, a slideshow, and more pages as you swipe on
     const close = () => { if (v.classList.contains("closing")) return; clearTimeout(hideT); if (vid) vid.pause(); v.classList.add("closing"); setTimeout(() => v.remove(), 180); document.removeEventListener("keydown", key); };
     layer(v, close);
     const chrome = (on) => { v.classList.toggle("bare", !on); clearTimeout(hideT); if (on && vid && !vid.paused) hideT = setTimeout(() => v.classList.add("bare"), 2600); };
@@ -1263,15 +1266,19 @@
       const x = media[i], a = x.attachment || {}, isVid = x.kind === "video";
       const who = x.sender === S.me.id ? "You" : (userById(x.sender) || {}).name || "";
       v.innerHTML = `<div class="mv-top"><button class="mv-b" data-x>‹</button><div class="mv-who"><b>${esc(who)}</b><small>${esc(dayLabel(x.created) + " · " + fmtTime(x.created))}</small></div>
-          <button class="mv-b" data-go title="Show in chat">💬</button><a class="mv-b" href="${fileUrl(a.id)}" download="${esc(a.name || "")}" title="Save">⤓</a></div>
+          ${ext ? `<button class="mv-b" data-fav aria-label="Favourite">${ext.fav(x) ? "⭐" : "☆"}</button><button class="mv-b" data-sl aria-label="Slideshow">▶</button>` : ""}<button class="mv-b" data-go title="${ext ? "Go to it" : "Show in chat"}">${ext ? ext.icon(x) : "💬"}</button><a class="mv-b" href="${fileUrl(a.id)}" download="${esc(a.name || "")}" title="Save">⤓</a></div>
         <div class="mv-stage">${isVid ? `<video src="${fileUrl(a.id)}"${a.poster ? ` poster="${fileUrl(a.poster)}"` : ""} playsinline autoplay></video><button class="mv-big" hidden>▶</button>`
           : `<img src="${fileUrl(a.id)}" alt="">`}</div>
-        ${i > 0 ? `<button class="mv-nav l" data-n="-1">‹</button>` : ""}${i < media.length - 1 ? `<button class="mv-nav r" data-n="1">›</button>` : ""}
+        ${i > 0 ? `<button class="mv-nav l" data-n="-1">‹</button>` : ""}${i < media.length - 1 || (ext && ext.hasMore()) ? `<button class="mv-nav r" data-n="1">›</button>` : ""}
         <div class="mv-bot">${x.text ? `<div class="mv-cap">${esc(x.text)}</div>` : ""}
           ${isVid ? `<div class="mv-bar"><button class="mv-b" data-p>❚❚</button><span data-c>0:00</span><input type="range" min="0" max="1000" value="0"><span data-d>${a.dur ? fmtDur(a.dur) : "0:00"}</span><button class="mv-b" data-m>🔊</button></div>` : ""}
-          ${media.length > 1 ? `<div class="mv-count">${i + 1} / ${media.length}</div>` : ""}</div>`;
+          ${media.length > 1 ? `<div class="mv-count">${ext ? (ext.tag(x) || "").replace(/^ · /, "") + (ext.tag(x) ? " · " : "") : ""}${i + 1}${ext && ext.hasMore() ? "" : " / " + media.length}</div>` : ""}</div>`;
       $("[data-x]", v).onclick = close;
-      $("[data-go]", v).onclick = () => { close(); gotoMsg(x.conv_id, x.id); };
+      $("[data-go]", v).onclick = () => { close(); ext ? ext.go(x) : gotoMsg(x.conv_id, x.id); };
+      if (ext) {
+        const fb = $("[data-fav]", v); fb.onclick = () => { ext.toggle(x); fb.textContent = ext.fav(x) ? "⭐" : "☆"; haptic(8); };
+        $("[data-sl]", v).onclick = () => ext.slide(i);
+      }
       $$("[data-n]", v).forEach((b) => b.onclick = (e) => { e.stopPropagation(); step(+b.dataset.n); });
       vid = isVid ? $("video", v) : null;
       if (vid) {
@@ -1291,7 +1298,10 @@
       }
       chrome(true);
     };
-    const step = (d) => { if (media[i + d]) { if (vid) vid.pause(); i += d; show(); } };
+    const step = async (d) => {
+      if (!media[i + d] && d > 0 && ext && ext.hasMore() && !more) { more = true; try { media.push(...(await ext.more())); } finally { more = false; } }
+      if (media[i + d]) { if (vid) vid.pause(); i += d; show(); }
+    };
     const key = (e) => {
       if (e.key === "Escape") close(); else if (e.key === "ArrowLeft") step(-1); else if (e.key === "ArrowRight") step(1);
       else if (e.key === " " && vid) { e.preventDefault(); vid.paused ? vid.play() : vid.pause(); }
@@ -2562,13 +2572,16 @@
       ? `<button class="hm-card pc-dates" id="pcDates"><div class="pd-row">${dt.together_days !== null ? `<div><b>${dt.together_days.toLocaleString()}</b><small>days together 💞</small></div>` : ""}${dt.next_days !== null ? `<div><b>${dt.next_days === 0 ? "Today" : dt.next_days}</b><small>${dt.next_days === 0 ? "we're together! 🥰" : (dt.next_days === 1 ? "day" : "days") + " until we meet ✈️"}</small></div>` : ""}</div>${upTxt ? `<em class="pd-up">🎁 ${upTxt}</em>` : ""}</button>`
       : `<button class="hm-card pc-dates empty" id="pcDates"><i>💞</i><span><b>Our dates</b><small>Add when you got together, birthdays and the next time you meet</small></span><em>›</em></button>`;
     const o = d.otd, fresh = otdNew();
-    const otd = o ? `<div class="hm-card pc-otd"><h4>📅 On this day <small>${esc(o.label)}</small>${fresh ? `<b class="pc-new">new</b>` : ""}</h4><div class="otd-grid">${o.items.map((i) => i.kind === "image"
+    const otd = o ? `<div class="hm-card pc-otd"><h4>📅 On this day <small>${esc(o.label)}</small>${fresh ? `<b class="pc-new">new</b>` : ""}<button class="sbtn" id="otdMem">Memories ›</button></h4><div class="otd-grid">${o.items.map((i) => i.kind === "image"
       ? `<button class="otd-it img" data-otd="${i.id}"><img src="${fileUrl(i.file)}" alt="" loading="lazy">${i.text ? `<small>${esc(i.text)}</small>` : ""}</button>`
       : `<button class="otd-it" data-otd="${i.id}"><p>“${esc(i.text)}”</p><small>${esc(pName(i.sender))}</small></button>`).join("")}</div></div>` : "";
     const dc = S.convs.find((x) => x.kind === "direct" && x.members.some((u) => u.id === oid)), ou = userById(oid);
     const usCard = dc && ou ? `<button class="hm-card pc-us" id="pcUs" data-cid="${dc.id}"><span class="pcus-blobs"><span class="us-blob" style="--bc:${blobCol(ou)}">${blobFace(ou)}</span><span class="us-blob" style="--bc:${blobCol(S.me)}">${blobFace(S.me)}</span></span><span><b>Us</b><small class="hm-hint">Send ${esc(dn(ou).split(" ")[0])} a hug, a kiss or a little buzz</small></span><em>🫶</em></button>` : "";
     const cardsCard = `<button class="hm-card pc-cards" id="pcCards" data-cid="${d.conv}"><i>🃏</i><span><b>Cards</b><small class="hm-hint">Little questions to answer together</small></span><em>›</em></button>`;
-    return `<div class="pc-stack">${usCard}${cardsCard}
+    const bk = d.bucket || { done: 0, todo: 0 };
+    const tiles = `<div class="pc-two"><button class="hm-card pc-tile" id="pcBucket" data-cid="${d.conv}"><i>🪣</i><b>Bucket list</b><small class="hm-hint">${bk.done + bk.todo ? `${bk.done} done · ${bk.todo} to go` : "Dreams for the two of you"}</small></button>
+      <button class="hm-card pc-tile" id="pcMem" data-cid="${d.conv}"><i>📸</i><b>Memories</b><small class="hm-hint">Every photo you shared</small></button></div>`;
+    return `<div class="pc-stack">${usCard}${cardsCard}${tiles}
       <div class="hm-card pc-dq ${q.revealed ? "done" : ""}" id="pcDq"><h4>💭 Today's question ${q.streak ? `<b class="dq-streak">🔥 ${q.streak}</b>` : ""}<button class="sbtn" id="dqPast">Past</button></h4><p class="dq-q">${esc(q.q)}</p>${body}</div>
       <div class="hm-card pc-mood"><h4>🌤️ Moods</h4>${mrow(me)}${mrow(oid)}</div>
       ${dates}${otd}</div>`;
@@ -2593,6 +2606,9 @@
     $("#pcMood", box).onclick = moodSheet;
     const pu = $("#pcUs", box); if (pu) pu.onclick = () => usOpen(+pu.dataset.cid);
     const pk = $("#pcCards", box); if (pk) pk.onclick = () => cardsOpen(+pk.dataset.cid);
+    const pb = $("#pcBucket", box); if (pb) pb.onclick = () => bucketOpen(+pb.dataset.cid);
+    const pm = $("#pcMem", box); if (pm) pm.onclick = () => memOpen(+pm.dataset.cid);
+    const om = $("#otdMem", box); if (om && d.otd) om.onclick = () => memOpen(d.conv, { through: d.otd.date.slice(0, 7) });
     $("#pcDates", box).onclick = () => datesSheet(d.conv);
     $$("[data-otd]", box).forEach((b) => b.onclick = () => {
       store.set(otdSeenKey(), true); tabBadges();
@@ -4285,6 +4301,265 @@
       const sw = iosTick(); rows.push(`iOS switch tick: ${sw ? "ran" : "not available"}${isIOS ? "" : " (only iPhones answer to this one)"}`);
       ho.innerHTML = `<ul>${rows.map((r) => `<li>${r}</li>`).join("")}</ul><small class="hint">“Ran” means the call worked. Only you can tell whether you felt it.</small>`;
     };
+  }
+
+  // ---- v28: bucket list + memories album (the album is built by the server from the chat, the bucket list and OPENED letters only; the stars are shared)
+  const BK = { page: null, cid: 0, st: null, tab: "todo" };
+  const BK_CATS = [["go", "✈️", "Places to go"], ["eat", "🍜", "Food to try"], ["do", "🎡", "Things to do"], ["someday", "🌙", "Someday"]];
+  const bkCat = (k) => BK_CATS.find((c) => c[0] === k) || BK_CATS[2];
+  const bkDay = (iso) => iso ? new Date(iso + "T12:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : "";
+  const bkToday = () => { const d = new Date(), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };
+  const bkWho = (id) => id === S.me.id ? "you" : (BK.st && BK.st.names[String(id)]) || "them";
+  async function bucketOpen(cid, openId) {
+    if (BK.page) return;
+    const page = document.createElement("div"); page.className = "page bucket";
+    page.innerHTML = `<div class="kc-top"><button class="icon" id="bkBack" aria-label="Back">‹</button><b>Bucket list 🪣</b><span class="kc-sp"></span><button class="icon" id="bkIdeas" aria-label="Need ideas?">💡</button><button class="icon" id="bkNew" aria-label="Add something">＋</button></div>
+      <div class="bk-prog" id="bkProg"></div><div class="lp-tabs" id="bkTabs"></div><div class="kc-body" id="bkBody"><div class="hint">Loading…</div></div>`;
+    document.body.appendChild(page);
+    Object.assign(BK, { page, cid, st: null, tab: "todo" });
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); if (BK.page === page) BK.page = null; setTimeout(() => page.remove(), 200); };
+    layer(page, close); $("#bkBack", page).onclick = close;
+    $("#bkNew", page).onclick = () => BK.st && bkForm(null);
+    $("#bkIdeas", page).onclick = () => BK.st && bkIdeas();
+    await bkLoad();
+    if (openId && BK.st) { const it = BK.st.items.find((x) => x.id === openId); if (it) { BK.tab = it.done ? "done" : "todo"; bkPaint(); bkDetail(it); } }
+  }
+  async function bkLoad() {
+    const page = BK.page; if (!page) return;
+    try { BK.st = await api(`/api/bucket/${BK.cid}`); } catch (x) { if (BK.page === page && !BK.st) $("#bkBody", page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (BK.page === page) bkPaint();
+    if (H.cid) pairLoad();  // the Home tile counts
+  }
+  function bkPaint() {
+    const st = BK.st, page = BK.page; if (!st || !page) return;
+    const done = st.items.filter((i) => i.done).sort((a, b) => (b.day || "").localeCompare(a.day || "") || b.done_at - a.done_at), todo = st.items.filter((i) => !i.done);
+    $("#bkProg", page).innerHTML = st.items.length ? `<div class="bk-bar"><i style="width:${Math.round(100 * done.length / st.items.length)}%"></i></div><small>${done.length} done · ${todo.length} to go</small>` : "";
+    $("#bkTabs", page).innerHTML = [["todo", "To do", todo.length], ["done", "Done", done.length]].map(([k, n, c]) => `<button class="${BK.tab === k ? "on" : ""}" data-t="${k}">${n}${c ? ` <em>${c}</em>` : ""}</button>`).join("");
+    $$("#bkTabs button", page).forEach((b) => b.onclick = () => { BK.tab = b.dataset.t; bkPaint(); });
+    const body = $("#bkBody", page);
+    if (BK.tab === "todo") {
+      body.innerHTML = todo.length ? BK_CATS.map(([k, em, name]) => {
+        const rows = todo.filter((i) => i.cat === k); if (!rows.length) return "";
+        return `<h4 class="bk-h">${em} ${name} <em>${rows.length}</em></h4>` + rows.map((i) => {
+          const sub = [i.by ? "by " + bkDay(i.by) : "", i.note].filter(Boolean).join(" · ");
+          return `<div class="bk-i"><button class="bk-tick" data-t="${i.id}" aria-label="Mark as done: ${esc(i.title)}"></button><button class="bk-main" data-id="${i.id}"><b>${esc(i.title)}</b>${sub ? `<small>${esc(sub)}</small>` : ""}</button></div>`;
+        }).join("");
+      }).join("") : `<div class="hint">Nothing here yet.<br>Add a dream for the two of you, or tap 💡 for ideas.</div>`;
+      $$(".bk-tick", body).forEach((b) => b.onclick = () => { const it = st.items.find((x) => x.id === +b.dataset.t); if (it) { haptic(8); bkDoneSheet(it); } });
+      $$(".bk-main", body).forEach((b) => b.onclick = () => { const it = st.items.find((x) => x.id === +b.dataset.id); if (it) bkForm(it); });
+    } else {
+      body.innerHTML = done.length ? done.map((i) => `<button class="bk-d" data-id="${i.id}">${i.photos.length ? `<img src="${fileUrl(i.photos[0].id)}" alt="" loading="lazy">` : `<span class="bk-nophoto">${bkCat(i.cat)[1]}</span>`}
+        <span><b>${esc(i.title)}</b><small>${esc(bkDay(i.day || ""))}${i.photos.length > 1 ? ` · 📷 ${i.photos.length}` : ""}</small>${i.line ? `<em>${esc(i.line)}</em>` : ""}</span></button>`).join("") : `<div class="hint">Nothing ticked off yet.<br>The first one is always the best 💛</div>`;
+      $$(".bk-d", body).forEach((b) => b.onclick = () => { const it = st.items.find((x) => x.id === +b.dataset.id); if (it) bkDetail(it); });
+    }
+  }
+  function bkForm(it) {  // add or change an item (either of you can change any of them)
+    let cat = it ? it.cat : "do";
+    const s = pgSheet(`<h3>${it ? "Edit" : "Add to our list"}</h3>
+      <input id="bfT" maxlength="120" placeholder="What do we want to do?" value="${esc(it ? it.title : "")}" autocomplete="off">
+      <div class="bk-cats" id="bfC">${BK_CATS.map((c) => `<button data-c="${c[0]}" class="${cat === c[0] ? "on" : ""}">${c[1]} ${c[2]}</button>`).join("")}</div>
+      <textarea id="bfN" rows="2" maxlength="500" placeholder="A note (optional)">${esc(it ? it.note : "")}</textarea>
+      <label class="bk-lab">By when? <small>optional</small><input type="date" id="bfD" value="${esc(it ? it.by : "")}"></label>
+      <div class="kc-act">${it ? `<button class="sbtn" id="bfDel">Delete</button>` : ""}<button class="pi-yes" id="bfOk">${it ? "Save" : "Add"}</button></div>`);
+    $$("#bfC button", s).forEach((b) => b.onclick = () => { cat = b.dataset.c; $$("#bfC button", s).forEach((x) => x.classList.toggle("on", x === b)); });
+    if (!it) setTimeout(() => $("#bfT", s).focus(), 250);
+    $("#bfOk", s).onclick = async () => {
+      const title = $("#bfT", s).value.trim(); if (!title) { $("#bfT", s).focus(); return; }
+      const body = { title, cat, note: $("#bfN", s).value, by: $("#bfD", s).value };
+      try { await api(it ? `/api/bucket/${BK.cid}/${it.id}` : `/api/bucket/${BK.cid}`, { method: it ? "PUT" : "POST", body }); s.remove(); toast(it ? "Saved" : "Added 🪣"); bkLoad(); }
+      catch (x) { toast(x.message); }
+    };
+    if (it) $("#bfDel", s).onclick = async () => {
+      if (!confirm("Remove this from the list?")) return;
+      try { await api(`/api/bucket/${BK.cid}/${it.id}`, { method: "DELETE" }); s.remove(); toast("Removed"); bkLoad(); } catch (x) { toast(x.message); }
+    };
+  }
+  function bkIdeas() {
+    const bank = (typeof GAMES !== "undefined" && GAMES.bucket) || [], low = () => new Set(BK.st.items.map((i) => i.title.toLowerCase()));
+    const s = pgSheet(`<h3>Need ideas? 💡</h3><p class="bk-sub">Tap one to add it to your list.</p><div class="bk-ideas">${bank.map((x, i) => `<button data-i="${i}"><i>${bkCat(x[0])[1]}</i><span>${esc(x[1])}</span><u>＋</u></button>`).join("")}</div>`);
+    const mark = () => { const have = low(); $$(".bk-ideas button", s).forEach((b) => { const on = have.has(bank[+b.dataset.i][1].toLowerCase()); b.classList.toggle("on", on); b.disabled = on; $("u", b).textContent = on ? "✓" : "＋"; }); };
+    $$(".bk-ideas button", s).forEach((b) => b.onclick = async () => {
+      const x = bank[+b.dataset.i]; b.disabled = true;
+      try { const r = await api(`/api/bucket/${BK.cid}`, { body: { title: x[1], cat: x[0] } }); BK.st.items.push(r); mark(); bkPaint(); haptic(8); }
+      catch (e) { toast(e.message); b.disabled = false; }
+    });
+    mark();
+  }
+  function bkDetail(it) {  // a ticked-off item with its photos, or a plain one (from a chat chip)
+    const photos = it.photos || [];
+    const s = pgSheet(`<h3>${bkCat(it.cat)[1]} ${esc(it.title)}</h3>
+      <p class="bk-sub">${it.done ? `Done ${esc(bkDay(it.day))} 🎉` : "Still on the list"}${it.by && !it.done ? ` · by ${esc(bkDay(it.by))}` : ""} · added by ${esc(bkWho(it.added_by))}</p>
+      ${it.note ? `<p class="bk-note">${esc(it.note)}</p>` : ""}${it.line ? `<p class="bk-line">“${esc(it.line)}”</p>` : ""}
+      ${photos.length ? `<div class="bk-photos">${photos.map((p, i) => `<button data-i="${i}"><img src="${fileUrl(p.id)}" alt="" loading="lazy"></button>`).join("")}</div>` : ""}
+      <div class="bk-acts">${it.done ? `<button class="sbtn" data-a="mem">📷 Edit memory</button><button class="sbtn" data-a="undo">↩ Back to to-do</button>` : `<button class="pi-yes" data-a="tick">We did it!</button>`}<button class="sbtn" data-a="edit">✎ Details</button></div>`);
+    $$(".bk-photos button", s).forEach((b) => b.onclick = () => {
+      const list = photos.map((p, i) => ({ id: "bk" + i, conv_id: BK.cid, kind: "image", attachment: { id: p.id, name: p.name || "photo.jpg", mime: p.mime }, sender: it.done_by, created: it.done_at || it.created, text: it.title }));
+      viewMedia(list[+b.dataset.i], list);
+    });
+    $$("[data-a]", s).forEach((b) => b.onclick = async () => {
+      const a = b.dataset.a;
+      if (a === "undo") { try { await api(`/api/bucket/${BK.cid}/${it.id}/undo`, { method: "POST", body: {} }); s.remove(); toast("Back on the list"); BK.tab = "todo"; bkLoad(); } catch (x) { toast(x.message); } return; }
+      s.remove();
+      if (a === "edit") bkForm(it); else bkDoneSheet(it);
+    });
+  }
+  function bkDoneSheet(it) {  // "We did it!": a few photos, the day, a line
+    const ph = (it.photos || []).map((p) => ({ ...p })); let busy = false;
+    const s = pgSheet(`<h3>${it.done ? "Our memory" : "We did it! 🎉"}</h3><p class="bk-sub">${esc(it.title)}</p>
+      <div class="lc-photos" id="bdPh"></div><input type="file" id="bdFile" accept="image/*" multiple hidden>
+      <label class="bk-lab">When<input type="date" id="bdD" value="${esc(it.day || bkToday())}" max="${bkToday()}"></label>
+      <input id="bdL" maxlength="300" placeholder="A line to remember it by (optional)" value="${esc(it.line || "")}" autocomplete="off">
+      <div class="kc-act"><button class="pi-yes" id="bdOk">${it.done ? "Save" : "We did it!"}</button></div>`);
+    const paint = () => {
+      $("#bdPh", s).innerHTML = ph.map((a, i) => `<div class="lc-ph"><img src="${fileUrl(a.id)}" alt=""><button data-i="${i}" aria-label="Remove photo">×</button></div>`).join("") + (ph.length < 6 ? `<button class="lc-add" id="bdAdd" aria-label="Add photos">📷<small>${ph.length}/6</small></button>` : "");
+      $$("#bdPh .lc-ph button", s).forEach((b) => b.onclick = () => { ph.splice(+b.dataset.i, 1); paint(); });
+      const add = $("#bdAdd", s); if (add) add.onclick = () => $("#bdFile", s).click();
+    };
+    $("#bdFile", s).onchange = async (e) => {
+      const files = [...e.target.files].slice(0, 6 - ph.length); e.target.value = "";
+      for (const f of files) {
+        const blob = await editPhoto(f, { title: "Add a photo", presets: true }); if (!blob) continue;
+        try { busy = true; toast("Adding photo…"); const up = await upload(new File([blob], "bucket.jpg", { type: "image/jpeg" })); ph.push({ id: up.id, name: up.name, mime: up.mime, size: up.size }); paint(); }
+        catch (x) { toast(x.message); } finally { busy = false; }
+      }
+    };
+    $("#bdOk", s).onclick = async () => {
+      if (busy) return toast("One moment, the photo is still going up");
+      const was = it.done;
+      try {
+        const r = await api(`/api/bucket/${BK.cid}/${it.id}/done`, { body: { day: $("#bdD", s).value, line: $("#bdL", s).value, photos: ph } });
+        s.remove(); BK.tab = "done"; await bkLoad();
+        if (!was) {
+          haptic([12, 40, 18]); const box = BK.page && $("#bkBody", BK.page); if (box) { burstAt(box, "🎉", 8); burstAt(box, "✨", 6); }
+          toast(r.coins ? `We did it! +${r.coins} ♥ for the pet 🎉` : "We did it! 🎉");
+        } else toast("Saved 💛");
+      } catch (x) { toast(x.message); }
+    };
+    paint();
+  }
+  function onBucketEvent(e) {
+    if (BK.page && BK.st && e.conv === BK.st.conv) bkLoad();
+    else if (e.what === "done" && e.by !== S.me.id && !BK.page && isVisible()) toast("✅ You two just ticked one off");
+    if (MEM.page && e.by !== S.me.id && e.conv === MEM.conv) memLoad(true);
+    if (!BK.page && H.cid) pairLoad();
+  }
+  function bucketChip(m, pop_) {  // in the chat once something is ticked off: tap to open it
+    const a = m.attachment || {}, u = userById(m.sender), who = m.sender === S.me.id ? "You" : u ? dn(u).split(" ")[0] : "Someone";
+    return `<div class="tchip-row kchip-row ${pop_}" data-id="${m.id || ""}"><button class="tchip kchip bkchip" data-bk="${a.bucket || 0}">${a.photo ? `<img class="bk-th" src="${fileUrl(a.photo)}" alt="">` : "<i>✅</i>"}<span>✅ We did it: ${esc(a.title || "")}</span></button>
+      <small>${esc(who)} ticked it off · ${fmtTime(m.created)}</small></div>`;
+  }
+  function bindBucketChips(log) {
+    $$(".bkchip", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const id = +b.dataset.bk; if (id && S.cur) bucketOpen(S.cur, id); });
+  }
+
+  // ---- the memories album
+  const MEM = { page: null, cid: 0, conv: 0, items: [], next: "", filter: "all", busy: false, gen: 0, last: "", through: "", io: null, close: null };
+  const MEM_TABS = [["all", "All"], ["fav", "⭐ Favourites"], ["bucket", "Bucket list"], ["letters", "Letters"]];
+  const MEM_EMPTY = { all: "No photos yet.<br>The ones you send each other will gather here.", fav: "No favourites yet.<br>Open a photo and tap the star.", bucket: "Photos from the things you tick off will gather here.", letters: "Photos from letters that have opened will gather here." };
+  const memMonth = (ym) => new Date(ym + "-01T12:00:00").toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  async function memOpen(cid, o = {}) {
+    if (MEM.page) return;
+    const page = document.createElement("div"); page.className = "page album";
+    page.innerHTML = `<div class="kc-top"><button class="icon" id="mmBack" aria-label="Back">‹</button><b>Memories 📸</b><span class="kc-sp"></span><button class="icon" id="mmPlay" aria-label="Slideshow">▶</button></div>
+      <div class="lp-tabs mm-tabs" id="mmTabs"></div><div class="kc-body mm-body" id="mmBody"><div id="mmList"></div><div class="mm-more" id="mmMore"></div></div>`;
+    document.body.appendChild(page);
+    Object.assign(MEM, { page, cid, conv: cid, items: [], next: "", filter: "all", busy: false, last: "", through: o.through || "" });
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); if (MEM.io) MEM.io.disconnect(); if (MEM.page === page) MEM.page = null; setTimeout(() => page.remove(), 200); };
+    MEM.close = close; layer(page, close); $("#mmBack", page).onclick = close;
+    $("#mmPlay", page).onclick = () => MEM.items.length ? memSlides(0) : toast("Nothing to play yet");
+    const tabs = () => { $("#mmTabs", page).innerHTML = MEM_TABS.map(([k, n]) => `<button class="${MEM.filter === k ? "on" : ""}" data-f="${k}">${n}</button>`).join(""); $$("#mmTabs button", page).forEach((b) => b.onclick = () => { if (MEM.filter === b.dataset.f) return; MEM.filter = b.dataset.f; MEM.through = ""; tabs(); memLoad(true); }); };
+    tabs();
+    $("#mmList", page).onclick = (e) => { const t = e.target.closest(".mm-t"); if (t) memView(+t.dataset.i); };
+    MEM.io = new IntersectionObserver((en) => { if (en.some((x) => x.isIntersecting)) memLoad(false); }, { root: $("#mmBody", page), rootMargin: "800px" });
+    MEM.io.observe($("#mmMore", page));
+    await memLoad(true);
+  }
+  async function memLoad(reset) {  // one page at a time; resolves with the items it added
+    const page = MEM.page; if (!page) return [];
+    if (!reset && (MEM.busy || !MEM.next)) return [];
+    const gen = reset ? ++MEM.gen : MEM.gen, list = $("#mmList", page), more = $("#mmMore", page);
+    if (reset) { MEM.items = []; MEM.next = ""; MEM.last = ""; list.innerHTML = ""; more.innerHTML = `<div class="hint">Gathering your memories…</div>`; }
+    MEM.busy = true; let r;
+    try { r = await api(`/api/memories/${MEM.cid}?filter=${MEM.filter}${MEM.next && !reset ? "&cursor=" + encodeURIComponent(MEM.next) : ""}${reset && MEM.through ? "&through=" + MEM.through : ""}`); }
+    catch (x) { if (gen === MEM.gen) { MEM.busy = false; if (MEM.page === page) { more.innerHTML = `<div class="hint">${esc(x.message)}</div>`; } } return []; }
+    if (gen !== MEM.gen) return [];
+    MEM.busy = false;
+    if (MEM.page !== page) return [];
+    for (const x of r.items) {
+      const i = MEM.items.push(x) - 1;
+      if (x.ym !== MEM.last) { list.insertAdjacentHTML("beforeend", `<section class="mm-m" data-ym="${x.ym}"><h3>${esc(memMonth(x.ym))}</h3><div class="mm-grid"></div></section>`); MEM.last = x.ym; }
+      list.lastElementChild.lastElementChild.insertAdjacentHTML("beforeend", `<button class="mm-t${x.fav ? " fav" : ""}" data-i="${i}" data-f="${x.id}" aria-label="${x.kind === "video" ? "Video" : "Photo"}">${x.kind === "video"
+        ? `<video src="${fileUrl(x.id)}#t=0.1" preload="metadata" muted playsinline></video><b class="mm-play">▶</b>` : `<img src="${fileUrl(x.id)}" loading="lazy" alt="">`}<i class="mm-star">⭐</i>${x.src === "chat" ? "" : `<em class="mm-src">${x.src === "bucket" ? "🪣" : "💌"}</em>`}</button>`);
+    }
+    MEM.next = r.next || "";
+    more.innerHTML = MEM.next ? "" : MEM.items.length ? `<div class="hint">That's everything 💛</div>` : `<div class="hint">${MEM_EMPTY[MEM.filter]}</div>`;
+    if (reset && MEM.through) {  // coming from "On this day": land on that month, or the closest one before it
+      const sec = $$(".mm-m", list).find((s) => s.dataset.ym <= MEM.through); if (sec) $("#mmBody", page).scrollTop = sec.offsetTop - 8; MEM.through = "";
+    }
+    if (MEM.next) setTimeout(() => { const b = $("#mmBody", page); if (MEM.page === page && !MEM.busy && more.getBoundingClientRect().top < b.getBoundingClientRect().bottom + 800) memLoad(false); }, 60);  // the screen is not full yet
+    return r.items;
+  }
+  function memFavSet(fid, on) {
+    MEM.items.forEach((x) => { if (x.id === fid) x.fav = on; });
+    if (MEM.page) $$(`.mm-t[data-f="${fid}"]`, MEM.page).forEach((b) => b.classList.toggle("fav", on));
+  }
+  async function memFav(fid, on) {
+    memFavSet(fid, on);
+    try { await api(`/api/memories/${MEM.cid}/fav`, { body: { file: fid, on } }); }
+    catch (x) { memFavSet(fid, !on); toast(x.message); }
+  }
+  function onMemoriesEvent(e) { if (e.what === "fav" && MEM.page && e.conv === MEM.conv) memFavSet(e.file, e.on); }
+  const memMsg = (x) => ({ id: x.sid, conv_id: MEM.conv, kind: x.kind, attachment: { id: x.id, name: x.kind === "video" ? "memory.mp4" : "memory.jpg", mime: x.mime }, sender: x.by, created: x.t, text: x.text, _m: x });
+  function memView(i) {  // the usual full-screen viewer, with a star, a slideshow button and more pages as you swipe on
+    const list = MEM.items.map(memMsg);
+    viewMedia(list[i], list, {
+      fav: (x) => !!x._m.fav, toggle: (x) => memFav(x._m.id, !x._m.fav),
+      icon: (x) => ({ chat: "💬", bucket: "🪣", letter: "💌" })[x._m.src], tag: (x) => ({ chat: "", bucket: " · Bucket list", letter: " · Letter" })[x._m.src],
+      go: (x) => { const m = x._m; if (m.src === "chat") { MEM.close && MEM.close(); gotoMsg(MEM.conv, m.ref); } else if (m.src === "bucket") bucketOpen(MEM.conv, m.ref); else capsuleRead(MEM.conv, m.ref); },
+      more: async () => (await memLoad(false)).map(memMsg), hasMore: () => !!MEM.next, slide: (k) => memSlides(k),
+    });
+  }
+  function memSlides(start) {  // full screen, a new picture every 4 s with a soft crossfade; tap to pause, swipe to move
+    const list = MEM.items.slice(); if (!list.length) return;
+    const calm = matchMedia("(prefers-reduced-motion: reduce)").matches, gap = calm ? 7000 : 4000;
+    const ov = document.createElement("div"); ov.className = "mm-show" + (calm ? " calm" : "");
+    ov.innerHTML = `<div class="ms-s"></div><div class="ms-s"></div><div class="ms-top"><button class="mv-b" data-x aria-label="Close">✕</button><span data-n></span><span class="ms-p" data-p>❚❚</span></div>`;
+    document.body.appendChild(ov);
+    const lay = $$(".ms-s", ov); let i = start, cur = 1, paused = false, timer = 0, gone = false, grabbing = false;
+    const close = () => { if (gone) return; gone = true; clearTimeout(timer); ov.classList.add("closing"); setTimeout(() => ov.remove(), 200); };
+    layer(ov, close); $("[data-x]", ov).onclick = close;
+    const next = () => { if (!paused && !gone) show(i + 1); };
+    const show = async (n) => {
+      clearTimeout(timer); i = (n + list.length) % list.length;
+      if (i >= list.length - 3 && MEM.next && !MEM.busy && MEM.page) { const add = await memLoad(false); if (add.length) list.push(...add); if (gone) return; }
+      const x = list[i], from = lay[cur], to = lay[1 - cur]; cur = 1 - cur;
+      to.innerHTML = x.kind === "video" ? `<video src="${fileUrl(x.id)}" muted playsinline autoplay></video>` : `<img src="${fileUrl(x.id)}" alt="">`;
+      const v = $("video", to);
+      from.classList.remove("on"); to.classList.add("on"); $("[data-n]", ov).textContent = `${i + 1} / ${list.length}${MEM.next ? "+" : ""}`;
+      const old = from.querySelector("video"); if (old) old.pause();
+      setTimeout(() => { if (lay[cur] !== from) from.innerHTML = ""; }, calm ? 0 : 1100);
+      if (v) {
+        v.onended = next; v.play().catch(() => { to.insertAdjacentHTML("beforeend", `<b class="ms-pl">▶</b>`); });  // no autoplay: a play-icon frame, then on
+        timer = setTimeout(next, 12000);
+      } else timer = setTimeout(next, gap);
+      const nx = list[(i + 1) % list.length]; if (nx && nx.kind !== "video") new Image().src = fileUrl(nx.id);
+    };
+    const pause = (on) => {
+      paused = on; ov.classList.toggle("paused", on); clearTimeout(timer);
+      const v = $("video", lay[cur]); if (v) on ? v.pause() : v.play().catch(() => { });
+      if (!on) timer = setTimeout(next, 1500);
+    };
+    let sx = 0, sy = 0;
+    ov.addEventListener("pointerdown", (e) => { if (e.target.closest("button")) return; sx = e.clientX; sy = e.clientY; grabbing = true; });
+    ov.addEventListener("pointerup", (e) => {
+      if (!grabbing) return; grabbing = false; const dx = e.clientX - sx, dy = e.clientY - sy;
+      if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) { paused = false; ov.classList.remove("paused"); show(i + (dx < 0 ? 1 : -1)); }
+      else if (dy > 110) close();
+      else if (Math.abs(dx) < 10 && Math.abs(dy) < 10) pause(!paused);
+    });
+    const key = (e) => { if (gone) return document.removeEventListener("keydown", key); if (e.key === "Escape") close(); else if (e.key === "ArrowRight") show(i + 1); else if (e.key === "ArrowLeft") show(i - 1); else if (e.key === " ") { e.preventDefault(); pause(!paused); } };
+    document.addEventListener("keydown", key);
+    show(start);
   }
 
 // ------------------------------------------------------------------ start

@@ -132,6 +132,12 @@ CREATE TABLE IF NOT EXISTS games (id INTEGER PRIMARY KEY, conv_id INTEGER, type 
 CREATE UNIQUE INDEX IF NOT EXISTS games_one ON games(conv_id, type) WHERE status='active';
 CREATE INDEX IF NOT EXISTS games_conv ON games(conv_id, status, updated);
 CREATE TABLE IF NOT EXISTS game_coins (user_id INTEGER, day TEXT, coins INTEGER DEFAULT 0, PRIMARY KEY (user_id, day));
+-- v28: shared bucket list (photos stay on an item when it is un-ticked; paid = its coins were given once) and the album's shared favourites (by file id)
+CREATE TABLE IF NOT EXISTS bucket (id INTEGER PRIMARY KEY, conv_id INTEGER, title TEXT, cat TEXT DEFAULT 'do', note TEXT DEFAULT '', by_date TEXT DEFAULT '', added_by INTEGER,
+  created REAL, updated REAL, done INTEGER DEFAULT 0, done_at REAL DEFAULT 0, done_day TEXT DEFAULT '', done_by INTEGER DEFAULT 0, done_note TEXT DEFAULT '',
+  photos TEXT DEFAULT '[]', paid INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS bucket_conv ON bucket(conv_id, done, created);
+CREATE TABLE IF NOT EXISTS mem_fav (conv_id INTEGER, file_id TEXT, fav_by INTEGER, at REAL, PRIMARY KEY (conv_id, file_id));
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
@@ -758,7 +764,7 @@ async def edit_message(mid: int, body: dict, authorization: str = Header(None)):
     def fn(c, m):
         if m["sender"] != u["id"] or m["deleted"]:
             raise HTTPException(403, "You can only edit your own messages.")
-        if m["kind"] in ("touch", "card", "capsule", "game"):
+        if m["kind"] in ("touch", "card", "capsule", "game", "bucket"):
             raise HTTPException(400, "That can't be edited.")
         c.execute("UPDATE messages SET text=?, edited=? WHERE id=?", ((body.get("text") or "").strip()[:8000], time.time(), mid))
     return await _changed(mid, u["id"], fn)
@@ -798,7 +804,7 @@ async def pin_msg(mid: int, authorization: str = Header(None)):
             raise HTTPException(404, "Message not found")
         cid = m["conv_id"]
         _member(c, cid, u["id"])
-        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite", "card", "capsule", "game"):
+        if m["deleted"] or m["kind"] in ("touch", "petact", "pinact", "petinvite", "card", "capsule", "game", "bucket"):
             raise HTTPException(400, "That one can't be pinned.")
         line = None
         if not c.execute("SELECT 1 FROM pinned_msgs WHERE conv_id=? AND msg_id=?", (cid, mid)).fetchone():
@@ -2647,6 +2653,11 @@ def _otd_get(c, pr: dict, today, tz, make: bool):
     return d, 0
 
 
+def _bk_counts(c, pr: dict) -> dict:
+    n = {r[0]: r[1] for r in c.execute("SELECT done, COUNT(*) FROM bucket WHERE conv_id=? GROUP BY done", (pr["direct"],))}
+    return {"done": n.get(1, 0), "todo": n.get(0, 0)}
+
+
 def home_data(c, pr: dict, uid: int) -> dict:
     lt = datetime.now(pr["tz"])
     today = lt.date()
@@ -2656,7 +2667,7 @@ def home_data(c, pr: dict, uid: int) -> dict:
     return {"conv": pr["direct"], "pet": pr["pet"], "day": day, "me": uid, "names": names,
             "question": _dq_view(c, pr, uid, day),
             "moods": {str(x): _mood_of(c, x) for x in (pr["a"], pr["b"])},
-            "dates": _dates_view(c, pr, uid, today), "otd": otd}
+            "dates": _dates_view(c, pr, uid, today), "otd": otd, "bucket": _bk_counts(c, pr)}
 
 
 async def home_ping(pr: dict, what: str, extra=None):
@@ -3319,11 +3330,11 @@ def _cap_view(r, uid: int, now: float, full: bool = False) -> dict:
     return out
 
 
-def _cap_photos(c, uid: int, raw) -> list:
+def _cap_photos(c, uid: int, raw, mx: int = CAP_PHOTOS) -> list:
     """Up to 4 photos, each an upload of yours that the files table knows; what is stored is what the server knows, not what the phone said."""
     raw = raw if isinstance(raw, list) else []
-    if len(raw) > CAP_PHOTOS:
-        raise ValueError(f"Up to {CAP_PHOTOS} photos in a letter.")
+    if len(raw) > mx:
+        raise ValueError(f"Up to {mx} photos in a letter." if mx == CAP_PHOTOS else f"Up to {mx} photos.")
     out = []
     for a in raw:
         fid = str(a.get("id") or "") if isinstance(a, dict) else ""
@@ -4124,6 +4135,334 @@ async def game_draw_relay(uid: int, m: dict):
     elif k not in ("e", "u", "c"):
         return
     await send_to(info[1], out)
+
+
+# ---------------------------------------------------------------- v28: bucket list + memories album
+# One list for the pair, kept on their direct chat. Photos of a ticked item stay on it even if it is un-ticked again. The album is read-only apart from the
+# shared stars: it is built on the fly from the direct chat, the bucket list and the OPENED letters this person may read (never a sealed one, never a draft).
+BK_CATS, BK_MAX, BK_PHOTOS, BK_COINS, BK_CAP = ("go", "eat", "do", "someday"), 500, 6, 3, 9
+MEM_PAGE, MEM_MAX = 60, 1500
+
+
+def _bk_day(v) -> str:
+    v = str(v or "").strip()
+    if not v:
+        return ""
+    try:
+        return datetime.strptime(v, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise ValueError("That date doesn't look right.")
+
+
+def _bk_view(r) -> dict:
+    return {"id": r["id"], "title": r["title"], "cat": r["cat"], "note": r["note"], "by": r["by_date"], "added_by": r["added_by"], "created": r["created"],
+            "done": bool(r["done"]), "done_at": r["done_at"], "day": r["done_day"], "done_by": r["done_by"], "line": r["done_note"], "photos": json.loads(r["photos"] or "[]")}
+
+
+def _bk_row(c, pr: dict, bid: int):
+    r = c.execute("SELECT * FROM bucket WHERE id=? AND conv_id=?", (bid, pr["direct"])).fetchone()
+    if not r:
+        raise HTTPException(404, "Not on the list")
+    return r
+
+
+def _bk_fields(body: dict) -> dict:
+    out = {}
+    if "title" in body:
+        t = " ".join(str(body.get("title") or "").split())
+        if not t:
+            raise ValueError("Give it a name first.")
+        out["title"] = t[:120]
+    if "cat" in body:
+        out["cat"] = body["cat"] if body["cat"] in BK_CATS else "do"
+    if "note" in body:
+        out["note"] = str(body.get("note") or "").strip()[:500]
+    if "by" in body:
+        out["by_date"] = _bk_day(body.get("by"))
+    return out
+
+
+def _bk_photos(c, uid: int, raw, have: list) -> list:
+    """The photos an item ends up with: the ones it already has stay as they are, new ones must be your own uploads."""
+    raw = raw if isinstance(raw, list) else []
+    if len(raw) > BK_PHOTOS:
+        raise ValueError(f"Up to {BK_PHOTOS} photos.")
+    known = {x["id"]: x for x in have}
+    fresh = {x["id"]: x for x in _cap_photos(c, uid, [a for a in raw if isinstance(a, dict) and a.get("id") not in known], BK_PHOTOS)}
+    out = []
+    for a in raw:
+        x = known.get(a.get("id")) or fresh.get(a.get("id")) if isinstance(a, dict) else None
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+async def bk_ping(pr: dict, what: str, by: int, bid: int):
+    for uid in (pr["a"], pr["b"]):
+        await send_to(uid, {"t": "bucket", "conv": pr["direct"], "pet": pr["pet"], "what": what, "by": by, "id": bid})
+
+
+@app.get("/api/bucket/{cid}")
+def bk_list(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        rows = c.execute("SELECT * FROM bucket WHERE conv_id=? ORDER BY created, id", (pr["direct"],)).fetchall()
+        used = c.execute("SELECT coins FROM game_coins WHERE user_id=? AND day=?", (u["id"], "b" + _day(pr["tz"]))).fetchone()
+        return {"conv": pr["direct"], "pet": pr["pet"], "pet_name": pr["pet_name"], "me": u["id"], "names": _cards_names(c, pr, u["id"]), "coins": bool(pr["pet_id"]),
+                "today": used["coins"] if used else 0, "cap": BK_CAP, "pay": BK_COINS, "items": [_bk_view(r) for r in rows]}
+
+
+@app.get("/api/bucket/{cid}/{bid}")
+def bk_get(cid: int, bid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        return {"item": _bk_view(_bk_row(c, pr, bid)), "me": u["id"], "names": _cards_names(c, pr, u["id"])}
+
+
+@app.post("/api/bucket/{cid}")
+async def bk_add(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    f = _bk_fields({"cat": "do", "note": "", "by": "", **body})
+    if not f.get("title"):
+        raise ValueError("Give it a name first.")
+    now = time.time()
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        if c.execute("SELECT COUNT(*) FROM bucket WHERE conv_id=?", (pr["direct"],)).fetchone()[0] >= BK_MAX:
+            raise ValueError("The list is full. Tick off or remove a few first.")
+        bid = c.execute("INSERT INTO bucket (conv_id, title, cat, note, by_date, added_by, created, updated) VALUES (?,?,?,?,?,?,?,?)",
+                        (pr["direct"], f["title"], f["cat"], f["note"], f["by_date"], u["id"], now, now)).lastrowid
+        out = _bk_view(c.execute("SELECT * FROM bucket WHERE id=?", (bid,)).fetchone())
+        c.commit()
+    await bk_ping(pr, "new", u["id"], bid)
+    return out
+
+
+@app.put("/api/bucket/{cid}/{bid}")
+async def bk_edit(cid: int, bid: int, body: dict, authorization: str = Header(None)):
+    """Either of you can change anything. On a done item the date, the line and the photos can be changed too."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        r = _bk_row(c, pr, bid)
+        f = _bk_fields(body)
+        if r["done"]:
+            if "day" in body:
+                f["done_day"] = _bk_day(body.get("day")) or r["done_day"]
+            if "line" in body:
+                f["done_note"] = str(body.get("line") or "").strip()[:300]
+        if "photos" in body:
+            f["photos"] = json.dumps(_bk_photos(c, u["id"], body.get("photos"), json.loads(r["photos"] or "[]")), separators=(",", ":"))
+        if f:
+            f["updated"] = time.time()
+            c.execute("UPDATE bucket SET " + ", ".join(f"{k}=?" for k in f) + " WHERE id=?", (*f.values(), bid))
+        out = _bk_view(c.execute("SELECT * FROM bucket WHERE id=?", (bid,)).fetchone())
+        c.commit()
+    await bk_ping(pr, "edit", u["id"], bid)
+    return out
+
+
+@app.delete("/api/bucket/{cid}/{bid}")
+async def bk_delete(cid: int, bid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        _bk_row(c, pr, bid)
+        c.execute("DELETE FROM bucket WHERE id=?", (bid,))
+        c.commit()
+    await bk_ping(pr, "del", u["id"], bid)
+    return {"ok": True}
+
+
+@app.post("/api/bucket/{cid}/{bid}/done")
+async def bk_done(cid: int, bid: int, body: dict, authorization: str = Header(None)):
+    """'We did it!': the item moves to Done with its photos, a chip goes into the chat, the pet cheers and gets +3 coins (once per item, and at most 9 a day per
+    person, all or nothing). Doing it on an item that is already done just changes its date, line and photos."""
+    u = auth(authorization)
+    uid, now = u["id"], time.time()
+    chip, give = None, 0
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, uid)
+        r = _bk_row(c, pr, bid)
+        day = _bk_day(body.get("day")) or _day(pr["tz"])
+        line = str(body.get("line") or "").strip()[:300]
+        ph = _bk_photos(c, uid, body.get("photos"), json.loads(r["photos"] or "[]"))
+        photos = json.dumps(ph, ensure_ascii=False, separators=(",", ":"))
+        if r["done"]:
+            c.execute("UPDATE bucket SET done_day=?, done_note=?, photos=?, updated=? WHERE id=?", (day, line, photos, now, bid))
+        else:
+            if not c.execute("UPDATE bucket SET done=1, done_at=?, done_day=?, done_by=?, done_note=?, photos=?, updated=? WHERE id=? AND done=0",
+                             (now, day, uid, line, photos, now, bid)).rowcount:
+                raise ValueError("Already ticked off.")
+            if pr["pet_id"] and not r["paid"]:
+                key = "b" + _day(pr["tz"])
+                used = c.execute("SELECT coins FROM game_coins WHERE user_id=? AND day=?", (uid, key)).fetchone()
+                if (used["coins"] if used else 0) + BK_COINS <= BK_CAP:
+                    c.execute("INSERT INTO game_coins (user_id, day, coins) VALUES (?,?,?) ON CONFLICT(user_id, day) DO UPDATE SET coins=coins+?", (uid, key, BK_COINS, BK_COINS))
+                    _coins(c, pr["pet_id"], BK_COINS)
+                    c.execute("UPDATE bucket SET paid=1 WHERE id=?", (bid,))
+                    give = BK_COINS
+            att = {"bucket": bid, "title": r["title"], "cat": r["cat"], "ev": "done", "photo": ph[0]["id"] if ph else ""}
+            mid = c.execute("INSERT INTO messages (conv_id, sender, kind, text, attachment, created, updated) VALUES (?,?,?,?,?,?,?)",
+                            (pr["direct"], uid, "bucket", f"✅ We did it: {r['title']}", json.dumps(att), now, now)).lastrowid
+            c.execute("UPDATE convs SET last_at=? WHERE id=?", (now, pr["direct"]))
+            chip = msg_view(c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone())
+        who = _first_name(c, _g_other(pr, uid), uid)
+        out = {"item": _bk_view(c.execute("SELECT * FROM bucket WHERE id=?", (bid,)).fetchone()), "coins": give}
+        c.commit()
+    await bk_ping(pr, "done" if chip else "edit", uid, bid)
+    if chip:
+        await _bcast_msg(pr["direct"], chip)
+        await push_to([_g_other(pr, uid)], {"title": "✅ We did it", "body": f"{who} ticked off: {r['title']}", "conv": pr["direct"], "icon": "/icon-512.png", "tag": f"bucket-{bid}"})
+        if pr["pet"]:
+            await pet_say(pr["pet"], f"{r['title']}: done, together! 🎉" + (f" +{give} ♥" if give else ""))
+    return out
+
+
+@app.post("/api/bucket/{cid}/{bid}/undo")
+async def bk_undo(cid: int, bid: int, authorization: str = Header(None)):
+    """Back to the to-do list. The photos stay on the item and the coins stay paid (ticking it again does not pay twice)."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        _bk_row(c, pr, bid)
+        c.execute("UPDATE bucket SET done=0, done_at=0, updated=? WHERE id=?", (time.time(), bid))
+        out = _bk_view(c.execute("SELECT * FROM bucket WHERE id=?", (bid,)).fetchone())
+        c.commit()
+    await bk_ping(pr, "undo", u["id"], bid)
+    return out
+
+
+# ---- the album
+def _mem_kind(kind: str, mime: str) -> str:
+    return "video" if kind in ("video", "videonote") or (mime or "").startswith("video/") else "image"
+
+
+def _mem_chat(c, cid: int, pos=None):
+    """Photos and videos of the direct chat, newest first, 300 rows at a time (keyset on created, id); `pos` = where the previous page ended."""
+    last = (1e12, 1 << 60)
+    if pos:
+        last = (pos[0], int(pos[1][1:]) if pos[1][:1] == "m" and pos[1][1:].isdigit() else 1 << 60)
+    while True:
+        rows = c.execute("""SELECT id, sender, kind, text, attachment, created FROM messages WHERE conv_id=? AND deleted=0 AND kind IN ('image','video','videonote')
+                            AND (created<? OR (created=? AND id<?)) ORDER BY created DESC, id DESC LIMIT 300""", (cid, last[0], last[0], last[1])).fetchall()
+        for r in rows:
+            try:
+                a = json.loads(r["attachment"] or "{}") or {}
+            except ValueError:
+                continue
+            fid = str(a.get("id") or "")
+            if re.fullmatch(r"[0-9a-f]{24,32}", fid):
+                yield {"t": r["created"], "sid": "m%012d" % r["id"], "id": fid, "kind": _mem_kind(r["kind"], a.get("mime")), "mime": a.get("mime") or "", "src": "chat",
+                       "ref": r["id"], "by": r["sender"], "text": (r["text"] or "")[:120]}
+        if len(rows) < 300:
+            return
+        last = (rows[-1]["created"], rows[-1]["id"])
+
+
+def _mem_bucket(c, pr: dict):
+    rows = c.execute("SELECT * FROM bucket WHERE conv_id=? AND done=1", (pr["direct"],)).fetchall()
+    items = []
+    for r in rows:
+        try:
+            t = datetime.strptime(r["done_day"], "%Y-%m-%d").replace(hour=12, tzinfo=pr["tz"]).timestamp()
+        except ValueError:
+            t = r["done_at"]
+        for i, p in enumerate(json.loads(r["photos"] or "[]")):
+            items.append({"t": t, "sid": "b%09d%02d" % (r["id"], i), "id": p["id"], "kind": "image", "mime": p.get("mime") or "", "src": "bucket", "ref": r["id"],
+                          "by": r["done_by"], "text": r["title"]})
+    items.sort(key=lambda x: (x["t"], x["sid"]), reverse=True)
+    return iter(items)
+
+
+def _mem_letters(c, pr: dict, uid: int, now: float):
+    """Only letters that are sent AND whose time has come AND that this person may read: the same rule as reading the letter itself."""
+    items = []
+    for r in c.execute("SELECT * FROM capsules WHERE conv_id=? AND draft=0 AND unlock_at<=?", (pr["direct"], now)).fetchall():
+        if not _cap_readable(r, uid, now):
+            continue
+        for i, p in enumerate(json.loads(r["attachments"] or "[]")):
+            items.append({"t": r["opened_at"] or r["unlock_at"], "sid": "l%09d%02d" % (r["id"], i), "id": p["id"], "kind": "image", "mime": p.get("mime") or "",
+                          "src": "letter", "ref": r["id"], "by": r["author"], "text": ""})
+    items.sort(key=lambda x: (x["t"], x["sid"]), reverse=True)
+    return iter(items)
+
+
+def _mem_has(c, pr: dict, uid: int, fid: str, now: float) -> bool:
+    """Is this file part of this pair's album for this person? (fid is plain hex, so LIKE is safe.)"""
+    like = f'%"{fid}"%'
+    if c.execute("SELECT 1 FROM messages WHERE conv_id=? AND deleted=0 AND kind IN ('image','video','videonote') AND attachment LIKE ?", (pr["direct"], like)).fetchone():
+        return True
+    if c.execute("SELECT 1 FROM bucket WHERE conv_id=? AND done=1 AND photos LIKE ?", (pr["direct"], like)).fetchone():
+        return True
+    return any(_cap_readable(r, uid, now) for r in c.execute("SELECT * FROM capsules WHERE conv_id=? AND draft=0 AND unlock_at<=? AND attachments LIKE ?", (pr["direct"], now, like)))
+
+
+@app.get("/api/memories/{cid}")
+def mem_list(cid: int, filter: str = "all", cursor: str = "", through: str = "", limit: int = MEM_PAGE, authorization: str = Header(None)):
+    """A page of the album, newest first. `cursor` is the `next` of the previous page; `through=YYYY-MM` keeps going (up to 1500 items) until that month is in."""
+    import heapq
+    u = auth(authorization)
+    now, limit = time.time(), max(1, min(limit, 120))
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        tz = _tz(c, u["id"])
+        favs = {r["file_id"] for r in c.execute("SELECT file_id FROM mem_fav WHERE conv_id=?", (pr["direct"],))}
+        pos = None
+        if cursor:
+            try:
+                t_, s_ = cursor.split("|", 1)
+                pos = (float(t_), s_)
+            except ValueError:
+                raise ValueError("Bad cursor.")
+        streams = []
+        if filter in ("all", "fav"):
+            streams.append(_mem_chat(c, pr["direct"], pos))
+        if filter in ("all", "fav", "bucket"):
+            streams.append(_mem_bucket(c, pr))
+        if filter in ("all", "fav", "letters"):
+            streams.append(_mem_letters(c, pr, u["id"], now))
+        if filter == "fav" and not favs:
+            streams = []
+        key = lambda x: (x["t"], x["sid"])
+        stop = through if re.fullmatch(r"\d{4}-\d{2}", through or "") else ""
+        out, more = [], False
+        for it in heapq.merge(*streams, key=key, reverse=True):
+            if pos and key(it) >= pos:
+                continue
+            if filter == "fav" and it["id"] not in favs:
+                continue
+            it["ym"] = datetime.fromtimestamp(it["t"], tz).strftime("%Y-%m")
+            if len(out) >= limit and not (stop and it["ym"] >= stop and len(out) < MEM_MAX):
+                more = True
+                break
+            it["fav"] = it["id"] in favs
+            out.append(it)
+        nxt = f"{out[-1]['t']!r}|{out[-1]['sid']}" if out and more else ""
+        return {"conv": pr["direct"], "pet": pr["pet"], "me": u["id"], "names": _cards_names(c, pr, u["id"]), "items": out, "next": nxt, "filter": filter}
+
+
+@app.post("/api/memories/{cid}/fav")
+async def mem_fav_set(cid: int, body: dict, authorization: str = Header(None)):
+    """Either of you can star or unstar; the star belongs to the couple."""
+    u = auth(authorization)
+    fid, on = str(body.get("file") or ""), bool(body.get("on"))
+    if not re.fullmatch(r"[0-9a-f]{24,32}", fid):
+        raise ValueError("That photo isn't available.")
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        if not _mem_has(c, pr, u["id"], fid, time.time()):
+            raise HTTPException(404, "Not in the album")
+        if on:
+            c.execute("INSERT OR REPLACE INTO mem_fav (conv_id, file_id, fav_by, at) VALUES (?,?,?,?)", (pr["direct"], fid, u["id"], time.time()))
+        else:
+            c.execute("DELETE FROM mem_fav WHERE conv_id=? AND file_id=?", (pr["direct"], fid))
+        c.commit()
+    for x in (pr["a"], pr["b"]):
+        await send_to(x, {"t": "memories", "conv": pr["direct"], "pet": pr["pet"], "what": "fav", "file": fid, "on": on, "by": u["id"]})
+    return {"ok": True, "file": fid, "on": on}
 
 
 # ---------------------------------------------------------------- live updates (one WebSocket per device)
