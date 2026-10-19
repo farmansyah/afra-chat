@@ -1070,6 +1070,22 @@ async def typing(cid: int, authorization: str = Header(None)):
     return {"ok": True}
 
 
+_CLIENT_ERR: dict = {}  # user id -> [window start, count]
+
+
+@app.post("/api/clienterror")
+async def client_error(body: dict, authorization: str = Header(None)):
+    """A script error on someone's phone, written to the server log so a blank screen can be traced. At most 20 an hour each."""
+    u = auth(authorization)
+    t = time.time(); w = _CLIENT_ERR.get(u["id"])
+    if not w or t - w[0] > 3600: w = _CLIENT_ERR[u["id"]] = [t, 0]
+    w[1] += 1
+    if w[1] <= 20:
+        msg = " | ".join(str(body.get(k, ""))[:600] for k in ("msg", "where", "stack", "ua", "v"))
+        print(f"client error user={u['id']}: {msg}".replace("\n", " ")[:2000], flush=True)
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- the Assistant: reminders (by time or place), notes and lists, questions
 # It is a chat like any other ("Assistant", kind "bot"), one per person. Replies come from OpenRouter (the key stays on the server).
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")

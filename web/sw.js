@@ -1,7 +1,7 @@
 /* A.F.R.A ♥: works offline (app shell) and shows notifications with the sender's name and message.
    The notification text arrives encrypted for this phone (Web Push, RFC 8291); only this phone can read it. */
-const CACHE = "afra-chat-v29";
-const SHELL = ["./", "index.html", "app.css?v=29", "alive.css?v=29", "theme.css?v=29", "app.js?v=29", "lines.js?v=29", "cards.js?v=29", "games.js?v=29", "templates.json", "manifest.webmanifest", "icon-512.png"];
+const CACHE = "afra-chat-v30";
+const SHELL = ["./", "index.html", "app.css?v=30", "alive.css?v=30", "theme.css?v=30", "app.js?v=30", "lines.js?v=30", "cards.js?v=30", "games.js?v=30", "templates.json", "manifest.webmanifest", "icon-512.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", (e) => {
@@ -12,9 +12,18 @@ self.addEventListener("fetch", (e) => {
     return;
   }
   const shellPage = e.request.mode === "navigate" || u.pathname === "/" || u.pathname.endsWith("/index.html");
-  if (shellPage) {  // the page itself: network first so a new deploy shows at once, the cached copy only when offline
-    e.respondWith(fetch(e.request, { cache: "no-store" }).then((r) => { if (r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put("index.html", copy)); } return r; })
-      .catch(() => caches.match("index.html").then((r) => r || caches.match("./"))));
+  if (shellPage) {  // the page itself: network first so a new deploy shows at once, but a weak signal (after 4 s) or a server error page during a deploy gets the cached copy instead of a white screen
+    const net = fetch(e.request, { cache: "no-store" }).then((r) => { if (r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put("index.html", copy)); } return r; });
+    const cached = () => caches.match("index.html").then((r) => r || caches.match("./"));
+    e.respondWith(new Promise((res) => {
+      let done = false; const give = (r) => { if (!done && r) { done = true; res(r); } };
+      const t = setTimeout(() => cached().then(give), 4000);
+      net.then((r) => { clearTimeout(t); if (r.ok) give(r); else cached().then((c) => give(c || r)); }).catch(() => { clearTimeout(t); cached().then((r) => give(r || Response.error())); });
+    }));
+    return;
+  }
+  if (u.search.includes("v=")) {  // versioned files (app.js?v=NN …) never change: the cached copy at once, no network wait
+    e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => { if (r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); } return r; })));
     return;
   }
   e.respondWith(fetch(e.request).then((r) => { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return r; })

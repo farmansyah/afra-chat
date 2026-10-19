@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 29;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 30;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -146,12 +146,24 @@
     if (TOKEN) init.headers.authorization = "Bearer " + TOKEN;
     if (opts.body instanceof FormData) init.body = opts.body;
     else if (opts.body !== undefined) { init.body = JSON.stringify(opts.body); init.headers["content-type"] = "application/json"; }
-    const r = await fetch(path, init);
+    // a phone waking up on a weak signal can leave a request hanging for minutes: give up after 20 s (uploads may take longer)
+    const ac = window.AbortController && !(opts.body instanceof FormData) ? new AbortController() : null, to = ac ? setTimeout(() => ac.abort(), opts.timeout || 20000) : 0;
+    if (ac) init.signal = ac.signal;
+    let r;
+    try { r = await fetch(path, init); } catch (e) { throw new Error(ac && ac.signal.aborted ? "The connection is slow. Try again." : "No connection"); } finally { clearTimeout(to); }
     if (r.status === 401 && TOKEN && !opts.noLogout) { logout(true); throw new Error("Please log in again"); }
     if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail; } catch { } throw new Error(m || "Something went wrong"); }
     return r.json();
   }
   const fileUrl = (id) => `/api/files/${id}?t=${encodeURIComponent(TOKEN)}`;
+  // a script error on a phone is invisible (it just looks like a blank or frozen screen): send the first few to the server log
+  let errSent = 0;
+  function reportErr(msg, where, stack) {
+    if (!TOKEN || errSent >= 10) return; errSent++;
+    try { fetch("/api/clienterror", { method: "POST", keepalive: true, headers: { authorization: "Bearer " + TOKEN, "content-type": "application/json" }, body: JSON.stringify({ msg: String(msg || "").slice(0, 600), where: String(where || ""), stack: String(stack || "").slice(0, 600), ua: navigator.userAgent, v: APP_V }) }).catch(() => { }); } catch { }
+  }
+  addEventListener("error", (e) => reportErr(e.message, (e.filename || "").split("/").pop() + ":" + e.lineno + ":" + e.colno, e.error && e.error.stack));
+  addEventListener("unhandledrejection", (e) => { const r = e.reason || {}; reportErr(r.message || r, "promise", r.stack); });
 
   // ------------------------------------------------------------------ state
   const S = { me: null, convs: [], msgs: {}, cur: null, view: "list", typing: {}, filter: "", search: "", reply: null, edit: null, older: {}, seen: {}, stars: new Set(), nicks: {}, nickFor: {}, prefs: null, archOpen: false };
@@ -471,8 +483,13 @@
   async function openConv(cid) {
     S.cur = cid; S.reply = S.edit = null; S.search = ""; setView("chat");
     chatEnter(cid);
-    drawList(); drawChatPane(true);
-    if (!S.msgs[cid]) { try { await loadConv(cid); } catch (e) { toast(e.message); } drawChat(); scrollEnd(true); }
+    try { drawList(); drawChatPane(true); }
+    catch (e) { reportErr(e.message, "openConv", e.stack); NAV.chat = 0; leaveChat(); navSync(); toast("Couldn't open that chat. Try again."); return; }  // never leave a half-drawn chat on screen
+    if (!S.msgs[cid]) {
+      if (S.convErr === cid) { S.convErr = 0; drawChat(); }
+      try { await loadConv(cid); } catch (e) { S.convErr = cid; toast(e.message); }
+      if (S.cur === cid) { drawChat(); scrollEnd(true); }
+    }
     const c = conv(cid); if (c && c.unread) markRead(cid);
   }
 
@@ -692,7 +709,18 @@
         <div class="meta">${pinIds.has(m.id) ? "📌 " : ""}${S.stars.has(m.id) ? "⭐ " : ""}${m.edited && !m.deleted ? "edited · " : ""}${fmtTime(m.created)} ${ticks}</div></div>`;
     }
     if (list.length) JUMP.last = Math.max(JUMP.last, list[list.length - 1].created || 0);
-    log.innerHTML = html + (list.length ? "" : `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : c.kind === "bot" ? "Ask me anything, or tell me what to remember ✨" : c.kind === "pet" ? "Say hello 🐾" : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
+    // keep the video and voice players that are already on screen: rebuilding them makes the phone download every video again
+    // on each new message or read tick, and on an iPhone that churn ends in a blank page
+    const keep = {};
+    $$("video,audio", log).forEach((v) => { const k = v.getAttribute("src"); if (k) (keep[k] = keep[k] || []).push(v); });
+    const state = S.msgs[c.id] ? "" : S.convErr === c.id ? `<div class="empty">Couldn't load this chat.<br><button class="older" id="bRetry">Try again</button></div>` : `<div class="empty">Loading…</div>`;
+    log.innerHTML = html + (list.length ? "" : state || `<div class="empty">${c.kind === "self" ? "Your private notes: only you can see this chat." : c.kind === "bot" ? "Ask me anything, or tell me what to remember ✨" : c.kind === "pet" ? "Say hello 🐾" : `Say hi to ${esc(title(c))} 👋<br><small>💌 has ready-made messages.</small>`}</div>`);
+    $$("video,audio", log).forEach((nv) => {  // swap the fresh copies for the players we kept (same file, same order)
+      const ov = (keep[nv.getAttribute("src")] || []).shift(); if (!ov) return;
+      nv.replaceWith(ov);
+      const vn = ov.closest("[data-vn]"); if (vn && !ov.paused) vn.classList.add("playing");
+    });
+    const retry = $("#bRetry"); if (retry) retry.onclick = () => openConv(c.id);
     const older = $("#bOlder"); if (older) older.onclick = loadOlder;
     $$("img.photo", log).forEach((img) => img.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +img.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
     $$("[data-v]", log).forEach((el) => el.onclick = (e) => { e.stopPropagation(); const m = list.find((x) => x.id === +el.closest(".msg").dataset.id); if (m) viewMedia(m, list); });
