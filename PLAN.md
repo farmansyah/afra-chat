@@ -14,6 +14,7 @@
 - v27 Play: tic-tac-toe, this or that, who's more likely, couple's quiz, 20 questions, draw and guess. +2 coins each per game, +1 to the winner, 20 a day each.
 - v28 Shared bucket list (tick off with up to 6 photos, +3 coins once per item) and the Memories album (chat photos and videos, bucket photos, opened letters; shared favourites, slideshow). Home tab tiles.
 - v29 Chat settings: read receipts, last seen and typing (each reciprocal), hidden notification text and sender, quiet hours with your own time zone (pushes arrive silently, nudges skipped, touches can still come through), nudge on/off and timings, Enter to send on desktop, archive chats (long-press or swipe).
+- v30 Blank or stuck chats fixed: video players are kept when the chat redraws (iPhone was re-downloading every video note on each message), every request times out after 20 s with a retry button, the app opens from cache on a weak signal or during a deploy, and phone errors go to the server journal as `client error` lines. The date night, jar, wishlist and recap work parked on branch v30-pending becomes v31.
 
 ## Next
 1. Tune the storm size and spacing from the storm test on your phones.
