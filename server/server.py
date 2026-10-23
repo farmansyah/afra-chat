@@ -141,6 +141,18 @@ CREATE TABLE IF NOT EXISTS mem_fav (conv_id INTEGER, file_id TEXT, fav_by INTEGE
 -- v29: privacy and notification settings (one JSON per person, follows them across devices) and per-person archived chats
 CREATE TABLE IF NOT EXISTS user_prefs (user_id INTEGER PRIMARY KEY, data TEXT DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS chat_archive (user_id INTEGER, conv_id INTEGER, at REAL, PRIMARY KEY (user_id, conv_id));
+-- v30: date-night ideas the couple added (the built-in ones live in web/games.js), what they have done, the gratitude jar (read_at = the pet read it out)
+-- and the PRIVATE gift wishlist (owner = the only person who can ever list or read a row; for_uid = who the gift is for)
+CREATE TABLE IF NOT EXISTS place_rounds (id INTEGER PRIMARY KEY, conv_id INTEGER, kind TEXT, lat REAL, lon REAL, radius INTEGER, places TEXT, started_by INTEGER, one INTEGER DEFAULT 0, created REAL, closed REAL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS place_votes (round_id INTEGER, user_id INTEGER, pid TEXT, yes INTEGER, at REAL, PRIMARY KEY (round_id, user_id, pid));
+CREATE TABLE IF NOT EXISTS date_ideas (id INTEGER PRIMARY KEY, conv_id INTEGER, title TEXT, mode TEXT DEFAULT 'in', budget INTEGER DEFAULT 0, emoji TEXT DEFAULT '', added_by INTEGER, created REAL);
+CREATE INDEX IF NOT EXISTS date_ideas_conv ON date_ideas(conv_id);
+CREATE TABLE IF NOT EXISTS date_done (conv_id INTEGER, idea TEXT, title TEXT DEFAULT '', done_at REAL, done_by INTEGER, PRIMARY KEY (conv_id, idea));
+CREATE TABLE IF NOT EXISTS gratitude (id INTEGER PRIMARY KEY, conv_id INTEGER, author INTEGER, body TEXT, created REAL, read_at REAL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS gratitude_conv ON gratitude(conv_id, created);
+CREATE TABLE IF NOT EXISTS wishlist (id INTEGER PRIMARY KEY, owner INTEGER, for_uid INTEGER, title TEXT, link TEXT DEFAULT '', note TEXT DEFAULT '', price TEXT DEFAULT '',
+  photo TEXT DEFAULT '', bought INTEGER DEFAULT 0, bought_at REAL DEFAULT 0, created REAL, updated REAL);
+CREATE INDEX IF NOT EXISTS wishlist_owner ON wishlist(owner, for_uid, bought);
 """
 STAGE_DAYS = (1, 3, 10, 25)  # days with at least one feed needed for: hatching, baby, kid, grown-up (0 = egg)
 
@@ -1524,6 +1536,7 @@ async def _reminders():
             await _couple_jobs()  # v22: the morning question, birthday/anniversary reminders, 'on this day'
             await _capsule_jobs()  # v26: letters whose time has come
             await _game_jobs()  # v27: games nobody touched for 7 days end
+            await _v30_jobs()  # v30: weekend date idea, Sunday jar note, wishlist reminders, "your month is ready"
         except Exception as e:
             print("reminders failed:", repr(e)[:300], flush=True)
         await asyncio.sleep(15)
@@ -2493,11 +2506,15 @@ async def upload(file: UploadFile = File(...), authorization: str = Header(None)
 
 @app.get("/api/files/{fid}")
 def download(fid: str, t: str = "", authorization: str = Header(None)):
-    user_for(t or (authorization or "").removeprefix("Bearer ").strip())  # images load via ?t= (no headers on <img>)
+    me = user_for(t or (authorization or "").removeprefix("Bearer ").strip())  # images load via ?t= (no headers on <img>)
     if not re.fullmatch(r"[0-9a-f]{24,32}", fid):
         raise HTTPException(404)
     with closing(db()) as c:
         f = c.execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
+        # v30: a photo saved on a gift wishlist is for its author's eyes only (to anyone else it is as missing as a file that doesn't exist)
+        owners = {r["owner"] for r in c.execute("SELECT owner FROM wishlist WHERE photo=?", (fid,))}
+        if owners and me["id"] not in owners:
+            f = None
     if not f or not (FILES / fid).exists():
         raise HTTPException(404)
     inline = f["mime"].startswith(("image/", "audio/", "video/"))
@@ -2808,7 +2825,9 @@ def home_data(c, pr: dict, uid: int) -> dict:
     return {"conv": pr["direct"], "pet": pr["pet"], "day": day, "me": uid, "names": names,
             "question": _dq_view(c, pr, uid, day),
             "moods": {str(x): _mood_of(c, x) for x in (pr["a"], pr["b"])},
-            "dates": _dates_view(c, pr, uid, today), "otd": otd, "bucket": _bk_counts(c, pr)}
+            "dates": _dates_view(c, pr, uid, today), "otd": otd, "bucket": _bk_counts(c, pr),
+            "jar": c.execute("SELECT COUNT(*) FROM gratitude WHERE conv_id=?", (pr["direct"],)).fetchone()[0],
+            "wish": c.execute("SELECT COUNT(*) FROM wishlist WHERE owner=? AND bought=0", (uid,)).fetchone()[0]}  # the viewer's OWN count only
 
 
 async def home_ping(pr: dict, what: str, extra=None):
@@ -3696,7 +3715,9 @@ def games_bank() -> dict:
             d = json.loads(src[a:src.rindex("}") + 1])
             lst = lambda k: [str(x).strip() for x in d.get(k, []) if str(x).strip()]
             _GAMES.update(mtime=mt, bank={"thisthat": [[str(x[0]).strip(), str(x[1]).strip()] for x in d.get("thisthat", []) if len(x) == 2],
-                                          "who": lst("who"), "quiz": lst("quiz"), "twenty": lst("twenty"), "draw": lst("draw")})
+                                          "who": lst("who"), "quiz": lst("quiz"), "twenty": lst("twenty"), "draw": lst("draw"),
+                                          "dates": [[str(x[0]), int(x[1]), str(x[2]), str(x[3]).strip()] for x in d.get("dates", [])
+                                                    if len(x) == 4 and x[0] in ("in", "out") and x[1] in (0, 1, 2) and str(x[3]).strip()]})
         except Exception as e:
             print("games.js not readable:", repr(e)[:200], flush=True)
             _GAMES["mtime"] = mt
@@ -4608,6 +4629,762 @@ async def mem_fav_set(cid: int, body: dict, authorization: str = Header(None)):
     return {"ok": True, "file": fid, "on": on}
 
 
+# ---------------------------------------------------------------- v30: date-night spinner, gratitude jar, private gift wishlist, monthly recap
+# The date ideas ship in web/games.js ("dates": [mode, budget, emoji, text]); the couple adds their own (date_ideas) and marks ideas done (date_done).
+# The jar and the recap belong to the pair (their direct chat). The WISHLIST belongs to one person: every query below carries `owner = the caller`, there is no
+# endpoint, ping, export or album that reads another person's row, and its photo is refused to everyone but the owner (see download()).
+# Once-only jobs (weekend date idea, Sunday jar note, the 1st-of-the-month recap, wishlist reminders) claim a row in date_sent before they do anything.
+DT_MODES, DT_MAX, DT_TITLE = ("in", "out"), 200, 120
+GJ_LEN, GJ_COIN, GJ_CAP, GJ_PER_DAY, GJ_MAX = 280, 1, 3, 30, 3000  # +1 coin a note, at most 3 coins a day per person; at most 30 notes a day and 3000 in a jar
+WL_MAX, WL_TITLE = 300, 120
+V30_CHECK = [0.0]
+
+
+def _lt(tz, now: float = 0):
+    """The pair's local time; `now` (a timestamp) lets the tests ask 'what if it were Sunday evening'."""
+    return datetime.fromtimestamp(now, tz) if now else datetime.now(tz)
+
+
+def _pairs_all(c) -> list:
+    """Every couple we know about: those with a pet and those with saved dates (same set as _couple_jobs)."""
+    pairs = {}
+    for p in c.execute("SELECT * FROM pets").fetchall():
+        pr = _pair_build(c, p["user_a"], p["user_b"], p)
+        pairs[pr["direct"]] = pr
+    for r in c.execute("SELECT conv_id FROM pair_dates").fetchall():
+        if r["conv_id"] not in pairs:
+            m = [x["user_id"] for x in c.execute("SELECT user_id FROM members WHERE conv_id=?", (r["conv_id"],))]
+            if len(m) == 2:
+                pairs[r["conv_id"]] = _pair_build(c, min(m), max(m), _pet_for(c, m[0], m[1]))
+    return list(pairs.values())
+
+
+def _all_quiet(pr: dict, now: float = 0) -> bool:
+    """Both of them are in their quiet hours: a nice-to-have message waits (it is not claimed) instead of arriving silently."""
+    return quiet_now(pr["a"], now) and quiet_now(pr["b"], now)
+
+
+async def v30_ping(pr: dict, t: str, what: str, by: int, extra=None):
+    """Tell both phones that a list changed (no content)."""
+    for uid in (pr["a"], pr["b"]):
+        await send_to(uid, {"t": t, "conv": pr["direct"], "pet": pr["pet"], "what": what, "by": by, **(extra or {})})
+
+
+def _earn(c, pr: dict, uid: int, key: str, n: int, cap: int) -> int:
+    """Give `n` pet coins for `uid` if their day total under `key` ('g'+day, like the bucket's 'b'+day) stays within `cap`. Returns what was given."""
+    if not pr["pet_id"]:
+        return 0
+    r = c.execute("SELECT coins FROM game_coins WHERE user_id=? AND day=?", (uid, key)).fetchone()
+    if (r["coins"] if r else 0) + n > cap:
+        return 0
+    c.execute("INSERT INTO game_coins (user_id, day, coins) VALUES (?,?,?) ON CONFLICT(user_id, day) DO UPDATE SET coins=coins+?", (uid, key, n, n))
+    _coins(c, pr["pet_id"], n)
+    return n
+
+
+# ---- date night
+def _date_key(title: str) -> str:
+    return "b" + hashlib.sha1(title.strip().lower().encode("utf-8")).hexdigest()[:8]
+
+
+def _dt_ideas(c, pr: dict) -> list:
+    done = {r["idea"]: r for r in c.execute("SELECT * FROM date_done WHERE conv_id=?", (pr["direct"],))}
+    out = []
+    for mode, budget, emoji, title in games_bank().get("dates", []):
+        k = _date_key(title)
+        d = done.get(k)
+        out.append({"key": k, "mode": mode, "budget": budget, "emoji": emoji, "title": title, "custom": False, "done": bool(d), "done_at": d["done_at"] if d else 0})
+    for r in c.execute("SELECT * FROM date_ideas WHERE conv_id=? ORDER BY id", (pr["direct"],)):
+        k = "c%d" % r["id"]
+        d = done.get(k)
+        out.append({"key": k, "id": r["id"], "mode": r["mode"], "budget": r["budget"], "emoji": r["emoji"] or "✨", "title": r["title"], "custom": True, "added_by": r["added_by"],
+                    "done": bool(d), "done_at": d["done_at"] if d else 0})
+    return out
+
+
+@app.get("/api/dates/{cid}")
+def dt_list(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        return {"conv": pr["direct"], "pet": pr["pet"], "pet_name": pr["pet_name"], "me": u["id"], "names": _cards_names(c, pr, u["id"]), "ideas": _dt_ideas(c, pr)}
+
+
+@app.post("/api/dates/{cid}/idea")
+async def dt_add(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    title = " ".join(str(body.get("title") or "").split())[:DT_TITLE]
+    if not title:
+        raise ValueError("Write the idea first.")
+    mode = body.get("mode") if body.get("mode") in DT_MODES else "in"
+    budget = body.get("budget") if type(body.get("budget")) is int and 0 <= body["budget"] <= 2 else 0
+    emoji = "".join(str(body.get("emoji") or "").split())[:8] or "✨"
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        if c.execute("SELECT COUNT(*) FROM date_ideas WHERE conv_id=?", (pr["direct"],)).fetchone()[0] >= DT_MAX:
+            raise ValueError("That's a lot of ideas already. Remove a few first.")
+        if any(i["title"].lower() == title.lower() for i in _dt_ideas(c, pr)):
+            raise ValueError("That idea is already on the wheel.")
+        iid = c.execute("INSERT INTO date_ideas (conv_id, title, mode, budget, emoji, added_by, created) VALUES (?,?,?,?,?,?,?)",
+                        (pr["direct"], title, mode, budget, emoji, u["id"], time.time())).lastrowid
+        c.commit()
+        out = next(i for i in _dt_ideas(c, pr) if i.get("id") == iid)
+    await v30_ping(pr, "dateidea", "new", u["id"])
+    return out
+
+
+@app.delete("/api/dates/{cid}/idea/{iid}")
+async def dt_delete(cid: int, iid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        if not c.execute("DELETE FROM date_ideas WHERE id=? AND conv_id=?", (iid, pr["direct"])).rowcount:
+            raise HTTPException(404, "Idea not found")
+        c.execute("DELETE FROM date_done WHERE conv_id=? AND idea=?", (pr["direct"], "c%d" % iid))
+        c.commit()
+    await v30_ping(pr, "dateidea", "del", u["id"])
+    return {"ok": True}
+
+
+@app.post("/api/dates/{cid}/done")
+async def dt_done(cid: int, body: dict, authorization: str = Header(None)):
+    """'We did it': marks the idea done (once). Optionally adds it to the bucket list as a ticked item and/or posts a line in the couple's chat."""
+    u = auth(authorization)
+    uid, now, chip = u["id"], time.time(), None
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, uid)
+        key = str(body.get("key") or "")
+        idea = next((i for i in _dt_ideas(c, pr) if i["key"] == key), None)
+        if not idea:
+            raise HTTPException(404, "Idea not found")
+        if not c.execute("INSERT OR IGNORE INTO date_done (conv_id, idea, title, done_at, done_by) VALUES (?,?,?,?,?)", (pr["direct"], key, idea["title"], now, uid)).rowcount:
+            raise ValueError("You've already done this one.")
+        added = False
+        if body.get("bucket") and not c.execute("SELECT 1 FROM bucket WHERE conv_id=? AND lower(title)=lower(?)", (pr["direct"], idea["title"][:120])).fetchone() \
+                and c.execute("SELECT COUNT(*) FROM bucket WHERE conv_id=?", (pr["direct"],)).fetchone()[0] < BK_MAX:
+            c.execute("INSERT INTO bucket (conv_id, title, cat, added_by, created, updated, done, done_at, done_day, done_by, paid) VALUES (?,?,?,?,?,?,1,?,?,?,1)",
+                      (pr["direct"], idea["title"][:120], "go" if idea["mode"] == "out" else "do", uid, now, now, now, _day(pr["tz"]), uid))
+            added = True
+        if body.get("chat"):
+            chip = _insert_msg(c, pr["direct"], uid, "text", f"🎲 Date night done: {idea['emoji']} {idea['title']}")
+        c.commit()
+    await v30_ping(pr, "dateidea", "done", uid)
+    if added:
+        await bk_ping(pr, "new", uid, 0)
+    if chip:
+        await _bcast_msg(pr["direct"], chip, u)
+    return {"ok": True, "bucket": added, "chat": bool(chip)}
+
+
+@app.post("/api/dates/{cid}/undo")
+async def dt_undo(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        c.execute("DELETE FROM date_done WHERE conv_id=? AND idea=?", (pr["direct"], str(body.get("key") or "")))
+        c.commit()
+    await v30_ping(pr, "dateidea", "undo", u["id"])
+    return {"ok": True}
+
+
+# ---- v32: find a place together. Real places near you come from OpenStreetMap (Overpass); each of you swipes, and a place you both like is a match.
+# Neither phone sees the other's swipes, only how far along they are, until a place is liked by both (on one phone both hearts are on the same screen anyway).
+PLACE_FUN = {"amenity": {"cinema", "theatre", "arts_centre"}, "tourism": {"museum", "gallery", "viewpoint", "attraction", "zoo", "aquarium", "theme_park"},
+             "leisure": {"park", "garden", "bowling_alley", "miniature_golf", "escape_game", "amusement_arcade", "water_park"}}
+PLACE_KINDS = {  # id: (emoji, label, does a place with these OpenStreetMap tags count)
+    "lunch": ("🍜", "Lunch", lambda t: t.get("amenity") in ("restaurant", "fast_food", "food_court")),
+    "coffee": ("☕", "Coffee", lambda t: t.get("amenity") == "cafe" or t.get("shop") == "coffee"),
+    "dinner": ("🍽️", "Dinner", lambda t: t.get("amenity") == "restaurant"),
+    "dessert": ("🍰", "Dessert", lambda t: t.get("amenity") == "ice_cream" or t.get("shop") in ("bakery", "pastry", "confectionery")
+                or (t.get("amenity") == "cafe" and bool(re.search(r"dessert|cake|ice_cream|bubble_tea", t.get("cuisine") or "")))),
+    "fun": ("🎟️", "Something to do", lambda t: any(t.get(k) in v for k, v in PLACE_FUN.items())),
+}
+# one question to the map service fetches every kind at once, so switching from lunch to coffee in the same area is instant
+PLACE_QUERY = ['nwr["amenity"~"^(restaurant|fast_food|food_court|cafe|ice_cream|cinema|theatre|arts_centre)$"]', 'nwr["shop"~"^(coffee|bakery|pastry|confectionery)$"]',
+               'nwr["tourism"~"^(museum|gallery|viewpoint|attraction|zoo|aquarium|theme_park)$"]',
+               'nwr["leisure"~"^(park|garden|bowling_alley|miniature_golf|escape_game|amusement_arcade|water_park)$"]["name"]']
+PLACE_RADII = (1000, 3000, 5000, 10000)
+PLACE_MAX = 40
+OVERPASS_URLS = [x for x in os.environ.get("OVERPASS_URL", "").split(",") if x] or [  # public servers (free, often slow); when one fails the next is asked
+    "https://overpass-api.de/api/interpreter", "https://overpass.private.coffee/api/interpreter"]
+_PLACE_CACHE: dict = {}  # (lat, lon, radius) rounded to ~100 m -> (when, {kind: places}): the same area within a day doesn't ask the map service again
+_PLACE_LAST: dict = {}  # conv id -> when its last search started (one search every 15 s per couple)
+
+
+def _place_what(t: dict) -> str:
+    """A short label: the cuisine when there is one, else what kind of place it is."""
+    cu = [x.strip().replace("_", " ") for x in (t.get("cuisine") or "").split(";") if x.strip()]
+    if cu:
+        return " · ".join(x[:1].upper() + x[1:] for x in cu[:2])
+    for k in ("amenity", "shop", "tourism", "leisure"):
+        if t.get(k):
+            v = t[k].replace("_", " ")
+            return {"fast food": "Fast food", "food court": "Food court", "ice cream": "Ice cream", "arts centre": "Arts centre"}.get(v, v[:1].upper() + v[1:])
+    return ""
+
+
+async def _osm_area(lat: float, lon: float, radius: int) -> dict:
+    """{kind: places nearest first} around a point. Chains keep their nearest branch."""
+    key = (round(lat, 3), round(lon, 3), radius)
+    hit = _PLACE_CACHE.get(key)
+    if hit and time.time() - hit[0] < 86400:
+        return hit[1]
+    sel = "".join(f"{q}(around:{radius},{lat:.6f},{lon:.6f});" for q in PLACE_QUERY)
+    els = None
+    async with httpx.AsyncClient(timeout=httpx.Timeout(80, connect=10), headers={"User-Agent": "AFRA-chat/1 (private couple app)"}) as h:
+        for url in OVERPASS_URLS:
+            try:
+                r = await h.post(url, data={"data": f"[out:json][timeout:70];({sel});out center tags 3000;"})
+                r.raise_for_status()
+                els = r.json().get("elements", [])
+                break
+            except Exception as e:
+                print("overpass failed:", url, repr(e)[:160], flush=True)
+    if els is None:
+        raise ValueError("The map service is busy right now. Try again in a minute.")
+    found = []
+    for e in els:
+        t = e.get("tags") or {}
+        name = (t.get("name") or t.get("name:en") or t.get("brand") or "").strip()
+        la, lo = e.get("lat", (e.get("center") or {}).get("lat")), e.get("lon", (e.get("center") or {}).get("lon"))
+        if not name or la is None or lo is None:
+            continue
+        addr = " ".join(x for x in (t.get("addr:street") or "", t.get("addr:housenumber") or "") if x).strip()
+        found.append((t, {"id": f'{e.get("type", "n")[:1]}{e.get("id")}', "name": name[:80], "lat": round(float(la), 6), "lon": round(float(lo), 6),
+                          "dist": int(_metres((lat, lon), (la, lo))), "what": _place_what(t)[:60], "hours": (t.get("opening_hours") or "")[:80], "addr": addr[:80]}))
+    found.sort(key=lambda x: x[1]["dist"])
+    out = {}
+    for kind, (_, _, fits) in PLACE_KINDS.items():
+        lst, names = [], set()
+        for t, x in found:
+            k = re.sub(r"\W+", " ", x["name"].lower()).strip()
+            if fits(t) and k not in names:
+                names.add(k); lst.append(x)
+        out[kind] = lst
+    if len(_PLACE_CACHE) > 200:
+        _PLACE_CACHE.clear()
+    _PLACE_CACHE[key] = (time.time(), out)
+    return out
+
+
+def _place_round(c, pr: dict):
+    """The couple's open search (closed after 12 hours on its own)."""
+    return c.execute("SELECT * FROM place_rounds WHERE conv_id=? AND closed=0 AND created>? ORDER BY id DESC LIMIT 1",
+                     (pr["direct"], time.time() - 12 * 3600)).fetchone()
+
+
+def _place_view(c, pr: dict, rd, uid: int) -> dict:
+    places = json.loads(rd["places"] or "[]")
+    other = pr["b"] if uid == pr["a"] else pr["a"]
+    votes = {pr["a"]: {}, pr["b"]: {}}
+    for v in c.execute("SELECT user_id, pid, yes FROM place_votes WHERE round_id=?", (rd["id"],)):
+        if v["user_id"] in votes:
+            votes[v["user_id"]][v["pid"]] = bool(v["yes"])
+    matches = [x["id"] for x in places if votes[uid].get(x["id"]) and votes[other].get(x["id"])]
+    em, label, _ = PLACE_KINDS.get(rd["kind"], ("📍", "Places", []))
+    return {"id": rd["id"], "kind": rd["kind"], "emoji": em, "label": label, "radius": rd["radius"], "one": bool(rd["one"]), "started_by": rd["started_by"],
+            "created": rd["created"], "places": places, "mine": votes[uid], "theirs": votes[other] if rd["one"] else None,
+            "their_count": len(votes[other]), "matches": matches}
+
+
+def _places_state(c, pr: dict, uid: int) -> dict:
+    rd = _place_round(c, pr)
+    return {"conv": pr["direct"], "me": uid, "names": _cards_names(c, pr, uid), "kinds": [{"id": k, "emoji": v[0], "label": v[1]} for k, v in PLACE_KINDS.items()],
+            "radii": list(PLACE_RADII), "round": _place_view(c, pr, rd, uid) if rd else None}
+
+
+async def places_ping(pr: dict, what: str, by: int, extra=None):
+    for uid in (pr["a"], pr["b"]):
+        await send_to(uid, {"t": "placepick", "conv": pr["direct"], "pet": pr["pet"], "what": what, "by": by, **(extra or {})})
+
+
+@app.get("/api/places/{cid}")
+def places_get(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        return _places_state(c, pr, u["id"])
+
+
+@app.post("/api/places/{cid}/start")
+async def places_start(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    kind = str(body.get("kind") or "")
+    if kind not in PLACE_KINDS:
+        raise ValueError("Pick what you're looking for")
+    try:
+        lat, lon = float(body["lat"]), float(body["lon"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("Needs your location")
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("Bad location")
+    radius = int(body.get("radius") or 3000)
+    radius = radius if radius in PLACE_RADII else 3000
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+    if time.time() - _PLACE_LAST.get(pr["direct"], 0) < 15:
+        raise ValueError("Give it a few seconds, still looking")
+    _PLACE_LAST[pr["direct"]] = time.time()
+    found = (await _osm_area(lat, lon, radius))[kind]
+    if len(found) < 5 and radius < PLACE_RADII[-1]:  # too few nearby: look one step further out
+        radius = next(r for r in PLACE_RADII if r > radius)
+        found = (await _osm_area(lat, lon, radius))[kind]
+    if not found:
+        raise ValueError("Nothing like that on the map around here. Try something else.")
+    near = found[:PLACE_MAX * 2]
+    pick = random.sample(near, min(PLACE_MAX, len(near)))
+    with closing(db()) as c:
+        c.execute("UPDATE place_rounds SET closed=? WHERE conv_id=? AND closed=0", (time.time(), pr["direct"]))
+        c.execute("INSERT INTO place_rounds (conv_id, kind, lat, lon, radius, places, started_by, one, created) VALUES (?,?,?,?,?,?,?,?,?)",
+                  (pr["direct"], kind, lat, lon, radius, json.dumps(pick, ensure_ascii=False), u["id"], 1 if body.get("one") else 0, time.time()))
+        out = _places_state(c, pr, u["id"])
+        c.commit()
+    await places_ping(pr, "start", u["id"], {"kind": kind, "one": bool(body.get("one"))})
+    return out
+
+
+@app.post("/api/places/{cid}/vote")
+async def places_vote(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        rd = _place_round(c, pr)
+        if not rd or rd["id"] != int(body.get("round") or 0):
+            raise ValueError("That search has ended. Start a new one.")
+        pid = str(body.get("pid") or "")
+        place = next((x for x in json.loads(rd["places"] or "[]") if x["id"] == pid), None)
+        if not place:
+            raise ValueError("That place isn't in this search")
+        who = u["id"]
+        other = pr["b"] if who == pr["a"] else pr["a"]
+        if body.get("for") and int(body["for"]) == other:
+            if not rd["one"]:
+                raise ValueError("They swipe on their own phone in this search")
+            who = other
+        c.execute("INSERT OR REPLACE INTO place_votes (round_id, user_id, pid, yes, at) VALUES (?,?,?,?,?)", (rd["id"], who, pid, 1 if body.get("yes") else 0, time.time()))
+        partner = pr["b"] if who == pr["a"] else pr["a"]
+        v = c.execute("SELECT yes FROM place_votes WHERE round_id=? AND user_id=? AND pid=?", (rd["id"], partner, pid)).fetchone()
+        match = bool(body.get("yes")) and bool(v and v["yes"])
+        out = _places_state(c, pr, u["id"])
+        c.commit()
+    out["match"] = pid if match else ""
+    await places_ping(pr, "match" if match else "vote", u["id"], {"pid": pid, "name": place["name"]} if match else None)
+    return out
+
+
+@app.post("/api/places/{cid}/close")
+async def places_close(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        c.execute("UPDATE place_rounds SET closed=? WHERE conv_id=? AND closed=0", (time.time(), pr["direct"]))
+        out = _places_state(c, pr, u["id"])
+        c.commit()
+    await places_ping(pr, "close", u["id"])
+    return out
+
+
+async def _date_jobs(now: float = 0):
+    """Saturday and Sunday (10:00-21:00 pair time): the pet suggests one idea that isn't done yet, once per weekend (claimed in date_sent first)."""
+    acts = []
+    with closing(db()) as c:
+        for pr in _pairs_all(c):
+            if not pr["pet"]:
+                continue
+            lt = _lt(pr["tz"], now)
+            if lt.weekday() < 5 or not 10 <= lt.hour < 21 or _all_quiet(pr, now):
+                continue
+            iso = lt.isocalendar()
+            key = f"datenight:{iso[0]}-W{iso[1]:02d}"
+            if c.execute("SELECT 1 FROM date_sent WHERE conv_id=? AND key=?", (pr["direct"], key)).fetchone():
+                continue
+            pool = [i for i in _dt_ideas(c, pr) if not i["done"]]
+            if pool and c.execute("INSERT OR IGNORE INTO date_sent (conv_id, key) VALUES (?,?)", (pr["direct"], key)).rowcount:
+                acts.append((pr, random.choice(pool)))
+        c.commit()
+    for pr, idea in acts:
+        try:
+            await pet_say(pr["pet"], f"It's the weekend! 🎲 Date idea for you two: {idea['emoji']} {idea['title']}. Not feeling it? Spin the wheel in Date night.", push=True)
+        except Exception as e:
+            print("date job failed:", repr(e)[:300], flush=True)
+
+
+# ---- gratitude jar
+def _gj_view(r, uid: int) -> dict:
+    return {"id": r["id"], "author": r["author"], "body": r["body"], "created": r["created"], "read": bool(r["read_at"]), "mine": r["author"] == uid}
+
+
+@app.get("/api/jar/{cid}")
+def gj_list(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        rows = c.execute("SELECT * FROM gratitude WHERE conv_id=? ORDER BY created DESC, id DESC LIMIT 400", (pr["direct"],)).fetchall()
+        n = c.execute("SELECT COUNT(*) FROM gratitude WHERE conv_id=?", (pr["direct"],)).fetchone()[0]
+        used = c.execute("SELECT coins FROM game_coins WHERE user_id=? AND day=?", (u["id"], "g" + _day(pr["tz"]))).fetchone()
+        return {"conv": pr["direct"], "pet": pr["pet"], "pet_name": pr["pet_name"], "me": u["id"], "names": _cards_names(c, pr, u["id"]), "coins": bool(pr["pet_id"]),
+                "today": used["coins"] if used else 0, "cap": GJ_CAP, "pay": GJ_COIN, "count": n, "items": [_gj_view(r, u["id"]) for r in rows]}
+
+
+@app.post("/api/jar/{cid}")
+async def gj_add(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    text = " ".join(str(body.get("text") or "").split())
+    if not text:
+        raise ValueError("Write a little note first.")
+    if len(text) > GJ_LEN:
+        raise ValueError(f"Keep it under {GJ_LEN} characters.")
+    uid, now = u["id"], time.time()
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, uid)
+        t0 = datetime.fromtimestamp(now, pr["tz"]).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        if c.execute("SELECT COUNT(*) FROM gratitude WHERE conv_id=? AND author=? AND created>=?", (pr["direct"], uid, t0)).fetchone()[0] >= GJ_PER_DAY:
+            raise ValueError("That's plenty for today. The jar will keep.")
+        if c.execute("SELECT COUNT(*) FROM gratitude WHERE conv_id=?", (pr["direct"],)).fetchone()[0] >= GJ_MAX:
+            raise ValueError("The jar is full!")
+        nid = c.execute("INSERT INTO gratitude (conv_id, author, body, created) VALUES (?,?,?,?)", (pr["direct"], uid, text, now)).lastrowid
+        give = _earn(c, pr, uid, "g" + _day(pr["tz"]), GJ_COIN, GJ_CAP)
+        out = {"item": _gj_view(c.execute("SELECT * FROM gratitude WHERE id=?", (nid,)).fetchone(), uid), "coins": give,
+               "count": c.execute("SELECT COUNT(*) FROM gratitude WHERE conv_id=?", (pr["direct"],)).fetchone()[0]}
+        c.commit()
+    await v30_ping(pr, "jar", "new", uid, {"id": nid})
+    return out
+
+
+@app.delete("/api/jar/{cid}/{nid}")
+async def gj_delete(cid: int, nid: int, authorization: str = Header(None)):
+    """Only the one who wrote a note can take it out of the jar."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        if not c.execute("DELETE FROM gratitude WHERE id=? AND conv_id=? AND author=?", (nid, pr["direct"], u["id"])).rowcount:
+            raise HTTPException(404, "Note not found")
+        c.commit()
+    await v30_ping(pr, "jar", "del", u["id"], {"id": nid})
+    return {"ok": True}
+
+
+async def _grat_jobs(now: float = 0):
+    """Sunday 18:00-22:00 (pair time): the pet reads one note nobody has heard yet, once per week. The week is claimed in date_sent first, then the note is claimed
+    with a rowcount guard on read_at, so two overlapping loops still read one note."""
+    acts = []
+    with closing(db()) as c:
+        for pr in _pairs_all(c):
+            if not pr["pet"]:
+                continue
+            lt = _lt(pr["tz"], now)
+            if lt.weekday() != 6 or not 18 <= lt.hour < 22 or _all_quiet(pr, now):
+                continue
+            iso = lt.isocalendar()
+            key = f"jar:{iso[0]}-W{iso[1]:02d}"
+            if c.execute("SELECT 1 FROM date_sent WHERE conv_id=? AND key=?", (pr["direct"], key)).fetchone():
+                continue
+            ids = [r["id"] for r in c.execute("SELECT id FROM gratitude WHERE conv_id=? AND read_at=0", (pr["direct"],))]
+            if not ids or not c.execute("INSERT OR IGNORE INTO date_sent (conv_id, key) VALUES (?,?)", (pr["direct"], key)).rowcount:
+                continue
+            nid = random.choice(ids)
+            if not c.execute("UPDATE gratitude SET read_at=? WHERE id=? AND read_at=0", (now or time.time(), nid)).rowcount:
+                continue
+            r = c.execute("SELECT * FROM gratitude WHERE id=?", (nid,)).fetchone()
+            who = _first(c.execute("SELECT * FROM users WHERE id=?", (r["author"],)).fetchone())
+            acts.append((pr, who, r))
+        c.commit()
+    for pr, who, r in acts:
+        try:
+            await pet_say(pr["pet"], f"A note from the jar 🫙 {who} wrote: “{r['body']}”", push=True)
+            await v30_ping(pr, "jar", "read", 0, {"id": r["id"]})
+        except Exception as e:
+            print("jar job failed:", repr(e)[:300], flush=True)
+
+
+# ---- private gift wishlist
+def _wl_view(r) -> dict:
+    return {"id": r["id"], "title": r["title"], "link": r["link"], "note": r["note"], "price": r["price"], "photo": r["photo"], "bought": bool(r["bought"]),
+            "bought_at": r["bought_at"], "created": r["created"]}
+
+
+def _wl_row(c, uid: int, wid: int):
+    """Somebody else's item is exactly as missing as one that doesn't exist."""
+    r = c.execute("SELECT * FROM wishlist WHERE id=? AND owner=?", (wid, uid)).fetchone()
+    if not r:
+        raise HTTPException(404, "Not found")
+    return r
+
+
+def _wl_fields(c, uid: int, body: dict) -> dict:
+    out = {}
+    if "title" in body:
+        t = " ".join(str(body.get("title") or "").split())
+        if not t:
+            raise ValueError("Give the idea a name first.")
+        out["title"] = t[:WL_TITLE]
+    if "link" in body:
+        s = str(body.get("link") or "").strip()[:500]
+        if s and "://" not in s:
+            if re.match(r"[a-z][a-z0-9+.\-]*:(?!\d)", s, re.I):  # javascript:, mailto:, data: ... only web links are kept
+                raise ValueError("That link doesn't look right.")
+            s = "https://" + s
+        if s and (urlparse(s).scheme not in ("http", "https") or not urlparse(s).netloc):
+            raise ValueError("That link doesn't look right.")
+        out["link"] = s
+    if "note" in body:
+        out["note"] = str(body.get("note") or "").strip()[:500]
+    if "price" in body:
+        out["price"] = " ".join(str(body.get("price") or "").split())[:30]
+    if "photo" in body:
+        ph = body.get("photo")
+        out["photo"] = _cap_photos(c, uid, [{"id": ph}], 1)[0]["id"] if ph else ""
+    return out
+
+
+@app.get("/api/wishlist/{cid}")
+def wl_list(cid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        other = _g_other(pr, u["id"])
+        rows = c.execute("SELECT * FROM wishlist WHERE owner=? AND for_uid=? ORDER BY bought, created DESC, id DESC", (u["id"], other)).fetchall()
+        return {"conv": pr["direct"], "me": u["id"], "for": other, "for_name": _first_name(c, u["id"], other), "items": [_wl_view(r) for r in rows]}
+
+
+@app.post("/api/wishlist/{cid}")
+def wl_add(cid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        f = _wl_fields(c, u["id"], {"title": "", "link": "", "note": "", "price": "", "photo": "", **{k: body.get(k) for k in ("title", "link", "note", "price", "photo") if k in body}})
+        other, now = _g_other(pr, u["id"]), time.time()
+        if c.execute("SELECT COUNT(*) FROM wishlist WHERE owner=?", (u["id"],)).fetchone()[0] >= WL_MAX:
+            raise ValueError("That's a long list! Remove a few first.")
+        wid = c.execute("INSERT INTO wishlist (owner, for_uid, title, link, note, price, photo, created, updated) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (u["id"], other, f["title"], f["link"], f["note"], f["price"], f["photo"], now, now)).lastrowid
+        out = _wl_view(c.execute("SELECT * FROM wishlist WHERE id=?", (wid,)).fetchone())
+        c.commit()
+        return out
+
+
+@app.put("/api/wishlist/{cid}/{wid}")
+def wl_edit(cid: int, wid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _pair_of(c, cid, u["id"])
+        _wl_row(c, u["id"], wid)
+        f = _wl_fields(c, u["id"], {k: body[k] for k in ("title", "link", "note", "price", "photo") if k in body})
+        if f:
+            f["updated"] = time.time()
+            c.execute("UPDATE wishlist SET " + ", ".join(f"{k}=?" for k in f) + " WHERE id=? AND owner=?", (*f.values(), wid, u["id"]))
+        out = _wl_view(c.execute("SELECT * FROM wishlist WHERE id=?", (wid,)).fetchone())
+        c.commit()
+        return out
+
+
+@app.delete("/api/wishlist/{cid}/{wid}")
+def wl_delete(cid: int, wid: int, authorization: str = Header(None)):
+    u = auth(authorization)
+    with closing(db()) as c:
+        _pair_of(c, cid, u["id"])
+        _wl_row(c, u["id"], wid)
+        c.execute("DELETE FROM wishlist WHERE id=? AND owner=?", (wid, u["id"]))
+        c.commit()
+    return {"ok": True}
+
+
+@app.post("/api/wishlist/{cid}/{wid}/bought")
+def wl_bought(cid: int, wid: int, body: dict, authorization: str = Header(None)):
+    u = auth(authorization)
+    on = bool(body.get("bought", True))
+    with closing(db()) as c:
+        _pair_of(c, cid, u["id"])
+        _wl_row(c, u["id"], wid)
+        c.execute("UPDATE wishlist SET bought=?, bought_at=?, updated=? WHERE id=? AND owner=?", (int(on), time.time() if on else 0, time.time(), wid, u["id"]))
+        out = _wl_view(c.execute("SELECT * FROM wishlist WHERE id=?", (wid,)).fetchone())
+        c.commit()
+        return out
+
+
+async def _wish_jobs(now: float = 0):
+    """A push to the AUTHOR (only) 14 and 3 days before the partner's birthday and before the anniversary, if they still have unbought ideas. Each reminder is claimed
+    in date_sent first (key wish:<author>:<occasion>:<days>). Not before 09:00 in the author's own time zone, and not while they are in quiet hours (it waits, unclaimed)."""
+    acts = []
+    with closing(db()) as c:
+        for pr in _pairs_all(c):
+            for me in (pr["a"], pr["b"]):
+                other = _g_other(pr, me)
+                left = c.execute("SELECT COUNT(*) FROM wishlist WHERE owner=? AND for_uid=? AND bought=0", (me, other)).fetchone()[0]
+                if not left:
+                    continue
+                lt = _lt(_tz(c, me), now)
+                if lt.hour < 9 or quiet_now(me, now):
+                    continue
+                for lead in (14, 3):
+                    for o in _occasions(c, pr, lt.date() + timedelta(days=lead)):
+                        if o["type"] == "month" or (o["type"] == "bday" and o["uid"] != other):
+                            continue
+                        if c.execute("INSERT OR IGNORE INTO date_sent (conv_id, key) VALUES (?,?)", (pr["direct"], f"wish:{me}:{o['key']}:{lead}")).rowcount:
+                            acts.append((pr, me, o, lead, left, _first_name(c, me, other)))
+        c.commit()
+    for pr, me, o, lead, left, who in acts:
+        try:
+            what = f"{who}'s birthday" if o["type"] == "bday" else "Your anniversary"
+            await push_to([me], {"title": f"🎁 {what} is in {_plural(lead, 'day')}", "body": f"You've saved {_plural(left, 'gift idea')} for {who}. Anything left to buy?",
+                                 "conv": pr["pet"] or pr["direct"], "icon": "/icon-512.png", "tag": f"wish-{o['key']}"})
+        except Exception as e:
+            print("wish job failed:", repr(e)[:300], flush=True)
+
+
+# ---- our month (recap)
+RECAP_SYSTEM = ("touch", "petact", "pinact", "petinvite", "card", "capsule", "game", "bucket")
+_EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF☀-➿⭐⭕⬛⬜]")
+
+
+def _rc_month(v, tz, now: float = 0) -> tuple:
+    """(YYYY-MM, start, end) of a month that is over."""
+    if not re.fullmatch(r"\d{4}-\d{2}", v or ""):
+        raise ValueError("Pick a month.")
+    y, m = int(v[:4]), int(v[5:])
+    if not 2000 <= y <= 2100 or not 1 <= m <= 12:
+        raise ValueError("Pick a month.")
+    t0 = datetime(y, m, 1, tzinfo=tz)
+    t1 = datetime(y + (m == 12), m % 12 + 1, 1, tzinfo=tz)
+    if t1.timestamp() > (now or time.time()):
+        raise ValueError("That month isn't over yet.")
+    return v, t0.timestamp(), t1.timestamp()
+
+
+def _rc_prev(tz, now: float = 0) -> str:
+    d = _lt(tz, now).date().replace(day=1) - timedelta(days=1)
+    return d.strftime("%Y-%m")
+
+
+def _rc_months(c, pr: dict, now: float = 0) -> list:
+    """Months with chat in them, newest first, up to and including last month."""
+    first = c.execute("SELECT MIN(created) FROM messages WHERE conv_id=?", (pr["direct"],)).fetchone()[0]
+    if not first:
+        return []
+    a, b = _lt(pr["tz"], first).date().replace(day=1), _rc_prev(pr["tz"], now)
+    out, d = [], a
+    while d.strftime("%Y-%m") <= b:
+        out.append(d.strftime("%Y-%m"))
+        d = (d + timedelta(days=32)).replace(day=1)
+    return out[::-1]
+
+
+def _rc_stats(c, pr: dict, ym: str, t0: float, t1: float) -> dict:
+    """Everything the card can say about one month, from rows that exist. A stat with no data is simply missing from the answer."""
+    cid, a, b, tz = pr["direct"], pr["a"], pr["b"], pr["tz"]
+    st = {}
+    rows = c.execute("SELECT sender, kind, text, created FROM messages WHERE conv_id=? AND deleted=0 AND created>=? AND created<?", (cid, t0, t1)).fetchall()
+    rows = [r for r in rows if r["kind"] not in RECAP_SYSTEM and r["sender"] in (a, b)]
+    if rows:
+        st["messages"] = {str(a): sum(r["sender"] == a for r in rows), str(b): sum(r["sender"] == b for r in rows), "total": len(rows)}
+        for name, kinds in (("photos", ("image",)), ("videos", ("video", "videonote")), ("voice", ("voice",))):
+            n = sum(r["kind"] in kinds for r in rows)
+            if n:
+                st[name] = n
+        emo = {}
+        for r in rows:
+            if r["kind"] == "text":
+                for ch in _EMOJI_RE.findall(r["text"] or ""):
+                    emo[ch] = emo.get(ch, 0) + 1
+        if emo:
+            e = max(emo.items(), key=lambda kv: (kv[1], kv[0]))
+            st["top_emoji"] = {"emoji": e[0], "count": e[1]}
+        days = {}
+        for r in rows:
+            d = days.setdefault(_day(tz, r["created"]), {a: 0, b: 0})
+            d[r["sender"]] += 1
+        best = max(days.items(), key=lambda kv: (kv[1][a] + kv[1][b], kv[0]))
+        st["busiest"] = {"day": best[0], "count": best[1][a] + best[1][b]}
+        run = top = 0
+        prev = None
+        for dkey in sorted(k for k, v in days.items() if v[a] and v[b]):
+            dd = _dparse(dkey)
+            run = run + 1 if prev and (dd - prev).days == 1 else 1
+            prev, top = dd, max(top, run)
+        if top >= 2:
+            st["streak"] = top
+    tq = c.execute("SELECT sender, COALESCE(SUM(count),0) n FROM touches WHERE conv_id=? AND ts>=? AND ts<? GROUP BY sender", (cid, t0, t1)).fetchall()
+    if sum(x["n"] for x in tq):
+        st["touches"] = {str(a): 0, str(b): 0, **{str(x["sender"]): x["n"] for x in tq}, "total": sum(x["n"] for x in tq)}
+    g = c.execute("SELECT winner FROM games WHERE conv_id=? AND status='done' AND finished>=? AND finished<?", (cid, t0, t1)).fetchall()
+    if g:
+        st["games"] = {"n": len(g), str(a): sum(x["winner"] == a for x in g), str(b): sum(x["winner"] == b for x in g)}
+    bk = [r["title"] for r in c.execute("SELECT title FROM bucket WHERE conv_id=? AND done=1 AND done_at>=? AND done_at<? ORDER BY done_at", (cid, t0, t1))]
+    if bk:
+        st["bucket"] = {"n": len(bk), "titles": bk[:3]}
+    n = c.execute("SELECT COUNT(*) FROM capsules WHERE conv_id=? AND draft=0 AND opened_at>=? AND opened_at<?", (cid, t0, t1)).fetchone()[0]
+    if n:
+        st["letters"] = n
+    gr = c.execute("SELECT author, COUNT(*) n FROM gratitude WHERE conv_id=? AND created>=? AND created<? GROUP BY author", (cid, t0, t1)).fetchall()
+    if gr:
+        st["gratitude"] = {str(a): 0, str(b): 0, **{str(x["author"]): x["n"] for x in gr}, "total": sum(x["n"] for x in gr)}
+    q = c.execute("SELECT COUNT(*) FROM (SELECT day FROM dq_answers WHERE conv_id=? AND day>=? AND day<? GROUP BY day HAVING COUNT(*)>=2)",
+                  (cid, ym + "-01", ym + "-32")).fetchone()[0]
+    if q:
+        st["questions"] = q
+    if pr["pet_id"]:
+        cared = 0
+        for r in c.execute("SELECT data FROM pet_days WHERE pet_id=? AND day>=? AND day<?", (pr["pet_id"], ym + "-01", ym + "-32")):
+            try:
+                d = json.loads(r["data"] or "{}")
+            except ValueError:
+                continue
+            cared += any(d.get(k) for k in ("feed", "play", "tend", "sleep"))
+        ms = [r["text"] for r in c.execute("SELECT text FROM pet_log WHERE pet_id=? AND at>=? AND at<? AND kind IN ('stage','streak','item') ORDER BY at LIMIT 4", (pr["pet_id"], t0, t1))]
+        if cared or ms:
+            st["pet"] = {"name": pr["pet_name"], "days": cared, "milestones": ms}
+    return st
+
+
+@app.get("/api/recap/{cid}")
+def rc_get(cid: int, month: str = "", authorization: str = Header(None)):
+    """The recap of one finished month (default: last month). Only counts, never the words of a letter or a note."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        pr = _pair_of(c, cid, u["id"])
+        ym, t0, t1 = _rc_month(month or _rc_prev(pr["tz"]), pr["tz"])
+        label = datetime(int(ym[:4]), int(ym[5:]), 1).strftime("%B %Y")
+        return {"conv": pr["direct"], "pet": pr["pet"], "me": u["id"], "names": _cards_names(c, pr, u["id"]), "month": ym, "label": label,
+                "months": _rc_months(c, pr), "stats": _rc_stats(c, pr, ym, t0, t1)}
+
+
+async def _recap_jobs(now: float = 0):
+    """On the 1st (09:00-22:00, pair time) the pet says 'your month is ready' once for the month that just ended (claimed in date_sent first)."""
+    acts = []
+    with closing(db()) as c:
+        for pr in _pairs_all(c):
+            if not pr["pet"]:
+                continue
+            lt = _lt(pr["tz"], now)
+            if lt.day != 1 or not 9 <= lt.hour < 22 or _all_quiet(pr, now):
+                continue
+            ym = _rc_prev(pr["tz"], now)
+            if c.execute("SELECT 1 FROM date_sent WHERE conv_id=? AND key=?", (pr["direct"], "recap:" + ym)).fetchone():
+                continue
+            _, t0, t1 = _rc_month(ym, pr["tz"], now)
+            has = c.execute("SELECT 1 FROM messages WHERE conv_id=? AND deleted=0 AND created>=? AND created<?", (pr["direct"], t0, t1)).fetchone()
+            if has and c.execute("INSERT OR IGNORE INTO date_sent (conv_id, key) VALUES (?,?)", (pr["direct"], "recap:" + ym)).rowcount:
+                acts.append((pr, datetime(int(ym[:4]), int(ym[5:]), 1).strftime("%B")))
+        c.commit()
+    for pr, month in acts:
+        try:
+            await pet_say(pr["pet"], f"Your month is ready 📅 Here's how {month} went for you two. Open Our month on Home.", push=True)
+        except Exception as e:
+            print("recap job failed:", repr(e)[:300], flush=True)
+
+
+async def _v30_jobs():
+    """From the reminder loop, at most every 2 minutes. Each job guards itself, so a failure in one never stops the others."""
+    if time.time() - V30_CHECK[0] < 120:
+        return
+    V30_CHECK[0] = time.time()
+    for job in (_date_jobs, _grat_jobs, _wish_jobs, _recap_jobs):
+        try:
+            await job()
+        except Exception as e:
+            print("v30 job failed:", job.__name__, repr(e)[:300], flush=True)
+
+
 # ---------------------------------------------------------------- live updates (one WebSocket per device)
 async def send_to(uid: int, msg: dict):
     if msg.get("t") in ("read", "typing", "presence") and not _relay_ok(msg["t"], msg.get("user") or 0, uid):
@@ -5313,6 +6090,25 @@ def admin_stats(authorization: str = Header(None)):
     return stats
 
 
+def _scrub_db(path: Path):
+    """v30: empty the private gift wishlist in a COPY of the database before anyone downloads it (the live database keeps it)."""
+    with closing(sqlite3.connect(path)) as k:
+        k.execute("DELETE FROM wishlist")
+        k.commit()
+        k.execute("VACUUM")
+
+
+def _scrubbed_copy(src_path: Path) -> Path:
+    fd, name = tempfile.mkstemp(suffix=".db", dir=DATA)
+    os.close(fd)
+    shutil.copyfile(src_path, name)
+    try:
+        _scrub_db(Path(name))
+    except sqlite3.Error:  # an old backup from before v30 has no wishlist table: nothing to scrub
+        pass
+    return Path(name)
+
+
 @app.get("/api/admin/export/db")
 def export_db(t: str = "", authorization: str = Header(None)):
     """The whole database as one SQLite file (open it with "DB Browser for SQLite"). Passwords inside are hashed."""
@@ -5324,6 +6120,7 @@ def export_db(t: str = "", authorization: str = Header(None)):
     with dst:
         src.backup(dst)
     src.close(); dst.close()
+    _scrub_db(tmp)
     data = tmp.read_bytes()
     tmp.unlink()
     return Response(data, media_type="application/octet-stream",
@@ -5334,12 +6131,13 @@ def database_as_json() -> str:
     """The complete database converted to JSON: every table, every column, every row. Login tokens and the phones'
     push keys are left out (they only let someone pretend to be a device); passwords are stored as Base64-encoded text, as in the .db."""
     hidden = {("sessions", "token"), ("pushes", "endpoint"), ("pushes", "sub")}
+    private = {"wishlist"}  # v30: one person's gift ideas for the other; no export carries them
     out = {"exported": time.strftime("%Y-%m-%d %H:%M:%S"), "database": "A.F.R.A chat", "tables": {}}
     with closing(db()) as c:
         for (table,) in c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
             cols = [r[1] for r in c.execute(f"PRAGMA table_info({table})")]
             rows = []
-            for r in c.execute(f"SELECT * FROM {table}"):
+            for r in ([] if table in private else c.execute(f"SELECT * FROM {table}")):
                 row = {}
                 for col in cols:
                     v = r[col]
@@ -5632,6 +6430,7 @@ def export_everything(t: str = "", authorization: str = Header(None)):
     with dst:
         src.backup(dst)
     src.close(); dst.close()
+    _scrub_db(tmp)
     try:
         with closing(db()) as c:
             users = _names(c)
@@ -5662,6 +6461,12 @@ def download_backup(name: str, t: str = "", authorization: str = Header(None)):
     f = (DATA / "backups" / name).resolve()
     if f.parent != (DATA / "backups").resolve() or not f.is_file():
         raise HTTPException(404)
+    if f.suffix == ".db":  # v30: the private gift wishlist is not part of any download, not even an admin's
+        tmp = _scrubbed_copy(f)
+        try:
+            return Response(tmp.read_bytes(), media_type="application/octet-stream", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+        finally:
+            tmp.unlink(missing_ok=True)
     return FileResponse(f, media_type="application/octet-stream", filename=name)
 
 

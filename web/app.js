@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 31;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 32;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -286,6 +286,9 @@
     if (e.t === "game") { onGameEvent(e); return; }
     if (e.t === "capsule") { onCapsuleEvent(e); return; }
     if (e.t === "bucket") { onBucketEvent(e); return; }
+    if (e.t === "jar") { onJarEvent(e); return; }
+    if (e.t === "dateidea") { onDateEvent(e); return; }
+    if (e.t === "placepick") { onPlaceEvent(e); return; }
     if (e.t === "memories") { onMemoriesEvent(e); return; }
     if (e.t === "us_here" || e.t === "us_tap" || e.t === "us_sync" || e.t === "us_invite") { onUsEvent(e); return; }
     if (e.t === "pins") {
@@ -672,6 +675,7 @@
       else if (m.kind === "videonote") html += `<div class="vnote" data-vn><video src="${fileUrl(a.id)}#t=0.1"${a.poster ? ` poster="${fileUrl(a.poster)}"` : ""} playsinline preload="metadata"></video><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="48"/></svg><span class="vn-play">▶${a.dur ? " " + fmtDur(a.dur) : ""}</span></div>`;
       else html += `<a class="file" href="${fileUrl(a.id)}" target="_blank" download="${esc(a.name)}"><span style="font-size:28px">📄</span><span><b>${esc(a.name)}</b><small>${sizeTxt(a.size || 0)}</small></span></a>`;
     } else if (a && a.local) html += `<div class="txt">⏳ ${esc(a.name)}</div>`;
+    else if (m.kind === "location" && a && isFinite(a.lat) && isFinite(a.lon)) html += `<a class="file" href="${esc(mapUrl(a))}" target="_blank" rel="noopener noreferrer"><span style="font-size:28px">🗺️</span><span><b>${esc(a.name || "Open in Maps")}</b><small>${a.name ? "Open in Maps" : ""}</small></span></a>`;
     if (m.text) html += `<div class="txt ${onlyEmoji(m.text) ? "big" : ""}">${esc(mtext(m))}</div>`;
     return html;
   }
@@ -2645,7 +2649,11 @@
     const cardsCard = `<button class="hm-card pc-cards" id="pcCards" data-cid="${d.conv}"><i>🃏</i><span><b>Cards</b><small class="hm-hint">Little questions to answer together</small></span><em>›</em></button>`;
     const bk = d.bucket || { done: 0, todo: 0 };
     const tiles = `<div class="pc-two"><button class="hm-card pc-tile" id="pcBucket" data-cid="${d.conv}"><i>🪣</i><b>Bucket list</b><small class="hm-hint">${bk.done + bk.todo ? `${bk.done} done · ${bk.todo} to go` : "Dreams for the two of you"}</small></button>
-      <button class="hm-card pc-tile" id="pcMem" data-cid="${d.conv}"><i>📸</i><b>Memories</b><small class="hm-hint">Every photo you shared</small></button></div>`;
+      <button class="hm-card pc-tile" id="pcMem" data-cid="${d.conv}"><i>📸</i><b>Memories</b><small class="hm-hint">Every photo you shared</small></button></div>
+      <div class="pc-two"><button class="hm-card pc-tile" id="pcDate" data-cid="${d.conv}"><i>🎲</i><b>Date night</b><small class="hm-hint">Spin an idea or find a place</small></button>
+      <button class="hm-card pc-tile" id="pcJar" data-cid="${d.conv}"><i>🫙</i><b>Gratitude jar</b><small class="hm-hint">${d.jar ? `${d.jar} ${d.jar === 1 ? "note" : "notes"} so far` : "Write the first one"}</small></button></div>
+      <div class="pc-two"><button class="hm-card pc-tile" id="pcWish" data-cid="${d.conv}"><i>🎁</i><b>Gift ideas</b><small class="hm-hint">${d.wish ? `${d.wish} saved · only you see` : "Private, just for you"}</small></button>
+      <button class="hm-card pc-tile" id="pcRecap" data-cid="${d.conv}"><i>📅</i><b>Our month</b><small class="hm-hint">Last month in numbers</small></button></div>`;
     return `<div class="pc-stack">${usCard}${cardsCard}${tiles}
       <div class="hm-card pc-dq ${q.revealed ? "done" : ""}" id="pcDq"><h4>💭 Today's question ${q.streak ? `<b class="dq-streak">🔥 ${q.streak}</b>` : ""}<button class="sbtn" id="dqPast">Past</button></h4><p class="dq-q">${esc(q.q)}</p>${body}</div>
       <div class="hm-card pc-mood"><h4>🌤️ Moods</h4>${mrow(me)}${mrow(oid)}</div>
@@ -2673,6 +2681,7 @@
     const pk = $("#pcCards", box); if (pk) pk.onclick = () => cardsOpen(+pk.dataset.cid);
     const pb = $("#pcBucket", box); if (pb) pb.onclick = () => bucketOpen(+pb.dataset.cid);
     const pm = $("#pcMem", box); if (pm) pm.onclick = () => memOpen(+pm.dataset.cid);
+    [["#pcDate", dateNightOpen], ["#pcJar", jarOpen], ["#pcWish", wishOpen], ["#pcRecap", recapOpen]].forEach(([q, fn]) => { const t = $(q, box); if (t) t.onclick = () => fn(+t.dataset.cid); });
     const om = $("#otdMem", box); if (om && d.otd) om.onclick = () => memOpen(d.conv, { through: d.otd.date.slice(0, 7) });
     $("#pcDates", box).onclick = () => datesSheet(d.conv);
     $$("[data-otd]", box).forEach((b) => b.onclick = () => {
@@ -4618,6 +4627,436 @@
   }
   function bindBucketChips(log) {
     $$(".bkchip", log).forEach((b) => b.onclick = (e) => { e.stopPropagation(); const id = +b.dataset.bk; if (id && S.cur) bucketOpen(S.cur, id); });
+  }
+
+  // ---- v30: date-night spinner, gratitude jar, private gift wishlist, our month (the recap card is drawn on a canvas in the browser)
+  const V30 = { page: null };
+  function v30Page(cls, title, btns) {  // one page at a time, same shell as the bucket list
+    if (V30.page) return null;
+    const page = document.createElement("div"); page.className = "page bucket v30 " + cls;
+    page.innerHTML = `<div class="kc-top"><button class="icon" data-x="back" aria-label="Back">‹</button><b>${title}</b><span class="kc-sp"></span>${btns || ""}</div><div class="kc-body" id="v30Body"><div class="hint">Loading…</div></div>`;
+    document.body.appendChild(page); V30.page = page;
+    const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); if (V30.page === page) V30.page = null; setTimeout(() => page.remove(), 200); };
+    layer(page, close); $('[data-x="back"]', page).onclick = close;
+    return { page, close, body: $("#v30Body", page) };
+  }
+  const v30Day = (ts) => new Date(ts * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+
+  // ---- date night
+  const DN = { page: null, cid: 0, st: null, mode: "any", bud: new Set(), rot: 0, spinning: false, pick: null, tab: "spin" };
+  const DN_BUD = ["Free", "$", "$$"];
+  async function dateNightOpen(cid) {
+    const p = v30Page("dn", "Date night 🎲", `<button class="icon" id="dnList" aria-label="All ideas">📋</button><button class="icon" id="dnNew" aria-label="Add an idea">＋</button>`); if (!p) return;
+    Object.assign(DN, { page: p.page, cid, st: null, pick: null, spinning: false, tab: "spin" }); Object.assign(PF, { st: null, busy: false, finding: false, one: !!store.get("pone", false) });
+    $("#dnList", p.page).onclick = () => DN.st && dnIdeas();
+    $("#dnNew", p.page).onclick = () => DN.st && dnForm();
+    const stop = new MutationObserver(() => { if (!p.page.isConnected) { DN.page = null; stop.disconnect(); } }); stop.observe(document.body, { childList: true });
+    await dnLoad();
+    try { const ps = await api(`/api/places/${cid}`); PF.st = ps; if (ps.round && DN.page === p.page && pfNext(ps.round)) { DN.tab = "place"; pfPaint(); } } catch { }  // a search is on: go straight to the cards
+  }
+  async function dnLoad() {
+    const page = DN.page; if (!page) return;
+    try { DN.st = await api(`/api/dates/${DN.cid}`); } catch (x) { if (!DN.st) $("#v30Body", page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (DN.page === page && !DN.spinning && DN.tab !== "place") dnPaint();
+  }
+  const dnPool = () => DN.st.ideas.filter((i) => !i.done && (DN.mode === "any" || i.mode === DN.mode) && (!DN.bud.size || DN.bud.has(i.budget)));
+  function dnPaint() {
+    const st = DN.st, page = DN.page, body = $("#v30Body", page); if (!st || !body) return;
+    if (DN.tab === "place") return pfPaint();
+    const left = st.ideas.filter((i) => !i.done).length, did = st.ideas.length - left;
+    body.innerHTML = dnTabs() + `<div class="dn-filters"><div class="tseg" id="dnMode">${[["any", "Anything"], ["in", "🛋️ Stay in"], ["out", "🚶 Go out"]].map(([k, n]) => `<button data-m="${k}" class="${DN.mode === k ? "on" : ""}">${n}</button>`).join("")}</div>
+      <div class="bk-cats" id="dnBud">${DN_BUD.map((n, i) => `<button data-b="${i}" class="${DN.bud.has(i) ? "on" : ""}">${n}</button>`).join("")}</div></div>
+      <div class="dn-stage"><div class="dn-ptr"></div><svg class="dn-wheel" viewBox="-100 -100 200 200" aria-hidden="true"><g id="dnRot"></g></svg><button class="dn-go" id="dnSpin" aria-label="Spin the wheel">SPIN</button></div>
+      <div class="dn-res" id="dnRes"></div><p class="dn-foot">${left} ideas on the wheel · ${did} done</p>`;
+    $$("#dnMode button", body).forEach((b) => b.onclick = () => { DN.mode = b.dataset.m; DN.pick = null; dnPaint(); });
+    $$("#dnBud button", body).forEach((b) => b.onclick = () => { const v = +b.dataset.b; DN.bud.has(v) ? DN.bud.delete(v) : DN.bud.add(v); DN.pick = null; dnPaint(); });
+    $("#dnSpin", body).onclick = dnSpin; dnBindTabs(body);
+    dnWheel(dnWheelItems());
+    dnShow();
+  }
+  function dnWheelItems(winner, at) {  // 8 slices of the current pool (the winner sits in slice `at`)
+    const pool = dnPool(), n = 8, out = [];
+    for (let i = 0; i < n; i++) out.push(pool.length ? pool[(i * 7 + (DN.seed || 0)) % pool.length] : null);
+    if (winner) out[at] = winner;
+    return out;
+  }
+  function dnWheel(items) {
+    const g = $("#dnRot", DN.page); if (!g) return;
+    const n = items.length, s = 360 / n, P = (deg, r) => [(r * Math.sin(deg * Math.PI / 180)).toFixed(2), (-r * Math.cos(deg * Math.PI / 180)).toFixed(2)];
+    g.innerHTML = items.map((it, i) => {
+      const [x0, y0] = P(i * s, 96), [x1, y1] = P((i + 1) * s, 96), [tx, ty] = P(i * s + s / 2, 66);
+      return `<path d="M0 0L${x0} ${y0}A96 96 0 0 1 ${x1} ${y1}Z" style="fill:hsl(${(i * 47 + 10) % 360} 70% ${i % 2 ? 66 : 74}% / .78)" stroke="rgba(255,255,255,.55)" stroke-width="1"/><text x="${tx}" y="${ty}" text-anchor="middle" dominant-baseline="central" font-size="21" transform="rotate(${i * s + s / 2} ${tx} ${ty})">${it ? esc(it.emoji) : "·"}</text>`;
+    }).join("");
+    g.style.transition = "none"; g.style.transform = `rotate(${DN.rot}deg)`;
+  }
+  function dnSpin() {
+    if (DN.spinning) return;
+    const pool = dnPool(); if (!pool.length) { toast(DN.st.ideas.some((i) => !i.done) ? "Nothing matches those filters. Loosen one." : "You've done them all! Add a few more ideas ＋"); return; }
+    DN.spinning = true; DN.pick = null; $("#dnRes", DN.page).innerHTML = ""; $("#dnSpin", DN.page).disabled = true;
+    const win = pool[Math.floor(Math.random() * pool.length)], at = Math.floor(Math.random() * 8);
+    DN.seed = Math.floor(Math.random() * 97);
+    const rest = dnWheelItems(win, at).map((it, i) => i === at ? win : (it && it.key === win.key ? pool[(pool.indexOf(win) + 1 + i) % pool.length] : it));
+    dnWheel(rest);
+    const g = $("#dnRot", DN.page), s = 45, jit = (Math.random() - .5) * s * .6;
+    const target = (360 - (at * s + s / 2 + jit) + 720) % 360, cur = ((DN.rot % 360) + 360) % 360, delta = (target - cur + 360) % 360;
+    DN.rot += 360 * (reduceMotion() ? 0 : 5) + delta; haptic(10);
+    const done = () => { DN.spinning = false; DN.pick = win; const sp = $("#dnSpin", DN.page); if (sp) sp.disabled = false; haptic([14, 40, 20]); dnShow(true); };
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (reduceMotion()) { g.style.transition = "none"; g.style.transform = `rotate(${DN.rot}deg)`; return done(); }
+      g.style.transition = "transform 4.2s cubic-bezier(.12,.62,.08,1)"; g.style.transform = `rotate(${DN.rot}deg)`;
+      setTimeout(done, 4300);
+    }));
+  }
+  function dnShow(burst) {
+    const box = DN.page && $("#dnRes", DN.page), it = DN.pick; if (!box) return;
+    if (!it) { box.innerHTML = ""; return; }
+    box.innerHTML = `<div class="dn-card"><i>${esc(it.emoji)}</i><b>${esc(it.title)}</b><small>${it.mode === "in" ? "Stay in" : "Go out"} · ${DN_BUD[it.budget]}${it.custom ? " · yours" : ""}</small>
+      <div class="bk-acts"><button class="pi-yes" id="dnDid">We did it!</button><button class="sbtn" id="dnAgain">Spin again</button></div></div>`;
+    $("#dnAgain", box).onclick = dnSpin; $("#dnDid", box).onclick = () => dnDone(it);
+    if (burst) { burstAt(box, it.emoji, 6); box.scrollIntoView({ block: "nearest", behavior: reduceMotion() ? "auto" : "smooth" }); }
+  }
+  function dnDone(it) {
+    const s = pgSheet(`<h3>${esc(it.emoji)} ${esc(it.title)}</h3><p class="bk-sub">Nice! Want to keep it somewhere?</p>
+      <label class="dn-chk"><input type="checkbox" id="ddB"><span>Add to our bucket list as done</span></label>
+      <label class="dn-chk"><input type="checkbox" id="ddC"><span>Post it in our chat</span></label>
+      <div class="kc-act"><button class="pi-yes" id="ddOk">We did it!</button></div>`);
+    $("#ddOk", s).onclick = async () => {
+      try { await api(`/api/dates/${DN.cid}/done`, { body: { key: it.key, bucket: $("#ddB", s).checked, chat: $("#ddC", s).checked } }); s.remove(); DN.pick = null; haptic([12, 40, 18]); toast("Date night done 💛"); await dnLoad(); if (DN.page) { burstAt($("#v30Body", DN.page), "💛", 8); if (H.cid) pairLoad(); } }
+      catch (x) { toast(x.message); }
+    };
+  }
+  function dnForm() {
+    let mode = "in", bud = 0;
+    const s = pgSheet(`<h3>Add a date idea</h3><input id="diT" maxlength="120" placeholder="What should we do?" autocomplete="off">
+      <input id="diE" maxlength="4" placeholder="Emoji (optional)" autocomplete="off" style="width:100%;box-sizing:border-box">
+      <div class="tseg" id="diM"><button data-m="in" class="on">🛋️ Stay in</button><button data-m="out">🚶 Go out</button></div>
+      <div class="tseg" id="diB">${DN_BUD.map((n, i) => `<button data-b="${i}" class="${i ? "" : "on"}">${n}</button>`).join("")}</div>
+      <div class="kc-act"><button class="pi-yes" id="diOk">Add</button></div>`);
+    $$("#diM button", s).forEach((b) => b.onclick = () => { mode = b.dataset.m; $$("#diM button", s).forEach((x) => x.classList.toggle("on", x === b)); });
+    $$("#diB button", s).forEach((b) => b.onclick = () => { bud = +b.dataset.b; $$("#diB button", s).forEach((x) => x.classList.toggle("on", x === b)); });
+    setTimeout(() => $("#diT", s).focus(), 250);
+    $("#diOk", s).onclick = async () => {
+      const title = $("#diT", s).value.trim(); if (!title) { $("#diT", s).focus(); return; }
+      try { await api(`/api/dates/${DN.cid}/idea`, { body: { title, mode, budget: bud, emoji: $("#diE", s).value } }); s.remove(); toast("Added to the wheel 🎲"); dnLoad(); }
+      catch (x) { toast(x.message); }
+    };
+  }
+  function dnIdeas() {
+    let f = "todo";
+    const s = pgSheet(`<h3>All the ideas</h3><div class="tseg" id="dlT"><button data-f="todo" class="on">To do</button><button data-f="done">Done</button><button data-f="mine">Ours</button></div><div class="bk-ideas dn-list" id="dlL"></div>`);
+    const paint = () => {
+      const rows = DN.st.ideas.filter((i) => f === "done" ? i.done : f === "mine" ? i.custom : !i.done).sort((a, b) => f === "done" ? b.done_at - a.done_at : 0);
+      $("#dlL", s).innerHTML = rows.length ? rows.map((i) => `<div class="dn-row"><i>${esc(i.emoji)}</i><span>${esc(i.title)}<small>${i.mode === "in" ? "Stay in" : "Go out"} · ${DN_BUD[i.budget]}${i.done ? " · done " + esc(v30Day(i.done_at)) : ""}</small></span>${i.done ? `<button data-u="${i.key}" aria-label="Not done after all">↩</button>` : ""}${i.custom ? `<button data-d="${i.id}" aria-label="Remove idea">×</button>` : ""}</div>`).join("") : `<div class="hint">Nothing here.</div>`;
+      $$("[data-u]", s).forEach((b) => b.onclick = async () => { try { await api(`/api/dates/${DN.cid}/undo`, { body: { key: b.dataset.u } }); await dnLoad(); paint(); } catch (x) { toast(x.message); } });
+      $$("[data-d]", s).forEach((b) => b.onclick = async () => { if (!confirm("Remove this idea?")) return; try { await api(`/api/dates/${DN.cid}/idea/${b.dataset.d}`, { method: "DELETE" }); await dnLoad(); paint(); } catch (x) { toast(x.message); } });
+    };
+    $$("#dlT button", s).forEach((b) => b.onclick = () => { f = b.dataset.f; $$("#dlT button", s).forEach((x) => x.classList.toggle("on", x === b)); paint(); });
+    paint();
+  }
+
+  // ---- find a place: real places near you (OpenStreetMap, looked up by the server), you each swipe, a place you both like is a match
+  const PF = { st: null, kind: "lunch", radius: 3000, one: false, busy: false, finding: false, seenMatch: new Set() };
+  const pfDist = (m) => m < 1000 ? Math.max(10, Math.round(m / 10) * 10) + " m" : (m / 1000).toFixed(m < 10000 ? 1 : 0) + " km";
+  function mapUrl(x) { return `https://maps.apple.com/?${x.name ? "q=" + encodeURIComponent(x.name) + "&" : ""}ll=${+x.lat},${+x.lon}`; }  // also used by location messages in the chat, so hoisted
+  const pfName = (id) => (PF.st && PF.st.names[id]) || "They";
+  const pfOther = () => PF.st ? +Object.keys(PF.st.names).find((k) => +k !== PF.st.me) : 0;
+  const dnTabs = () => `<div class="tseg dn-tabs" id="dnTab"><button data-t="spin" class="${DN.tab !== "place" ? "on" : ""}">🎲 Spin an idea</button><button data-t="place" class="${DN.tab === "place" ? "on" : ""}">📍 Find a place</button></div>`;
+  function dnBindTabs(body) {
+    $$("#dnTab button", body).forEach((b) => b.onclick = () => { if (DN.spinning) return; DN.tab = b.dataset.t; haptic([6]); DN.tab === "place" ? pfLoad() : dnPaint(); });
+    ["#dnList", "#dnNew"].forEach((q) => { const el = DN.page && $(q, DN.page); if (el) el.style.visibility = DN.tab === "place" ? "hidden" : ""; });
+  }
+  async function pfLoad() {
+    const page = DN.page; if (!page) return;
+    try { PF.st = await api(`/api/places/${DN.cid}`); } catch (x) { if (DN.tab === "place" && !PF.st) $("#v30Body", page).innerHTML = dnTabs() + `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (DN.page === page && DN.tab === "place") pfPaint();
+  }
+  function pfNext(r) {  // the card to swipe now: two phones, the first I haven't swiped; one phone, the first either of us hasn't
+    return r.places.find((x) => r.one ? (r.mine[x.id] === undefined || (r.theirs || {})[x.id] === undefined) : r.mine[x.id] === undefined);
+  }
+  function pfCard(x) {
+    return `<div class="pf-card" id="pfCard"><b>${esc(x.name)}</b><small>${esc([x.what, pfDist(x.dist) + " away"].filter(Boolean).join(" · "))}</small>
+      ${x.hours ? `<small class="pf-hours">🕒 ${esc(x.hours)}</small>` : ""}${x.addr ? `<small>${esc(x.addr)}</small>` : ""}
+      <a class="pf-map" href="${esc(mapUrl(x))}" target="_blank" rel="noopener noreferrer">Map ↗</a></div>`;
+  }
+  function pfPaint() {
+    const st = PF.st, body = DN.page && $("#v30Body", DN.page); if (!st || !body) return;
+    const r = st.round, me = st.me, o = pfOther();
+    let h = dnTabs();
+    if (PF.finding) {
+      h += `<div class="pf-wait"><i>🗺️</i><b>Looking around you…</b><small>The free map can take up to a minute the first time. Later searches in the same area are instant.</small></div>`;
+    } else if (!r) {
+      h += `<p class="bk-sub pf-intro">Find somewhere real nearby. You both swipe, and a place you both like is a match 💞</p>
+        <div class="pf-kinds" id="pfKinds">${st.kinds.map((k) => `<button data-k="${k.id}" class="${PF.kind === k.id ? "on" : ""}"><i>${k.emoji}</i><span>${esc(k.label)}</span></button>`).join("")}</div>
+        <div class="tseg" id="pfR">${st.radii.map((m) => `<button data-r="${m}" class="${PF.radius === m ? "on" : ""}">${m / 1000} km</button>`).join("")}</div>
+        <label class="swrow kc-mode"><span><b>Together on one phone</b><small>Pick for both of you on this screen.</small></span><input type="checkbox" class="swtog" id="pfOne" ${PF.one ? "checked" : ""}></label>
+        <button class="pi-yes kc-draw" id="pfGo">Find places near me</button>
+        <small class="hm-hint pf-note">Uses this phone's location once, to search around you. Places come from OpenStreetMap.</small>`;
+    } else {
+      const x = pfNext(r), done = r.places.filter((p) => r.mine[p.id] !== undefined).length;
+      h += `<div class="pf-head"><span>${r.emoji} ${esc(r.label)} · within ${r.radius / 1000} km</span><button class="sbtn" id="pfNew">New search</button></div>`;
+      if (r.matches.length) h += `<div class="pf-matches"><h4>💞 ${r.matches.length === 1 ? "A match" : r.matches.length + " matches"}</h4>${r.matches.map((id) => { const m = r.places.find((p) => p.id === id); return m ? `<button class="pf-m" data-m="${esc(id)}"><b>${esc(m.name)}</b><small>${esc([m.what, pfDist(m.dist)].filter(Boolean).join(" · "))}</small><em>›</em></button>` : ""; }).join("")}</div>`;
+      if (x) {
+        h += pfCard(x);
+        h += r.one
+          ? `<div class="pf-both"><button class="sbtn" data-v="00">✕ Neither</button><button class="sbtn" data-v="10">${esc(pfName(me))} only</button><button class="sbtn" data-v="01">${esc(pfName(o))} only</button><button class="pi-yes" data-v="11">💞 Both</button></div>`
+          : `<div class="kc-rate pf-rate"><button class="kc-r no" id="pfNo" aria-label="Not this one">✕</button><button class="kc-r yes" id="pfYes" aria-label="I'd go">♥</button></div>
+             <small class="hm-hint pf-note">${done + 1} of ${r.places.length} · ${esc(pfName(o))} has swiped ${r.their_count} · swipe the card too</small>`;
+      } else {
+        h += `<div class="pf-wait"><i>${r.matches.length ? "💞" : "🤷"}</i><b>${r.one ? "That's every place." : "You've swiped them all."}</b><small>${r.one ? (r.matches.length ? "Tap a match to see it on the map." : "No place you both liked this time. Try another kind or a wider distance.")
+          : r.their_count < r.places.length ? `${esc(pfName(o))} has swiped ${r.their_count} of ${r.places.length}. Matches show up here as they go.` : r.matches.length ? "Tap a match to see it on the map." : "No place you both liked this time. Try another kind or a wider distance."}</small></div>`;
+      }
+    }
+    body.innerHTML = h; dnBindTabs(body);
+    $$("#pfKinds button", body).forEach((b) => b.onclick = () => { PF.kind = b.dataset.k; haptic([6]); $$("#pfKinds button", body).forEach((x) => x.classList.toggle("on", x === b)); });
+    $$("#pfR button", body).forEach((b) => b.onclick = () => { PF.radius = +b.dataset.r; $$("#pfR button", body).forEach((x) => x.classList.toggle("on", x === b)); });
+    const one = $("#pfOne", body); if (one) one.onchange = () => { PF.one = one.checked; store.set("pone", PF.one); };
+    const go = $("#pfGo", body); if (go) go.onclick = pfStart;
+    const nw = $("#pfNew", body); if (nw) nw.onclick = async () => { try { PF.st = await api(`/api/places/${DN.cid}/close`, { body: {} }); pfPaint(); } catch (x) { toast(x.message); } };
+    $$(".pf-m", body).forEach((b) => b.onclick = () => pfMatch(b.dataset.m));
+    if (r && !PF.finding) {
+      const x = pfNext(r); if (!x) return;
+      const y = $("#pfYes", body), n = $("#pfNo", body);
+      if (y) y.onclick = () => pfVote(x, true); if (n) n.onclick = () => pfVote(x, false);
+      $$(".pf-both button", body).forEach((b) => b.onclick = () => pfVote(x, b.dataset.v[0] === "1", b.dataset.v[1] === "1"));
+      const card = $("#pfCard", body); let x0 = null, y0 = 0;
+      card.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
+      card.addEventListener("touchmove", (e) => { if (x0 === null) return; const dx = e.touches[0].clientX - x0; if (Math.abs(dx) > Math.abs(e.touches[0].clientY - y0)) card.style.transform = `translateX(${dx}px) rotate(${dx / 18}deg)`; }, { passive: true });
+      card.addEventListener("touchend", (e) => {
+        if (x0 === null) return; const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0; x0 = null;
+        if (Math.abs(dx) < 70 || Math.abs(dy) > Math.abs(dx) || r.one) { card.style.transform = ""; return; }
+        e.stopPropagation(); card.classList.add(dx > 0 ? "out-r" : "out-l"); setTimeout(() => pfVote(x, dx > 0), 160);
+      });
+    }
+  }
+  function pfStart() {
+    if (PF.busy) return;
+    if (!navigator.geolocation) return toast("This phone can't share its location");
+    PF.busy = true; PF.finding = true; pfPaint();
+    const fail = (msg) => { PF.busy = false; PF.finding = false; pfPaint(); toast(msg); };
+    navigator.geolocation.getCurrentPosition(async (p) => {
+      try { PF.st = await api(`/api/places/${DN.cid}/start`, { body: { kind: PF.kind, radius: PF.radius, one: PF.one, lat: p.coords.latitude, lon: p.coords.longitude }, timeout: 170000 }); PF.busy = false; PF.finding = false; haptic([10, 30, 10]); pfPaint(); }
+      catch (x) { fail(x.message); }
+    }, (e) => fail(e.code === 1 ? "Location is off for A.F.R.A. Allow it in Settings to search nearby." : "Couldn't get your location. Try again outside or by a window."), { enableHighAccuracy: false, maximumAge: 300000, timeout: 20000 });
+  }
+  async function pfVote(x, yes, theirYes) {
+    const r = PF.st && PF.st.round; if (!r || PF.busy) return;
+    PF.busy = true; haptic([yes ? 12 : 6]);
+    try {
+      let s = await api(`/api/places/${DN.cid}/vote`, { body: { round: r.id, pid: x.id, yes } });
+      if (r.one) { const s2 = await api(`/api/places/${DN.cid}/vote`, { body: { round: r.id, pid: x.id, yes: !!theirYes, for: pfOther() } }); if (s.match) s2.match = s.match; s = s2; }
+      PF.st = s; PF.busy = false; pfPaint();
+      if (s.match) pfMatch(s.match, true);
+    } catch (x2) { PF.busy = false; toast(x2.message); pfLoad(); }
+  }
+  function pfMatch(pid, fresh) {
+    const r = PF.st && PF.st.round, m = r && r.places.find((p) => p.id === pid); if (!m) return;
+    PF.seenMatch.add(r.id + ":" + pid);
+    if (PF.sheet && PF.sheet.isConnected) PF.sheet.remove();
+    const s = PF.sheet = pgSheet(`<div class="pf-match"><i>💞</i><h3>${fresh ? "It's a match!" : "You both liked"}</h3><b>${esc(m.name)}</b><small>${esc([m.what, pfDist(m.dist) + " away"].filter(Boolean).join(" · "))}</small>
+      ${m.hours ? `<small>🕒 ${esc(m.hours)}</small>` : ""}<div class="bk-acts"><a class="sbtn pf-map" href="${esc(mapUrl(m))}" target="_blank" rel="noopener noreferrer">Open in Maps</a><button class="pi-yes" id="pfSend">Send to our chat</button></div></div>`);
+    if (fresh) { haptic([15, 40, 15, 40, 20]); setTimeout(() => burstAt($(".pf-match", s), "💞", 10), 200); }
+    $("#pfSend", s).onclick = async () => {
+      try { await api(`/api/convs/${PF.st.conv}/messages`, { body: { kind: "location", text: `📍 ${r.label}: ${m.name}`, attachment: { lat: m.lat, lon: m.lon, acc: 0, name: m.name }, client_id: "pf" + r.id + m.id } }); s.remove(); toast("Sent to your chat 💌"); }
+      catch (x) { toast(x.message); }
+    };
+  }
+  function onPlaceEvent(e) {
+    const mine = e.by === S.me.id, open = DN.page && DN.tab === "place" && PF.st && PF.st.conv === e.conv;
+    if (open && !PF.busy) pfLoad().then(() => { if (e.what === "match" && !mine && PF.st && PF.st.round && !PF.seenMatch.has(PF.st.round.id + ":" + e.pid)) pfMatch(e.pid, true); });
+    if (mine || !isVisible() || open) return;
+    const u = userById(e.by), who = u ? dn(u).split(" ")[0] : "They";
+    if (e.what === "start" && !e.one) toast(`${who} is looking for a place 📍 Open Date night to swipe`);
+    if (e.what === "match") toast(`It's a match: ${e.name} 💞`);
+  }
+  function onDateEvent(e) { if (DN.page && DN.st && e.conv === DN.st.conv) dnLoad(); if (!DN.page && H.cid) pairLoad(); }
+
+  // ---- gratitude jar
+  const GJ = { page: null, cid: 0, st: null, fresh: 0 };
+  async function jarOpen(cid) {
+    const p = v30Page("gj", "Gratitude jar 🫙", `<button class="icon" id="gjPull" aria-label="Read a note">🎁</button>`); if (!p) return;
+    Object.assign(GJ, { page: p.page, cid, st: null, fresh: 0 });
+    $("#gjPull", p.page).onclick = gjPull;
+    const stop = new MutationObserver(() => { if (!p.page.isConnected) { GJ.page = null; stop.disconnect(); } }); stop.observe(document.body, { childList: true });
+    await gjLoad();
+  }
+  async function gjLoad() {
+    const page = GJ.page; if (!page) return;
+    try { GJ.st = await api(`/api/jar/${GJ.cid}`); } catch (x) { if (!GJ.st) $("#v30Body", page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (GJ.page === page) gjPaint(!GJ.body);
+    if (H.cid) pairLoad();
+  }
+  const gjWho = (id) => id === S.me.id ? "You" : (GJ.st && (S.nicks[id] || GJ.st.names[String(id)])) || "They";
+  function gjPaint(first) {
+    const st = GJ.st, page = GJ.page; if (!st || !page) return;
+    const body = $("#v30Body", page), keep = $("#gjText", page) ? $("#gjText", page).value : "";
+    const n = st.count, pieces = Math.min(n, 40), earn = st.coins && st.today < st.cap;
+    body.innerHTML = `<div class="gj-top"><div class="gj-jar" aria-label="A jar with ${n} notes"><div class="gj-lid"></div><div class="gj-glass"><div class="gj-notes">${Array.from({ length: pieces }, (_, i) => `<i class="${GJ.fresh && i === 0 ? "drop" : ""}" style="--r:${((i * 37) % 50) - 25}deg;--h:${(i * 53 + 20) % 360}"></i>`).join("")}</div></div></div>
+      <div class="gj-count"><b>${n}</b><small>${n === 1 ? "note" : "notes"} in the jar</small></div></div>
+      <div class="gj-add"><textarea id="gjText" rows="2" maxlength="280" placeholder="Something you're grateful for…">${esc(keep)}</textarea>
+      <div class="dq-foot"><small class="hm-hint">${earn ? "+1 ♥ for " + esc(st.pet_name || "the pet") + " for each note" : "Both of you can read every note"}</small><button class="pi-yes" id="gjAdd">Add to the jar</button></div></div>
+      <h4 class="bk-h">Notes</h4><div id="gjList">${st.items.length ? st.items.map((i) => `<div class="gj-n ${i.mine ? "mine" : ""}"><p>${esc(i.body)}</p><small>${esc(gjWho(i.author))} · ${esc(v30Day(i.created))}${i.read ? " · read aloud 🐾" : ""}</small>${i.mine ? `<button data-d="${i.id}" aria-label="Remove my note">×</button>` : ""}</div>`).join("") : `<div class="hint">The jar is empty.<br>Write the first little thank you 💛</div>`}</div>`;
+    GJ.fresh = 0;
+    const tx = $("#gjText", body), add = $("#gjAdd", body);
+    add.onclick = async () => {
+      const v = tx.value.trim(); if (!v) { tx.focus(); return; }
+      add.disabled = true;
+      try {
+        const r = await api(`/api/jar/${GJ.cid}`, { body: { text: v } }); GJ.fresh = 1; tx.value = ""; haptic([8, 30, 12]);
+        await gjLoad(); const jar = $(".gj-jar", GJ.page); if (jar) burstAt(jar, "💛", 5);
+        toast(r.coins ? `In the jar! +${r.coins} ♥ for the pet` : "In the jar 💛");
+      } catch (x) { toast(x.message); add.disabled = false; }
+    };
+    tx.onkeydown = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) add.click(); };
+    $$("#gjList [data-d]", body).forEach((b) => b.onclick = async () => { if (!confirm("Take this note out of the jar?")) return; try { await api(`/api/jar/${GJ.cid}/${b.dataset.d}`, { method: "DELETE" }); gjLoad(); } catch (x) { toast(x.message); } });
+  }
+  function gjPull() {
+    const st = GJ.st; if (!st) return;
+    if (!st.items.length) return toast("Nothing in the jar yet");
+    const it = st.items[Math.floor(Math.random() * st.items.length)]; haptic(10);
+    const s = pgSheet(`<div class="gj-pull"><i>🫙</i><p>“${esc(it.body)}”</p><small>${esc(gjWho(it.author))} · ${esc(v30Day(it.created))}</small></div><div class="kc-act"><button class="sbtn" id="gpAgain">Another one</button><button class="pi-yes" id="gpOk">Lovely</button></div>`);
+    $("#gpOk", s).onclick = () => s.remove(); $("#gpAgain", s).onclick = () => { s.remove(); gjPull(); };
+  }
+  function onJarEvent(e) {
+    if (GJ.page && GJ.st && e.conv === GJ.st.conv) { if (e.what === "new" && e.by !== S.me.id) GJ.fresh = 1; gjLoad(); }
+    else if (e.what === "new" && e.by !== S.me.id && !GJ.page && isVisible()) toast("🫙 A new note in your gratitude jar");
+    if (!GJ.page && H.cid) pairLoad();
+  }
+
+  // ---- private gift wishlist (your ideas for the other person; the server never sends them to anyone else)
+  const WL = { page: null, cid: 0, st: null };
+  async function wishOpen(cid) {
+    const p = v30Page("wl", "Gift ideas 🎁", `<button class="icon" id="wlNew" aria-label="Add a gift idea">＋</button>`); if (!p) return;
+    Object.assign(WL, { page: p.page, cid, st: null });
+    $("#wlNew", p.page).onclick = () => WL.st && wishForm(null);
+    const stop = new MutationObserver(() => { if (!p.page.isConnected) { WL.page = null; WL.st = null; stop.disconnect(); } }); stop.observe(document.body, { childList: true });
+    await wlLoad();
+  }
+  async function wlLoad() {
+    const page = WL.page; if (!page) return;
+    try { WL.st = await api(`/api/wishlist/${WL.cid}`); } catch (x) { if (!WL.st) $("#v30Body", page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (WL.page === page) wlPaint();
+    if (H.cid) pairLoad();
+  }
+  const wlHost = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (_) { return ""; } };
+  function wlPaint() {
+    const st = WL.st, page = WL.page; if (!st || !page) return;
+    const who = esc(st.for_name || "them"), open = st.items.filter((i) => !i.bought), given = st.items.filter((i) => i.bought);
+    const row = (i) => `<div class="wl-i ${i.bought ? "given" : ""}"><button class="bk-tick ${i.bought ? "on" : ""}" data-b="${i.id}" aria-label="${i.bought ? "Mark as not bought" : "Mark as bought"}"></button>
+      <button class="wl-main" data-id="${i.id}">${i.photo ? `<img src="${fileUrl(i.photo)}" alt="" loading="lazy">` : ""}<span><b>${esc(i.title)}</b>${i.price ? `<em>${esc(i.price)}</em>` : ""}${i.note ? `<small>${esc(i.note)}</small>` : ""}</span></button>
+      ${i.link ? `<a class="wl-link" href="${esc(i.link)}" target="_blank" rel="noopener noreferrer" aria-label="Open link">${esc(wlHost(i.link)) || "link"} ↗</a>` : ""}</div>`;
+    $("#v30Body", page).innerHTML = `<p class="wl-lock">🔒 Only you can see this list. ${who} never will, and it isn't in any album or export.</p>
+      ${open.length ? `<h4 class="bk-h">Ideas for ${who} <em>${open.length}</em></h4>${open.map(row).join("")}` : ""}
+      ${given.length ? `<h4 class="bk-h">Bought <em>${given.length}</em></h4>${given.map(row).join("")}` : ""}
+      ${st.items.length ? "" : `<div class="hint">Nothing saved yet.<br>When ${who} mentions something they like, note it here. Before a birthday or your anniversary we'll nudge you.</div>`}`;
+    const body = $("#v30Body", page);
+    $$("[data-b]", body).forEach((b) => b.onclick = async () => {
+      const it = st.items.find((x) => x.id === +b.dataset.b); if (!it) return; haptic(8);
+      try { await api(`/api/wishlist/${WL.cid}/${it.id}/bought`, { body: { bought: !it.bought } }); wlLoad(); } catch (x) { toast(x.message); }
+    });
+    $$(".wl-main", body).forEach((b) => b.onclick = () => wishForm(st.items.find((x) => x.id === +b.dataset.id)));
+  }
+  function wishForm(it) {
+    let photo = it ? it.photo : "", busy = false;
+    const s = pgSheet(`<h3>${it ? "Edit gift idea" : "A gift idea for " + esc(WL.st.for_name || "them")}</h3>
+      <input id="wfT" maxlength="120" placeholder="What is it?" value="${esc(it ? it.title : "")}" autocomplete="off">
+      <input id="wfL" maxlength="500" placeholder="Link (optional)" inputmode="url" value="${esc(it ? it.link : "")}" autocomplete="off">
+      <input id="wfP" maxlength="30" placeholder="Price (optional)" value="${esc(it ? it.price : "")}" autocomplete="off">
+      <textarea id="wfN" rows="2" maxlength="500" placeholder="A note: size, colour, where you saw it…">${esc(it ? it.note : "")}</textarea>
+      <div class="wl-ph" id="wfPh"></div><input type="file" id="wfF" accept="image/*" hidden>
+      <div class="kc-act">${it ? `<button class="sbtn" id="wfDel">Delete</button>` : ""}<button class="pi-yes" id="wfOk">${it ? "Save" : "Add"}</button></div>`);
+    const paint = () => {
+      $("#wfPh", s).innerHTML = photo ? `<div class="lc-ph"><img src="${fileUrl(photo)}" alt=""><button id="wfRm" aria-label="Remove photo">×</button></div>` : `<button class="sbtn" id="wfAdd">📷 Add a photo</button>`;
+      const rm = $("#wfRm", s); if (rm) rm.onclick = () => { photo = ""; paint(); };
+      const ad = $("#wfAdd", s); if (ad) ad.onclick = () => $("#wfF", s).click();
+    };
+    $("#wfF", s).onchange = async (e) => {
+      const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+      const blob = await editPhoto(f, { title: "Add a photo", presets: true }); if (!blob) return;
+      try { busy = true; toast("Adding photo…"); const up = await upload(new File([blob], "gift.jpg", { type: "image/jpeg" })); photo = up.id; paint(); } catch (x) { toast(x.message); } finally { busy = false; }
+    };
+    paint(); if (!it) setTimeout(() => $("#wfT", s).focus(), 250);
+    $("#wfOk", s).onclick = async () => {
+      const title = $("#wfT", s).value.trim(); if (!title) { $("#wfT", s).focus(); return; }
+      if (busy) return toast("One moment, the photo is still going up");
+      const body = { title, link: $("#wfL", s).value, price: $("#wfP", s).value, note: $("#wfN", s).value, photo };
+      try { await api(it ? `/api/wishlist/${WL.cid}/${it.id}` : `/api/wishlist/${WL.cid}`, { method: it ? "PUT" : "POST", body }); s.remove(); toast(it ? "Saved" : "Saved 🎁"); wlLoad(); }
+      catch (x) { toast(x.message); }
+    };
+    if (it) $("#wfDel", s).onclick = async () => {
+      if (!confirm("Delete this gift idea?")) return;
+      try { await api(`/api/wishlist/${WL.cid}/${it.id}`, { method: "DELETE" }); s.remove(); toast("Deleted"); wlLoad(); } catch (x) { toast(x.message); }
+    };
+  }
+
+  // ---- our month
+  const RC = { page: null, cid: 0, st: null, month: "" };
+  async function recapOpen(cid) {
+    const p = v30Page("rc", "Our month 📅", ""); if (!p) return;
+    Object.assign(RC, { page: p.page, cid, st: null, month: "" });
+    const stop = new MutationObserver(() => { if (!p.page.isConnected) { RC.page = null; stop.disconnect(); } }); stop.observe(document.body, { childList: true });
+    await rcLoad("");
+  }
+  async function rcLoad(month) {
+    const page = RC.page; if (!page) return;
+    try { RC.st = await api(`/api/recap/${RC.cid}` + (month ? `?month=${month}` : "")); RC.month = RC.st.month; } catch (x) { $("#v30Body", page).innerHTML = `<div class="hint">${esc(x.message)}</div>`; return; }
+    if (RC.page === page) rcPaint();
+  }
+  const rcMonthName = (ym, long) => new Date(+ym.slice(0, 4), +ym.slice(5) - 1, 1).toLocaleDateString("en-GB", { month: long ? "long" : "short", year: "numeric" });
+  function rcLines(st) {  // [emoji, big, small]; a stat with no data isn't here at all
+    const s = st.stats, me = String(S.me.id), nm = (id) => id === me ? "you" : (S.nicks[+id] || st.names[id] || "them"), L = [];
+    const two = (o) => Object.keys(o).filter((k) => /^\d+$/.test(k)).map((k) => `${nm(k)} ${o[k].toLocaleString()}`).join(" · ");
+    if (s.messages) L.push(["💬", s.messages.total.toLocaleString() + " messages", two(s.messages)]);
+    if (s.photos) L.push(["📷", s.photos + (s.photos === 1 ? " photo" : " photos"), "shared with each other"]);
+    if (s.videos) L.push(["🎬", s.videos + (s.videos === 1 ? " video" : " videos"), "sent your way"]);
+    if (s.voice) L.push(["🎙️", s.voice + (s.voice === 1 ? " voice note" : " voice notes"), "said out loud"]);
+    if (s.top_emoji) L.push([s.top_emoji.emoji, "Your emoji", `used ${s.top_emoji.count} times`]);
+    if (s.busiest) L.push(["📈", bkDay(s.busiest.day).replace(/ \d{4}$/, ""), `busiest day · ${s.busiest.count} messages`]);
+    if (s.streak) L.push(["🔥", s.streak + " days in a row", "longest run of daily chatting"]);
+    if (s.touches) L.push(["🫶", s.touches.total + (s.touches.total === 1 ? " touch" : " touches"), two(s.touches)]);
+    if (s.games) L.push(["🎮", s.games.n + (s.games.n === 1 ? " game" : " games"), "played together"]);
+    if (s.bucket) L.push(["🪣", s.bucket.n + " from the bucket list", s.bucket.titles.join(" · ")]);
+    if (s.letters) L.push(["💌", s.letters + (s.letters === 1 ? " letter" : " letters"), "opened"]);
+    if (s.gratitude) L.push(["🫙", s.gratitude.total + (s.gratitude.total === 1 ? " grateful note" : " grateful notes"), two(s.gratitude)]);
+    if (s.questions) L.push(["💭", s.questions + (s.questions === 1 ? " question" : " questions"), "answered together"]);
+    if (s.pet) L.push(["🐾", s.pet.days ? s.pet.days + (s.pet.days === 1 ? " day" : " days") + " with " + s.pet.name : s.pet.name, s.pet.milestones.length ? s.pet.milestones[0] : "looked after"]);
+    return L;
+  }
+  function rcPaint() {
+    const st = RC.st, page = RC.page; if (!st || !page) return;
+    const L = rcLines(st), ids = Object.keys(st.names), names = ids.map((k) => k === String(S.me.id) ? "You" : S.nicks[+k] || st.names[k]);
+    $("#v30Body", page).innerHTML = `<div class="rc-months">${st.months.map((m) => `<button data-m="${m}" class="${m === st.month ? "on" : ""}">${esc(rcMonthName(m))}</button>`).join("")}</div>
+      ${L.length ? `<div class="rc-card" id="rcCard"><h3>Our month</h3><p class="rc-sub">${esc(rcMonthName(st.month, true))} · ${esc(names.join(" & "))}</p>
+        ${L.map((l) => `<div class="rc-l"><i>${esc(l[0])}</i><span><b>${esc(l[1])}</b><small>${esc(l[2])}</small></span></div>`).join("")}</div>
+        <div class="bk-acts rc-act"><button class="pi-yes" id="rcSave">Save as image</button></div>`
+        : `<div class="hint">Nothing to show for ${esc(rcMonthName(st.month, true))} yet.<br>Pick another month above.</div>`}`;
+    $$(".rc-months button", page).forEach((b) => b.onclick = () => rcLoad(b.dataset.m));
+    const on = $(".rc-months .on", page); if (on) on.scrollIntoView({ inline: "center", block: "nearest" });
+    const sv = $("#rcSave", page); if (sv) sv.onclick = () => rcSave(st, L, names);
+  }
+  function rcSave(st, L, names) {  // drawn here in the browser: nothing leaves the phone
+    const W = 1080, Ht = 1350, cv = document.createElement("canvas"); cv.width = W; cv.height = Ht;
+    const x = cv.getContext("2d"), acc = (getComputedStyle(document.documentElement).getPropertyValue("--accent") || "").trim() || "#ff6f91";
+    const g = x.createLinearGradient(0, 0, W, Ht); g.addColorStop(0, acc); g.addColorStop(1, "#2a1d3c"); x.fillStyle = g; x.fillRect(0, 0, W, Ht);
+    const g2 = x.createRadialGradient(W * .8, 0, 0, W * .8, 0, 700); g2.addColorStop(0, "rgba(255,255,255,.28)"); g2.addColorStop(1, "rgba(255,255,255,0)"); x.fillStyle = g2; x.fillRect(0, 0, W, Ht);
+    const F = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif", fit = (t, w) => { while (t.length > 1 && x.measureText(t).width > w) t = t.slice(0, -2).trimEnd() + "…"; return t; };
+    x.fillStyle = "#fff"; x.textBaseline = "alphabetic";
+    x.font = `800 84px ${F}`; x.fillText("Our month", 80, 150);
+    x.font = `500 42px ${F}`; x.globalAlpha = .88; x.fillText(fit(rcMonthName(st.month, true) + " · " + names.join(" & "), W - 160), 80, 212); x.globalAlpha = 1;
+    const rows = L.slice(0, 8), top = 290, step = Math.min(128, Math.floor((Ht - top - 120) / Math.max(rows.length, 1)));
+    rows.forEach((l, i) => {
+      const y = top + i * step;
+      x.fillStyle = "rgba(255,255,255,.14)"; x.beginPath(); x.roundRect ? x.roundRect(60, y, W - 120, step - 14, 36) : x.rect(60, y, W - 120, step - 14); x.fill();
+      x.fillStyle = "#fff"; x.font = `64px ${F}`; x.fillText(l[0], 92, y + step / 2 + 14);
+      x.font = `700 46px ${F}`; x.fillText(fit(l[1], W - 360), 200, y + step / 2 - 4);
+      x.font = `400 30px ${F}`; x.globalAlpha = .82; x.fillText(fit(l[2], W - 360), 200, y + step / 2 + 36); x.globalAlpha = 1;
+    });
+    x.font = `500 30px ${F}`; x.globalAlpha = .7; x.textAlign = "center"; x.fillText("A.F.R.A chat", W / 2, Ht - 48); x.globalAlpha = 1; x.textAlign = "left";
+    cv.toBlob(async (blob) => {
+      if (!blob) return toast("Couldn't make the image");
+      const file = new File([blob], `our-month-${st.month}.png`, { type: "image/png" });
+      try { if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; } } catch (e) { if (e && e.name === "AbortError") return; }
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); toast("Saved 📅");
+    }, "image/png");
   }
 
   // ---- the memories album
