@@ -2986,7 +2986,7 @@ def cards_bank() -> list:
             for d in data["decks"]:
                 cards = [{"q": str(x["q"]).strip(), "t": "ask" if x.get("t") == "ask" else "both"} for x in d["cards"] if str(x.get("q") or "").strip()]
                 decks.append({"id": str(d["id"]), "name": str(d["name"]), "emoji": str(d.get("emoji") or "🃏"), "minDays": int(d.get("minDays") or 0),
-                              "blurb": str(d.get("blurb") or ""), "locked": str(d.get("locked") or ""), "cards": cards})
+                              "blurb": str(d.get("blurb") or ""), "locked": str(d.get("locked") or ""), "here": bool(d.get("here")), "cards": cards})
             _CARDS.update(mtime=mt, decks=decks)
         except Exception as e:
             print("cards.js not readable:", repr(e)[:200], flush=True)
@@ -3088,6 +3088,8 @@ def _cards_state(c, pr: dict, uid: int) -> dict:
     spicy = _cards_spicy(c, pr)
     decks = []
     for d in cards_bank():
+        if d["here"]:  # things to do side by side: only in the one-phone game, which runs on the phone itself
+            continue
         ok, why = _deck_open(d, days, spicy)
         used, played = _deck_used(c, pr["direct"], d)
         decks.append({"id": d["id"], "name": d["name"], "emoji": d["emoji"], "blurb": d["blurb"], "minDays": d["minDays"], "locked": d["locked"], "open": ok, "why": why,
@@ -3139,7 +3141,7 @@ async def cards_draw(cid: int, body: dict, authorization: str = Header(None)):
         if c.execute("SELECT 1 FROM card_rounds WHERE conv_id=? AND done=0", (pr["direct"],)).fetchone():
             raise ValueError("There's a card on the table already. Answer it or skip it first.")
         d = _deck(str(body.get("deck") or ""))
-        if not d or not d["cards"]:
+        if not d or not d["cards"] or d["here"]:
             raise ValueError("That deck isn't here.")
         ok, why = _deck_open(d, _cards_when(c, pr)[1], _cards_spicy(c, pr))
         if not ok:

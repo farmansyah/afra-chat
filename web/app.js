@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 30;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 31;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -3629,7 +3629,7 @@
   }
 
   // ------------------------------------------------------------------ v25: question cards (the questions live in cards.js, the rounds on the server)
-  const K = { st: null, cid: 0, page: null, deck: "", mode: "normal", edit: false, reveal: 0, just: false, busy: false, flipId: 0, draft: "" };
+  const K = { st: null, cid: 0, page: null, deck: "", mode: "normal", edit: false, reveal: 0, just: false, busy: false, flipId: 0, draft: "", one: false, lc: null };
   const kName = (id) => (K.st && K.st.names[id]) || "They";
   const kOther = () => K.st ? +Object.keys(K.st.names).find((k) => +k !== K.st.me) : 0;
   const kLock = (n) => n >= 365 ? (n % 365 === 0 ? (n === 365 ? "1 year" : n / 365 + " years") : (n / 365).toFixed(1) + " years") : n >= 30 ? Math.round(n / 30) + " months" : n + " days";
@@ -3656,7 +3656,7 @@
     page.innerHTML = `<div class="kc-top"><button class="icon" id="kcBack" aria-label="Back">‹</button><b>Cards 🃏</b><span class="kc-sp"></span><button class="icon" id="kcArch" aria-label="Cards we've played">🗂️</button><button class="icon" id="kcSet" aria-label="Card settings">⚙️</button></div>
       <div class="kc-body" id="kcBody"><div class="hint">Shuffling…</div></div>`;
     document.body.appendChild(page);
-    Object.assign(K, { page, cid, st: null, deck: "", mode: "normal", edit: false, reveal: 0, just: false, busy: false, flipId: 0, draft: "" });
+    Object.assign(K, { page, cid, st: null, deck: "", mode: "normal", edit: false, reveal: 0, just: false, busy: false, flipId: 0, draft: "", one: !!store.get("kone", false), lc: null });
     const close = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); if (K.page === page) K.page = null; setTimeout(() => page.remove(), 200); };
     layer(page, close); $("#kcBack", page).onclick = close;
     $("#kcArch", page).onclick = () => cardsArchive(cid);
@@ -3677,6 +3677,34 @@
     return `<div class="kc-flip ${K.flipId === r.id ? "flipped" : ""}" id="kcFlip"><div class="kc-side back"><i>${r.emoji}</i><small>${esc(r.deck_name)}</small></div>
       <div class="kc-side front"><small>${r.emoji} ${esc(r.deck_name)}${r.mode === "guess" ? " · guess mode" : ""}</small><p>${esc(r.q)}</p></div></div>`;
   }
+  // ---- together on one phone: draw, read it out, next card. Nothing to type and nothing waits on the other phone; this phone remembers what you've seen
+  const kBank = () => typeof CARDS !== "undefined" ? CARDS.decks : [];
+  function kOneDecks() {
+    const card = (d) => (c) => ({ q: c.q, t: c.t, dk: { name: d.name, emoji: d.emoji, here: !!d.here } });
+    const list = K.st.decks.map((d) => ({ ...d, cards: ((kBank().find((x) => x.id === d.id) || {}).cards || []).map(card(d)) }))
+      .concat(kBank().filter((d) => d.here).map((d) => ({ id: d.id, name: d.name, emoji: d.emoji, blurb: d.blurb, open: true, cards: d.cards.map(card(d)) })));
+    const mix = [].concat(...list.filter((d) => d.open).map((d) => d.cards));
+    const seen = new Set(store.get("kseen_" + K.cid, []));
+    return [{ id: "mix", name: "Mix", emoji: "🎲", blurb: "A bit of every deck you've unlocked.", open: true, cards: mix }, ...list].map((d) => ({ ...d, left: d.cards.filter((c) => !seen.has(c.q)).length }));
+  }
+  function kOneDraw() {
+    const d = kOneDecks().find((x) => x.id === K.deck && x.open); if (!d || !d.cards.length) return false;
+    const seen = new Set(store.get("kseen_" + K.cid, []));
+    let pool = d.cards.filter((c) => !seen.has(c.q));
+    if (!pool.length) { d.cards.forEach((c) => seen.delete(c.q)); pool = d.cards; toast("You've seen every card here. Shuffled again 🔀"); }
+    const recent = new Set(K.lc.hist.slice(-6).map((c) => c.q)), fresh = pool.filter((c) => !recent.has(c.q)), from = fresh.length ? fresh : pool;
+    const c = from[Math.floor(Math.random() * from.length)];
+    seen.add(c.q); store.set("kseen_" + K.cid, [...seen].slice(-3000));
+    K.lc.hist.push({ ...c, id: ++K.lc.n }); K.lc.i = K.lc.hist.length - 1; haptic([10]);
+    return true;
+  }
+  const kOneNext = () => { if (!K.lc) return; if (K.lc.i < K.lc.hist.length - 1) K.lc.i++; else if (!kOneDraw()) return; cardsPaint(); };
+  const kOnePrev = () => { if (!K.lc || K.lc.i <= 0) return; K.lc.i--; cardsPaint(); };
+  function kOneTurn(c) {  // take turns: who answers first swaps with every new card
+    if (c.dk.here) return "Do this one together";
+    const me = K.st.me, o = kOther(), a = c.id % 2 ? me : o, b = a === me ? o : me;
+    return c.t === "ask" ? `${esc(kName(b))} asks, ${esc(kName(a))} answers` : `${esc(kName(a))} answers first`;
+  }
   function cardsPaint() {
     const st = K.st, box = K.page && $("#kcBody", K.page); if (!st || !box) return;
     const me = st.me, o = kOther(), on = kName(o), r = st.round;
@@ -3684,7 +3712,16 @@
     let h = "";
     if (st.days === null) h += `<div class="kc-note"><b>When did you get together?</b><small>Decks for longer-together couples open as the days add up.</small><div class="kc-date"><input type="date" id="kcDate" aria-label="Together since"><button class="pi-yes" id="kcDateGo">Save</button></div></div>`;
     if (st.spicy[o] && !st.spicy[me]) h += `<div class="kc-note ask"><span>${esc(on)} wants to unlock Spicier 🌶️</span><button class="pi-yes" id="kcSpOn">Turn on</button></div>`;
-    if (r) {
+    let fid = 0;
+    if (K.one && K.lc && K.lc.show) {
+      const c = K.lc.hist[K.lc.i]; fid = -c.id;
+      h += `<div class="kc-flip ${K.flipId === fid ? "flipped" : ""}" id="kcFlip"><div class="kc-side back"><i>${c.dk.emoji}</i><small>${esc(c.dk.name)}</small></div>
+        <div class="kc-side front"><small>${c.dk.emoji} ${esc(c.dk.name)}</small><p>${esc(c.q)}</p></div></div>
+        <p class="kc-wait ok">${kOneTurn(c)}</p>
+        <div class="kc-act kc-one"><button class="sbtn" id="kcPrev" ${K.lc.i ? "" : "disabled"}>‹ Back</button><button class="pi-yes" id="kcNext">Next card ›</button></div>
+        <small class="hm-hint kc-gain">Card ${K.lc.i + 1} · swipe the card for the next one</small><button class="sbtn kc-stop" id="kcStop">Change deck</button>`;
+    } else if (r && !K.one) {
+      fid = r.id;
       const iAns = r.answerers.includes(me), iGuess = r.guesser === me, mine = r.submitted[me] === true;
       h += kFace(r);
       if (r.phase === "judge") {
@@ -3703,14 +3740,16 @@
             <div class="kc-act">${mine ? `<button class="sbtn" id="kcEdit">Edit</button>` : ""}<button class="sbtn" id="kcSkip">Skip</button></div>`;
         }
       }
-    } else if (last) {
+    } else if (last && !K.one) {
       h += `<div class="kc-qhead"><small>${last.emoji} ${esc(last.deck_name)}</small><p>${esc(last.q)}</p></div>${kAns(last, st.names, me)}${last.mode === "guess" ? kScore() : ""}
         <small class="hm-hint kc-gain">${st.coins ? "+2 ♥ for your pet 🐾" : ""}</small><button class="pi-yes kc-draw" id="kcAgain">Draw another</button>`;
     } else {
-      if (!K.deck || !st.decks.some((d) => d.id === K.deck && d.open)) K.deck = (st.decks.find((d) => d.open) || {}).id || "";
-      h += `<div class="kc-fan" id="kcFan">${st.decks.map((d, i) => `<button class="kc-deck ${d.open ? "" : "locked"} ${d.id === K.deck ? "on" : ""}" data-d="${esc(d.id)}" style="--i:${i}" aria-pressed="${d.id === K.deck}"><i>${d.emoji}</i><b>${esc(d.name)}</b><small>${esc(d.blurb)}</small><em>${d.open ? d.left + " left" : esc(kWhy(d))}</em></button>`).join("")}</div>
+      const decks = K.one ? kOneDecks() : st.decks;
+      if (!K.deck || !decks.some((d) => d.id === K.deck && d.open)) K.deck = (decks.find((d) => d.open) || {}).id || "";
+      h += `<div class="kc-fan" id="kcFan">${decks.map((d, i) => `<button class="kc-deck ${d.open ? "" : "locked"} ${d.id === K.deck ? "on" : ""}" data-d="${esc(d.id)}" style="--i:${i}" aria-pressed="${d.id === K.deck}"><i>${d.emoji}</i><b>${esc(d.name)}</b><small>${esc(d.blurb)}</small><em>${d.open ? d.left + " left" : esc(kWhy(d))}</em></button>`).join("")}</div>
         ${kScore()}
-        <label class="swrow kc-mode"><span><b>Guess mode</b><small>One of you guesses what the other will say</small></span><input type="checkbox" class="swtog" id="kcGuess" ${K.mode === "guess" ? "checked" : ""}></label>
+        <label class="swrow kc-mode"><span><b>Together on one phone</b><small>Read it out, talk, next card. No typing, no waiting.</small></span><input type="checkbox" class="swtog" id="kcOne" ${K.one ? "checked" : ""}></label>
+        ${K.one ? (r ? `<small class="hm-hint">The card you drew on two phones is still waiting there.</small>` : "") : `<label class="swrow kc-mode"><span><b>Guess mode</b><small>One of you guesses what the other will say</small></span><input type="checkbox" class="swtog" id="kcGuess" ${K.mode === "guess" ? "checked" : ""}></label>`}
         <button class="pi-yes kc-draw" id="kcDraw" ${K.deck ? "" : "disabled"}>Draw a card</button>`;
     }
     box.innerHTML = h;
@@ -3721,12 +3760,16 @@
     });
     on_("kcSpOn", async () => { try { K.st = await api(`/api/cards/${K.cid}/spicy`, { method: "PUT", body: { on: true } }); cardsPaint(); toast("Spicier is on for you 🌶️"); } catch (x) { toast(x.message); } });
     $$(".kc-deck", box).forEach((b) => b.onclick = () => {
-      const d = st.decks.find((x) => x.id === b.dataset.d); if (!d) return;
+      const d = (K.one ? kOneDecks() : st.decks).find((x) => x.id === b.dataset.d); if (!d) return;
       if (!d.open) { toast(kWhy(d)); return; }
       K.deck = d.id; haptic([6]); $$(".kc-deck", box).forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", x === b); });
     });
     const g = $("#kcGuess", box); if (g) g.onchange = () => { K.mode = g.checked ? "guess" : "normal"; };
+    const one = $("#kcOne", box); if (one) one.onchange = () => { K.one = one.checked; store.set("kone", K.one); K.deck = ""; cardsPaint(); };
+    on_("kcNext", kOneNext); on_("kcPrev", kOnePrev);
+    on_("kcStop", () => { K.lc.show = false; cardsPaint(); });
     on_("kcDraw", async () => {
+      if (K.one) { K.lc = K.lc || { hist: [], i: -1, n: 0, show: false }; if (kOneDraw()) { K.lc.show = true; cardsPaint(); } return; }
       if (K.busy || !K.deck) return; K.busy = true; K.reveal = 0; K.edit = false; K.draft = "";
       try { K.st = await api(`/api/cards/${K.cid}/draw`, { body: { deck: K.deck, mode: K.mode } }); haptic([10]); }
       catch (x) { toast(x.message); await cardsLoad(); }
@@ -3757,7 +3800,12 @@
     };
     on_("kcYes", () => rate(true)); on_("kcNo", () => rate(false));
     const fl = $("#kcFlip", box);
-    if (fl && !fl.classList.contains("flipped")) { K.flipId = r.id; haptic([8]); setTimeout(() => fl.classList.add("flipped"), 90); }
+    if (fl && !fl.classList.contains("flipped")) { K.flipId = fid; haptic([8]); setTimeout(() => fl.classList.add("flipped"), 90); }
+    if (fl && fid < 0) {  // swipe the card: left for the next one, right to go back
+      let x0 = null, y0 = 0;
+      fl.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, { passive: true });
+      fl.addEventListener("touchend", (e) => { if (x0 === null) return; const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0; x0 = null; if (Math.abs(dx) < 50 || Math.abs(dy) > Math.abs(dx)) return; e.stopPropagation(); if (dx < 0) kOneNext(); else kOnePrev(); });
+    }
     if (K.just && last) { K.just = false; haptic([15, 30, 15]); setTimeout(() => { const t = $(".kc-pair", box); burstAt(t, "💞", 9); burstAt(t, "✨", 6); }, 250); }
   }
   function onCardEvent(e) {
