@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 33;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 34;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -1583,6 +1583,7 @@
     let body;
     if (a.state === "accepted") body = `<div class="pi-big">${a.emoji || "🐾"}</div><b>${esc(a.name || "Your pet")} ${a.restored ? "is back home" : "lives in Home now"}</b>${a.conv && conv(a.conv) ? `<button class="pi-go" data-pgo="${a.conv}">Open Home</button>` : ""}`;
     else if (a.state === "declined") body = `<div class="pi-big">🐾</div><b>Maybe another time</b>`;
+    else if (a.state === "ended") body = `<div class="pi-big">${a.emoji || "🐾"}</div><b>${esc(mine ? "You" : who)} unpaired ${esc(a.name || "the pet")}</b><small>${esc(a.name || "The pet")} is kept safe. If you both want, share a pet again and bring ${esc(a.name || "it")} back.</small>`;
     else if (mine) body = `<div class="pi-big wait">🐾</div><b>Pet invite sent</b><small>Waiting…</small>`;
     else body = `<div class="pi-big wiggle">🐾</div><b>${esc(who)} wants to share a pet with you</b><small>You'll feed it, play with it and keep a streak together.</small><div class="pi-row"><button class="pi-yes" data-pyes="${m.id}">Accept</button><button class="pi-no" data-pno="${m.id}">Not now</button></div>`;
     return `<div class="petinv">${body}</div>`;
@@ -1629,6 +1630,7 @@
         <div class="iacts"><button data-i="rename"><i>✏️</i>Rename</button><button data-i="search"><i>🔍</i>Search</button>
           <button data-i="mute"><i>${isMuted(c) ? "🔕" : "🔔"}</i>${isMuted(c) ? "Muted" : "Mute"}</button></div>
         ${themeRow(c)}
+        <button class="sbtn danger pi-unpair" id="piUnpair">Unpair ${esc(p0.name)}…</button>
         <div class="hm-credit" style="text-align:center;margin:6px 0">Animated emoji © Google, CC BY 4.0</div>
         <div class="chips tabs itabs"><button data-t="care" class="on">🔥 Care</button><button data-t="notes">📝 Lists</button><button data-t="rem">⏰ Reminders</button></div>
         <div id="ibody"></div>
@@ -1651,6 +1653,18 @@
       }
     });
     const body = $("#ibody", page);
+    $("#piUnpair", page).onclick = () => {
+      const pet = petOf(conv(c.id)), them = dn(other(conv(c.id))) || "your partner";
+      const s = sheet(`<div class="petpick"><h3>Unpair ${esc(pet.name)}?</h3>
+        <p class="hint" style="text-align:left">${esc(pet.name)} and its Home go away for both of you, and ${esc(them)} will see that you ended it. You can't undo it alone: nothing is deleted, and if you both want ${esc(pet.name)} back, share a pet again and choose to bring it back.</p>
+        <button class="pi-yes wide danger" id="upGo">Unpair ${esc(pet.name)}</button><button class="sbtn wide" id="upNo">Keep ${esc(pet.name)}</button></div>`);
+      $("#upNo", s).onclick = () => s.remove();
+      $("#upGo", s).onclick = async (e) => {
+        const btn = e.currentTarget; btn.disabled = true;
+        try { await api(`/api/pets/${c.id}/unpair`, { body: {} }); s.remove(); page.remove(); toast(`${pet.name} is unpaired`); }
+        catch (x) { btn.disabled = false; toast(x.message); }
+      };
+    };
     let tab = "care";
     const show = async (t) => {
       tab = t; $$(".itabs button", page).forEach((b) => b.classList.toggle("on", b.dataset.t === t));

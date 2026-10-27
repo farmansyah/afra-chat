@@ -5900,6 +5900,30 @@ def _pet_restore(c, p) -> int:
     return p["conv_id"]
 
 
+@app.post("/api/pets/{cid}/unpair")
+async def pet_unpair_self(cid: int, authorization: str = Header(None)):
+    """Either person of the couple can end the pet, alone (a fight, a breakup). It is kept archived: a new pet invite can bring it back, if both agree."""
+    u = auth(authorization)
+    with closing(db()) as c:
+        _member(c, cid, u["id"])
+        p = _pet_of(c, cid)
+        if p["archived"]:
+            raise HTTPException(404, "No pet here")
+        other = p["user_b"] if u["id"] == p["user_a"] else p["user_a"]
+        d = c.execute("SELECT id FROM convs WHERE key=?", ("direct:" + ",".join(map(str, sorted((p["user_a"], p["user_b"])))),)).fetchone()
+        _pet_unpair(c, p)
+        m = None
+        if d:  # a small card in their chat, so neither is left wondering where the pet went
+            m = _insert_msg(c, d["id"], u["id"], "petinvite", f"🐾 {_first(u)} unpaired {p['name']}",
+                            {"from": u["id"], "to": other, "state": "ended", "name": p["name"], "emoji": SPECIES.get(p["species"], "🐾")})
+        c.commit()
+    for x in (p["user_a"], p["user_b"]):
+        await send_to(x, {"t": "conv_gone", "conv": cid, "pet": True})
+    if m:
+        await _bcast_msg(d["id"], m, u)
+    return {"ok": True}
+
+
 @app.get("/api/admin/pets")
 def admin_pets(authorization: str = Header(None)):
     admin(authorization)

@@ -1444,3 +1444,6 @@ body.ro #compose, body.ro #quick, body.ro #replybar, body.ro #typing { display: 
 .pp-or { margin: 10px 0 0; text-align: center; color: var(--muted); font: 600 13px var(--sans); }
 @keyframes clFade { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .cl-over, .cl-card { animation: none; } }
+.pi-unpair { display: block; margin: 10px auto 2px; min-height: 44px; }
+.petpick .pi-yes.danger { background: #e5486b; color: #fff !important; }
+.petpick .sbtn.wide { width: 100%; min-height: 44px; margin-top: 8px; }
