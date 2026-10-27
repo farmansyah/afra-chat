@@ -3,7 +3,7 @@
    (c) 2026 danafarmansyah. All rights reserved. Crafted with love. */
 (() => {
   "use strict";
-  const APP_V = 32;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
+  const APP_V = 33;  // must match afra-chat-vNN in sw.js: the server compares it with /api/version to know when this copy is old
   const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() / 1000;
@@ -342,10 +342,13 @@
       applyMood(e.user, e.mood);
     } else if (e.t === "home") {
       onHomeEvent(e);
-    } else if (e.t === "conv_gone") {  // the admin deleted the other person's account
+    } else if (e.t === "conv_gone") {  // the admin deleted the other person's account, or unpaired a pet (its Home goes)
       S.convs = S.convs.filter((c) => c.id !== e.conv); delete S.msgs[e.conv];
       if (S.cur === e.conv) { S.cur = null; setView("list"); history.replaceState(null, "", location.pathname); }
-      cacheSave(); drawList(); badge();
+      if (H.cid === e.conv) { killLot(); H.cid = 0; H.data = null; if (V30.page) V30.page.remove(), V30.page = null; if (S.tab === "home") homeOpen(); }
+      cacheSave(); drawList(); badge(); tabBadges();
+    } else if (e.t === "closing") {
+      clApply({ ...e, exempt: !!(S.me && S.me.is_admin) });
     }
   }
   function inAppNotice(c, m) {  // a banner slides down from the top; tap to open, swipe up (or wait) to dismiss
@@ -514,6 +517,7 @@
         <div class="typing-line" id="typing"></div>
         <div id="replybar"></div>
         <div class="quick" id="quick"></div>
+        <button class="ro-bar" id="roBar">🔒 A.F.R.A is read-only now</button>
         <div class="compose" id="compose">
           <button class="cbtn plus" id="battach" title="Attach" aria-label="Attach"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
           <div class="pill"><textarea id="txt" rows="1" placeholder="Message"></textarea><button class="cbtn" id="bemoji" title="Emoji">😊</button></div>
@@ -1577,7 +1581,7 @@
   function petInviteCard(m, c) {
     const a = m.attachment || {}, mine = a.from === S.me.id, who = mine ? "You" : dn(other(c)) || "They";
     let body;
-    if (a.state === "accepted") body = `<div class="pi-big">${a.emoji || "🐾"}</div><b>${esc(a.name || "Your pet")} lives in Home now</b>${a.conv && conv(a.conv) ? `<button class="pi-go" data-pgo="${a.conv}">Open Home</button>` : ""}`;
+    if (a.state === "accepted") body = `<div class="pi-big">${a.emoji || "🐾"}</div><b>${esc(a.name || "Your pet")} ${a.restored ? "is back home" : "lives in Home now"}</b>${a.conv && conv(a.conv) ? `<button class="pi-go" data-pgo="${a.conv}">Open Home</button>` : ""}`;
     else if (a.state === "declined") body = `<div class="pi-big">🐾</div><b>Maybe another time</b>`;
     else if (mine) body = `<div class="pi-big wait">🐾</div><b>Pet invite sent</b><small>Waiting…</small>`;
     else body = `<div class="pi-big wiggle">🐾</div><b>${esc(who)} wants to share a pet with you</b><small>You'll feed it, play with it and keep a streak together.</small><div class="pi-row"><button class="pi-yes" data-pyes="${m.id}">Accept</button><button class="pi-no" data-pno="${m.id}">Not now</button></div>`;
@@ -1590,20 +1594,24 @@
   }
   function acceptPet(mid, stay) {
     let sp = "cat";
-    const s = sheet(`<div class="petpick"><h3>Choose your pet 🐾</h3><div class="pp-sp">${PET_SPECIES.filter(([k]) => LOT_CODE[k]).map(([k, e]) => `<button data-sp="${k}" class="${k === sp ? "on" : ""}">${e}</button>`).join("")}</div>
+    const im = Object.values(S.msgs).flat().find((x) => x && x.id === mid), old = ((im && im.attachment) || {}).old || [];
+    const done = async (r) => {
+      if (r.conv && !conv(r.conv.id)) S.convs.unshift(r.conv);
+      cacheSave(); drawList();
+      if (stay) { H.cid = r.conv.id; H.data = null; H.pending = []; setTab("home"); setTimeout(() => burstAt($("#hmPet") || document.body, "💗", 10), 600); return; }
+      await openConv(r.conv.id); const pe = $("#hpet"); if (pe) { pe.classList.add("hop"); burstAt(pe, "💗", 10); }
+    };
+    const s = sheet(`<div class="petpick">${old.length ? `<h3>Welcome back? 🐾</h3><div class="pp-old">${old.map((o) => `<button class="pp-back" data-old="${o.id}"><i>${esc(o.emoji)}</i><span><b>Bring back ${esc(o.name)}</b><small>Everything as it was: coins, room, chat and memories</small></span></button>`).join("")}</div><p class="pp-or">or start with a new pet</p>` : ""}<h3>${old.length ? "A new pet" : "Choose your pet 🐾"}</h3><div class="pp-sp">${PET_SPECIES.filter(([k]) => LOT_CODE[k]).map(([k, e]) => `<button data-sp="${k}" class="${k === sp ? "on" : ""}">${e}</button>`).join("")}</div>
       <input id="ppName" maxlength="20" placeholder="Give it a name" autocomplete="off"><button class="pi-yes wide" id="ppGo">Welcome home</button></div>`);
     $$("[data-sp]", s).forEach((b) => b.onclick = () => { sp = b.dataset.sp; $$("[data-sp]", s).forEach((x) => x.classList.toggle("on", x === b)); burstAt(b, b.textContent, 4); });
-    $("#ppName", s).focus();
+    if (!old.length) $("#ppName", s).focus();
     $("#ppGo", s).onclick = async () => {
       const name = $("#ppName", s).value.trim(); if (!name) return toast("Give your pet a name");
-      try {
-        const r = await api(`/api/pets/invite/${mid}`, { body: { answer: "accept", species: sp, name } });
-        s.remove(); if (r.conv && !conv(r.conv.id)) S.convs.unshift(r.conv);
-        cacheSave(); drawList();
-        if (stay) { H.cid = r.conv.id; H.data = null; H.pending = []; setTab("home"); setTimeout(() => burstAt($("#hmPet") || document.body, "💗", 10), 600); return; }
-        await openConv(r.conv.id); const pe = $("#hpet"); if (pe) { pe.classList.add("hop"); burstAt(pe, "💗", 10); }
-      } catch (x) { toast(x.message); }
+      try { const r = await api(`/api/pets/invite/${mid}`, { body: { answer: "accept", species: sp, name } }); s.remove(); await done(r); } catch (x) { toast(x.message); }
     };
+    $$("[data-old]", s).forEach((b) => b.onclick = async () => {
+      try { const r = await api(`/api/pets/invite/${mid}`, { body: { answer: "accept", restore: +b.dataset.old } }); s.remove(); await done(r); } catch (x) { toast(x.message); }
+    });
   }
   async function sharePet() {
     const c = conv(S.cur); if (!c || c.kind !== "direct") return;
@@ -2362,7 +2370,7 @@
   async function adminPage() {
     const page = document.createElement("div"); page.className = "page";
     page.innerHTML = `<div class="top"><button class="icon" id="pBack">‹</button><h1>🛡 Admin</h1></div>
-      <div class="chips tabs"><button data-t="home" class="on">Overview</button><button data-t="users">People</button><button data-t="inv">Invites</button><button data-t="notify">📣 Notify</button><button data-t="ai">🤖 AI</button></div>
+      <div class="chips tabs"><button data-t="home" class="on">Overview</button><button data-t="users">People</button><button data-t="inv">Invites</button><button data-t="notify">📣 Notify</button><button data-t="ai">🤖 AI</button><button data-t="pets">🐾 Pets</button><button data-t="close">🚪 Close app</button></div>
       <div class="page-body" id="adm"></div>`;
     document.body.appendChild(page);
     const pclose = () => { if (page.classList.contains("closing")) return; page.classList.add("closing"); setTimeout(() => page.remove(), 200); };
@@ -2401,6 +2409,10 @@
           notifyForm(el); stormCard(el);
         } else if (t === "ai") {
           aiUsage(el);
+        } else if (t === "pets") {
+          adminPets(el);
+        } else if (t === "close") {
+          adminClose(el);
         } else if (t === "inv") {
           const inv = await api("/api/admin/invites");
           el.innerHTML = `<div class="note">Make an invite code and send the link. They choose their own username and password, and their chat with you starts right away.</div>
@@ -3197,6 +3209,55 @@
       sw.disabled = true;
       try { const r = await api("/api/admin/settings", { method: "PUT", body: { pet_ai: sw.checked } }); toast(r.pet_ai ? "The pet uses AI again" : "The pet uses built-in lines"); }
       catch (x) { sw.checked = !sw.checked; toast(x.message); } finally { sw.disabled = false; }
+    };
+  }
+
+
+  // ---- admin: pets (unpair keeps everything so it can come back) and closing the app
+  async function adminPets(el) {
+    const paint = (list) => {
+      el.innerHTML = `<div class="note">Unpairing hides a pet and its Home from both people. Nothing is deleted: you can restore it here, or they can bring it back when they share a pet again.</div>
+        ${list.map((p) => `<div class="urow apet ${p.archived ? "off" : ""}"><span class="apet-e">${esc(p.emoji)}</span><div class="mid"><b>${esc(p.name)}</b>${p.archived ? ` <span class="pill">unpaired</span>` : ""}
+          <small>${esc(p.a)} & ${esc(p.b)} · since ${shortTime(p.born)}${p.archived ? " · unpaired " + shortTime(p.archived) : ` · ${p.coins} coins · streak ${p.streak}`}</small></div>
+          ${p.archived ? (p.can_restore ? `<button class="sbtn" data-rs="${p.id}">Restore</button>` : `<small class="hint">They share another pet</small>`) : `<button class="sbtn danger" data-up="${p.id}">Unpair</button>`}</div>`).join("") || `<div class="hint">No pets yet.</div>`}`;
+      $$("[data-up]", el).forEach((b) => b.onclick = async () => {
+        const p = list.find((x) => x.id === +b.dataset.up);
+        if (!confirm(`Unpair ${p.name}?\n\nThe pet and its Home disappear for ${p.a} and ${p.b}. Everything is kept and can be restored.`)) return;
+        try { paint(await api(`/api/admin/pets/${p.id}/unpair`, { body: {} })); toast(`${p.name} is unpaired`); } catch (x) { toast(x.message); }
+      });
+      $$("[data-rs]", el).forEach((b) => b.onclick = async () => {
+        const p = list.find((x) => x.id === +b.dataset.rs);
+        if (!confirm(`Bring ${p.name} back for ${p.a} and ${p.b}?`)) return;
+        try { paint(await api(`/api/admin/pets/${p.id}/restore`, { body: {} })); toast(`${p.name} is back home 🐾`); } catch (x) { toast(x.message); }
+      });
+    };
+    paint(await api("/api/admin/pets"));
+  }
+  async function adminClose(el) {
+    const st = await api("/api/closing");
+    let mode = st.mode || "readonly";
+    el.innerHTML = `<label class="swrow aisw"><span><b>Close the app</b><small>Everyone except admins sees your message</small></span><input type="checkbox" class="swtog" id="clOn" ${st.mode ? "checked" : ""}></label>
+      <div class="cl-modes" id="clModes">
+        <label class="cl-mode"><input type="radio" name="clm" value="readonly" ${mode === "readonly" ? "checked" : ""}><span><b>Read-only</b><small>A pop-up, then people can still read their chats and save their photos, but nothing new can be sent. Pets, reminders and nudges go quiet.</small></span></label>
+        <label class="cl-mode"><input type="radio" name="clm" value="notice" ${mode === "notice" ? "checked" : ""}><span><b>Notice only</b><small>A pop-up once for each person. The app keeps working as normal.</small></span></label></div>
+      <div class="field"><label>Message</label><textarea class="inp" id="clMsg" maxlength="500" rows="3">${esc(st.msg)}</textarea></div>
+      <h4>Preview</h4><div class="cl-prev"><div class="cl-card"><div class="cl-ico">♥</div><h3>A.F.R.A</h3><p id="clPv"></p><small id="clPs"></small><button class="pi-yes wide" disabled>Okay</button></div></div>
+      <button class="big-btn" id="clSave" style="margin-top:12px">Save</button><div class="hint" id="clNow" style="margin-top:8px"></div>`;
+    const on = $("#clOn", el), msg = $("#clMsg", el);
+    const pv = () => {
+      mode = ($("[name=clm]:checked", el) || {}).value || "readonly";
+      $("#clPv", el).textContent = msg.value.trim() || "The app will no longer be of service.";
+      $("#clPs", el).textContent = mode === "readonly" ? "You can still open your chats, read everything and save your photos. Sending new things is turned off." : "";
+      $("#clModes", el).classList.toggle("dim", !on.checked);
+    };
+    const now = (x) => { $("#clNow", el).textContent = x.mode ? `On now: ${x.mode === "readonly" ? "read-only" : "notice only"}, since ${shortTime(x.at)}.` : "The app is open for everyone."; };
+    msg.oninput = on.onchange = pv; $$("[name=clm]", el).forEach((r) => r.onchange = pv); pv(); now(st);
+    $("#clSave", el).onclick = async (e) => {
+      const body = { mode: on.checked ? mode : "", msg: msg.value.trim() };
+      if (on.checked && !confirm(mode === "readonly" ? "Close the app for everyone?\n\nThey'll see your message and can only read from now on. You can switch it back any time." : "Show this notice to everyone?")) return;
+      const btn = e.currentTarget; btn.disabled = true;
+      try { const r = await api("/api/admin/closing", { method: "PUT", body }); now(r); toast(r.mode ? "Saved. Everyone sees it now" : "The app is open again ♥"); }
+      catch (x) { toast(x.message); } finally { btn.disabled = false; }
     };
   }
 
@@ -5170,13 +5231,34 @@
   }
 
 // ------------------------------------------------------------------ start
+
+  // ------------------------------------------------------------------ v33: the admin closed the app (a notice, or read-only). Admins never see it.
+  const CL = { st: null, shownAt: -1 };
+  async function clLoad() { if (!TOKEN || !S.me) return; try { clApply(await api("/api/closing")); } catch { } }
+  function clApply(st) {
+    CL.st = st; const ro = st.mode === "readonly" && !st.exempt;
+    document.body.classList.toggle("ro", ro);
+    if (st.exempt || !st.mode) { const o = $(".cl-over"); if (o) o.remove(); return; }
+    if (st.mode === "notice" ? store.get("clSeen", 0) !== st.at : CL.shownAt !== st.at) clShow();
+  }
+  function clShow() {
+    const st = CL.st; if (!st || !st.mode || $(".cl-over")) return;
+    CL.shownAt = st.at;
+    const o = document.createElement("div"); o.className = "cl-over"; o.setAttribute("role", "dialog"); o.setAttribute("aria-modal", "true");
+    o.innerHTML = `<div class="cl-card"><div class="cl-ico">♥</div><h3>A.F.R.A</h3><p>${esc(st.msg)}</p>
+      ${st.mode === "readonly" ? `<small>You can still open your chats, read everything and save your photos. Sending new things is turned off.</small>` : ""}
+      <button class="pi-yes wide" id="clOk">Okay</button></div>`;
+    document.body.appendChild(o); haptic([10]);
+    $("#clOk", o).onclick = () => { if (st.mode === "notice") store.set("clSeen", st.at); o.classList.add("closing"); setTimeout(() => o.remove(), 220); };
+  }
   async function start() {
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(() => { });
     checkUpdate(true);
     if (!TOKEN) return authScreen();
     S.me = S.me || store.get("cache", {}).me || null;
     if (!S.me) { try { S.me = await api("/api/me"); } catch (e) { if (!TOKEN) return; return authScreen(); } }
-    cacheLoad(); shell(); connect(); pwGate(); reportDevice(); loadPrefs();
+    cacheLoad(); shell(); connect(); pwGate(); reportDevice(); loadPrefs(); clLoad();
+    document.addEventListener("click", (e) => { if (e.target.closest && e.target.closest("#roBar")) { CL.shownAt = -1; clShow(); } });
     toAfra({ type: "ready", me: { username: S.me.username, name: S.me.name } });
     const want = +(new URLSearchParams(location.hash.slice(1)).get("c") || 0);
     let back = null; try { back = JSON.parse(sessionStorage.getItem("afra_resume") || "null"); sessionStorage.removeItem("afra_resume"); } catch { }
@@ -5191,7 +5273,7 @@
   }
   document.addEventListener("visibilitychange", () => {
     sendVis(); if (T.us && isVisible()) usPresence(T.us.cid, true);
-    if (document.visibilityState === "visible") checkUpdate();
+    if (document.visibilityState === "visible") { checkUpdate(); clLoad(); }
     if (isVisible() && TOKEN && S.me) {
       autoWhere();
       if (!WS || WS.readyState > 1) connect(); else resync();

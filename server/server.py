@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS places (user_id INTEGER, name TEXT, lat REAL, lon REA
 CREATE TABLE IF NOT EXISTS pets (id INTEGER PRIMARY KEY, conv_id INTEGER UNIQUE, bot_id INTEGER, user_a INTEGER, user_b INTEGER,
   name TEXT, species TEXT, born REAL, hunger REAL DEFAULT 80, joy REAL DEFAULT 80, energy REAL DEFAULT 80, stats_at REAL,
   xp INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, last_care_day TEXT DEFAULT '',
-  last_nudge_day TEXT DEFAULT '', cds TEXT DEFAULT '{}', sleep_until REAL DEFAULT 0, UNIQUE (user_a, user_b));
+  last_nudge_day TEXT DEFAULT '', cds TEXT DEFAULT '{}', sleep_until REAL DEFAULT 0);  -- one active pet per couple: index pets_pair_active
 CREATE TABLE IF NOT EXISTS pet_days (pet_id INTEGER, day TEXT, data TEXT DEFAULT '{}', PRIMARY KEY (pet_id, day));
 CREATE TABLE IF NOT EXISTS pet_items (pet_id INTEGER, item TEXT, qty INTEGER DEFAULT 0, PRIMARY KEY (pet_id, item));
 CREATE TABLE IF NOT EXISTS pet_log (id INTEGER PRIMARY KEY, pet_id INTEGER, kind TEXT, text TEXT, at REAL, day TEXT DEFAULT '', file TEXT DEFAULT '');
@@ -180,7 +180,7 @@ with closing(db()) as _c:
         if _col not in [r[1] for r in _c.execute(f"PRAGMA table_info({_t})")]:
             _c.execute(f"ALTER TABLE {_t} ADD COLUMN {_col} {_def}")
     for _col, _def in (("coins", "INTEGER DEFAULT 0"), ("fed_days", "INTEGER DEFAULT 0"), ("stage", "INTEGER DEFAULT 0"),  # v19: shared wallet, growth
-                       ("outfit", "TEXT DEFAULT ''"), ("room", "TEXT DEFAULT '{}'")):
+                       ("outfit", "TEXT DEFAULT ''"), ("room", "TEXT DEFAULT '{}'"), ("archived", "REAL DEFAULT 0")):  # v33: unpaired by the admin, kept to restore
         if _col not in [r[1] for r in _c.execute("PRAGMA table_info(pets)")]:
             _c.execute(f"ALTER TABLE pets ADD COLUMN {_col} {_def}")
             if _col == "stage":  # pets that already exist grow from the days they were already fed
@@ -192,9 +192,35 @@ with closing(db()) as _c:
                         except ValueError:
                             pass
                     _c.execute("UPDATE pets SET fed_days=?, stage=? WHERE id=?", (_n, sum(1 for x in STAGE_DAYS if _n >= x), _p[0]))
+    # v33: an unpaired pet is kept beside a new one, so "one pet per couple" only applies to pets still paired (the old table said UNIQUE for all)
+    _ps = _c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='pets'").fetchone()[0]
+    if re.search(r",\s*UNIQUE\s*\(\s*user_a\s*,\s*user_b\s*\)", _ps):
+        _c.execute(re.sub(r",\s*UNIQUE\s*\(\s*user_a\s*,\s*user_b\s*\)", "", re.sub(r"^CREATE TABLE (IF NOT EXISTS )?\"?pets\"?", "CREATE TABLE pets_v33", _ps)))
+        _c.execute("INSERT INTO pets_v33 SELECT * FROM pets")
+        _c.execute("DROP TABLE pets")
+        _c.execute("ALTER TABLE pets_v33 RENAME TO pets")
+    _c.execute("CREATE UNIQUE INDEX IF NOT EXISTS pets_pair_active ON pets (user_a, user_b) WHERE archived=0")
     _c.commit()
 
 app = FastAPI(title="A.F.R.A chat", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def _readonly_gate(request, call_next):
+    """While the app is closed (read-only), every write from a non-admin is refused with the admin's message."""
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.url.path.startswith("/api/") and not _RO_ALLOW.search(request.url.path):
+        st = closing_state()
+        if st["mode"] == "readonly":
+            tok = (request.headers.get("authorization") or "").removeprefix("Bearer ").strip()
+            is_admin = False
+            if tok:
+                try:
+                    is_admin = bool(user_for(tok)["is_admin"])
+                except Exception:
+                    is_admin = False
+            if not is_admin:
+                return JSONResponse({"detail": "A.F.R.A is read-only now. " + st["msg"], "closed": True}, status_code=423)
+    return await call_next(request)
 SOCKETS: dict[int, dict[str, dict]] = {}  # user id -> device -> {"ws": WebSocket, "visible": bool}
 US_HERE: dict[int, dict[int, str]] = {}  # live touch: conv id -> {user id: device} for everyone who has the Us screen open right now
 US_PAIR: dict[tuple, int] = {}  # (user, conv) -> the other person of a direct chat (0 = not a couple chat)
@@ -1357,6 +1383,31 @@ def set_setting(key: str, value: str):
         c.commit()
 
 
+# ---- v33: the admin can close the app. "notice": everyone sees a pop-up once and the app keeps working; "readonly": a pop-up, then people can
+# read their chats and save their photos but nothing new can be sent. Admins are never affected. Switching it off brings everything back.
+CLOSING_DEFAULT = "The app will no longer be of service."
+_CLOSING = {"at": -1.0, "v": None}
+
+
+def closing_state() -> dict:
+    """{mode: "" | "notice" | "readonly", msg, at}; cached for 5 s because the request filter asks on every write."""
+    if time.time() - _CLOSING["at"] > 5 or _CLOSING["v"] is None:
+        try:
+            v = json.loads(get_setting("closing", "{}") or "{}")
+        except ValueError:
+            v = {}
+        _CLOSING.update(at=time.time(), v={"mode": v.get("mode") if v.get("mode") in ("notice", "readonly") else "", "msg": v.get("msg") or CLOSING_DEFAULT, "at": v.get("at") or 0})
+    return _CLOSING["v"]
+
+
+def closing_mode() -> str:
+    return closing_state()["mode"]
+
+
+# writes still allowed while read-only: signing in and out, read receipts, push and device registration, error reports, and the admin
+_RO_ALLOW = re.compile(r"^/api/(login|logout|clienterror|device|push|me/prefs|admin)(/|$)|^/api/convs/\d+/read$")
+
+
 def pet_ai_on() -> bool:
     return get_setting("pet_ai", "1") != "0"
 
@@ -1527,6 +1578,9 @@ async def _nudge_unread():
 async def _reminders():
     while True:
         try:
+            if closing_mode() == "readonly":  # the app is closed: no reminders, pet nudges or couple jobs until it opens again
+                await asyncio.sleep(15)
+                continue
             with closing(db()) as c:
                 due = c.execute("SELECT * FROM reminders WHERE done=0 AND place='' AND due>0 AND due<=?", (time.time(),)).fetchall()
             for r in due:
@@ -1709,7 +1763,7 @@ def _first(u) -> str:
 
 
 def _pet_for(c, a: int, b: int):
-    return c.execute("SELECT * FROM pets WHERE user_a=? AND user_b=?", (min(a, b), max(a, b))).fetchone()
+    return c.execute("SELECT * FROM pets WHERE user_a=? AND user_b=? AND archived=0", (min(a, b), max(a, b))).fetchone()
 
 
 def _pet_of(c, cid: int):
@@ -2087,8 +2141,10 @@ async def pet_invite(cid: int, authorization: str = Header(None)):
         if c.execute("SELECT 1 FROM messages WHERE conv_id=? AND kind='petinvite' AND deleted=0 AND created>? AND attachment LIKE '%\"pending\"%'",
                      (cid, time.time() - 7 * 86400)).fetchone():
             raise ValueError("You already asked. Waiting for an answer 🐾")
+        old = [{"id": r["id"], "name": r["name"], "emoji": SPECIES.get(r["species"], "🐾")} for r in c.execute(
+            "SELECT * FROM pets WHERE user_a=? AND user_b=? AND archived>0 ORDER BY archived DESC", (min(u["id"], o["id"]), max(u["id"], o["id"])))]
         m = _insert_msg(c, cid, u["id"], "petinvite", f"🐾 {_first(u)} wants to share a pet with you",
-                        {"from": u["id"], "to": o["id"], "state": "pending"})
+                        {"from": u["id"], "to": o["id"], "state": "pending", **({"old": old} if old else {})})
         c.commit()
     await _bcast_msg(cid, m, u)
     return m
@@ -2108,7 +2164,16 @@ async def pet_invite_answer(mid: int, body: dict, authorization: str = Header(No
             raise ValueError("This invite isn't waiting for you.")
         inviter = c.execute("SELECT * FROM users WHERE id=?", (att["from"],)).fetchone()
         new_cid = 0
-        if answer == "accept":
+        if answer == "accept" and body.get("restore"):  # bring back a pet the two used to share
+            if _pet_for(c, u["id"], inviter["id"]):
+                raise ValueError("You already share a pet 🐾")
+            old = c.execute("SELECT * FROM pets WHERE id=? AND user_a=? AND user_b=? AND archived>0",
+                            (int(body["restore"]), min(u["id"], inviter["id"]), max(u["id"], inviter["id"]))).fetchone()
+            if not old:
+                raise ValueError("That pet can't come back. Choose a new one instead.")
+            new_cid = _pet_restore(c, old)
+            att.update(state="accepted", conv=new_cid, name=old["name"], emoji=SPECIES.get(old["species"], "🐾"), restored=True)
+        elif answer == "accept":
             species = body.get("species")
             name = re.sub(r"\s+", " ", str(body.get("name") or "")).strip()[:20]
             if species not in SPECIES:
@@ -2397,7 +2462,7 @@ async def _pet_evening():
     PET_CHECK[0] = time.time()
     todo = []
     with closing(db()) as c:
-        for p in c.execute("SELECT * FROM pets").fetchall():
+        for p in c.execute("SELECT * FROM pets WHERE archived=0").fetchall():
             lt = datetime.now(_pet_tz(c, p))
             day = lt.strftime("%Y-%m-%d")
             if p["last_nudge_day"] == day or not 19 <= lt.hour < 23:
@@ -3390,7 +3455,7 @@ async def _couple_jobs():
     acts = []
     with closing(db()) as c:
         pairs = {}
-        for p in c.execute("SELECT * FROM pets").fetchall():
+        for p in c.execute("SELECT * FROM pets WHERE archived=0").fetchall():
             pr = _pair_build(c, p["user_a"], p["user_b"], p)
             pairs[pr["direct"]] = pr
         for r in c.execute("SELECT conv_id FROM pair_dates").fetchall():
@@ -4648,7 +4713,7 @@ def _lt(tz, now: float = 0):
 def _pairs_all(c) -> list:
     """Every couple we know about: those with a pet and those with saved dates (same set as _couple_jobs)."""
     pairs = {}
-    for p in c.execute("SELECT * FROM pets").fetchall():
+    for p in c.execute("SELECT * FROM pets WHERE archived=0").fetchall():
         pr = _pair_build(c, p["user_a"], p["user_b"], p)
         pairs[pr["direct"]] = pr
     for r in c.execute("SELECT conv_id FROM pair_dates").fetchall():
@@ -5465,6 +5530,8 @@ async def ws(sock: WebSocket, token: str = "", device: str = "device"):
                     await us_leave(uid, dev)
             elif m.get("t") == "ping":
                 await sock.send_text('{"t":"pong"}')
+            elif m.get("t") in ("game_draw", "us_tap") and closing_mode() == "readonly" and not u["is_admin"]:
+                pass  # the app is closed: nothing new
             elif m.get("t") == "game_draw":
                 try:
                     await game_draw_relay(uid, m)
@@ -5813,6 +5880,90 @@ def devices_of(c, uid: int) -> list:
                     "push": s["device"] in pushed, "screen": info.get("screen", ""), "lang": info.get("lang", ""),
                     "tz": info.get("tz", ""), "dark": info.get("dark") == "True", "app": info.get("app", ""), "ua": info.get("ua", "")})
     return out
+
+
+def _pet_unpair(c, p) -> int:
+    """Hide a pet and its Home from both people, keeping everything (coins, items, its chat, lists) so it can come back."""
+    c.execute("UPDATE pets SET archived=? WHERE id=?", (time.time(), p["id"]))
+    c.execute("DELETE FROM members WHERE conv_id=? AND user_id IN (?,?)", (p["conv_id"], p["user_a"], p["user_b"]))
+    c.execute("UPDATE convs SET key=? WHERE id=?", (f"pet:{p['user_a']}:{p['user_b']}:off:{p['id']}", p["conv_id"]))  # frees the couple's Home key for a new pet
+    return p["conv_id"]
+
+
+def _pet_restore(c, p) -> int:
+    """Bring an unpaired pet and its Home back for both people, as it was."""
+    now = time.time()
+    c.execute("UPDATE pets SET archived=0, stats_at=? WHERE id=?", (now, p["id"]))  # its mood isn't punished for the time it was away
+    c.execute("UPDATE convs SET key=? WHERE id=?", (f"pet:{p['user_a']}:{p['user_b']}", p["conv_id"]))
+    for uid in (p["user_a"], p["user_b"]):
+        c.execute("INSERT OR IGNORE INTO members (conv_id, user_id, last_read) VALUES (?,?,?)", (p["conv_id"], uid, now))
+    return p["conv_id"]
+
+
+@app.get("/api/admin/pets")
+def admin_pets(authorization: str = Header(None)):
+    admin(authorization)
+    with closing(db()) as c:
+        names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM users")}
+        out = []
+        for p in c.execute("SELECT * FROM pets ORDER BY archived>0, id DESC"):
+            active = p["archived"] == 0
+            out.append({"id": p["id"], "name": p["name"], "emoji": SPECIES.get(p["species"], "🐾"), "a": names.get(p["user_a"], "?"), "b": names.get(p["user_b"], "?"),
+                        "born": p["born"], "archived": p["archived"], "coins": p["coins"], "stage": p["stage"], "streak": p["streak"],
+                        "can_restore": not active and not _pet_for(c, p["user_a"], p["user_b"])})
+    return out
+
+
+@app.post("/api/admin/pets/{pid}/unpair")
+async def admin_pet_unpair(pid: int, authorization: str = Header(None)):
+    admin(authorization)
+    with closing(db()) as c:
+        p = c.execute("SELECT * FROM pets WHERE id=? AND archived=0", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "That pet isn't paired")
+        cid = _pet_unpair(c, p)
+        c.commit()
+    for uid in (p["user_a"], p["user_b"]):
+        await send_to(uid, {"t": "conv_gone", "conv": cid, "pet": True})
+    return admin_pets(authorization)
+
+
+@app.post("/api/admin/pets/{pid}/restore")
+async def admin_pet_restore(pid: int, authorization: str = Header(None)):
+    admin(authorization)
+    with closing(db()) as c:
+        p = c.execute("SELECT * FROM pets WHERE id=? AND archived>0", (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "That pet isn't archived")
+        if _pet_for(c, p["user_a"], p["user_b"]):
+            raise ValueError("Those two share another pet now. Unpair that one first.")
+        cid = _pet_restore(c, p)
+        c.commit()
+    for uid in (p["user_a"], p["user_b"]):
+        with closing(db()) as c:
+            await send_to(uid, {"t": "conv", "conv": conv_view(c, cid, uid)})
+    return admin_pets(authorization)
+
+
+@app.get("/api/closing")
+def closing_get(authorization: str = Header(None)):
+    u = auth(authorization)
+    return {**closing_state(), "exempt": bool(u["is_admin"])}
+
+
+@app.put("/api/admin/closing")
+async def admin_closing(body: dict, authorization: str = Header(None)):
+    admin(authorization)
+    mode = body.get("mode") if body.get("mode") in ("notice", "readonly") else ""
+    msg = " ".join(str(body.get("msg") or "").split())[:500] or CLOSING_DEFAULT
+    set_setting("closing", json.dumps({"mode": mode, "msg": msg, "at": time.time() if mode else 0}))
+    _CLOSING["v"] = None
+    st = closing_state()
+    with closing(db()) as c:
+        ids = [r["id"] for r in c.execute("SELECT id FROM users WHERE bot=0")]
+    for uid in ids:
+        await send_to(uid, {"t": "closing", **st})
+    return st
 
 
 @app.get("/api/admin/users")
